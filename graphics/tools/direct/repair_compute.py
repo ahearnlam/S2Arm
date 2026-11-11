@@ -292,7 +292,7 @@ def main():
     parser.add_argument("--dotnet", type=Path, help=".NET 10 runtime; preparation only")
     parser.add_argument("--outliner", type=Path, help="built dsh_batch.dll; preparation only")
     parser.add_argument("--manifest", type=Path, help="Mac image manifest.json; required when the library belongs to a managed image")
-    parser.add_argument("--probe-source", type=Path, default=Path(__file__).resolve().parents[2] / "metal/compute_probe.m", help="Metal pipeline probe source; preparation only")
+    parser.add_argument("--probe-source", type=Path, default=Path(__file__).resolve().parents[2] / "metal/tests/compute_probe.m", help="Metal pipeline probe source; preparation only")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--rollback", action="store_true")

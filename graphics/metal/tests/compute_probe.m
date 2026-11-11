@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+// Standalone diagnostic executable, not an engine source.
 // Match nvn/pso_archive.h par_compute_: a compute function, default descriptor, no archives.
 int main(int argc, const char **argv) {
     @autoreleasepool {

@@ -525,7 +525,7 @@ else reg 0 "直连巨型着色器阶梯压平：本批没改到压平 / 出库�
 if touched graphics/tools/direct/dsh/Outline.cs graphics/tools/direct/dsh/Flat.cs graphics/tools/direct/tests/t_compute_outline; then
   timeout 180 python3 graphics/tools/direct/tests/t_compute_outline.py > "$LOG/compute_outline.log" 2>&1; co_=$?; reg $co_ "巨型计算入口拆分：$(tail -1 "$LOG/compute_outline.log")（退出 ${co_}）" "$LOG/compute_outline.log"
 else reg 0 "巨型计算入口拆分：本批没改到计算入口改形，不跑"; fi
-if touched graphics/tools/direct/repair_compute.py graphics/metal/compute_probe.m graphics/tools/direct/tests/t_repair_compute.py; then
+if touched graphics/tools/direct/repair_compute.py graphics/metal/tests/compute_probe.m graphics/tools/direct/tests/t_repair_compute.py; then
   timeout 30 python3 graphics/tools/direct/tests/t_repair_compute.py > "$LOG/repair_compute.log" 2>&1; cr_=$?; reg $cr_ "计算库修复与回滚：$(tail -1 "$LOG/repair_compute.log")（退出 ${cr_}）" "$LOG/repair_compute.log"
 else reg 0 "计算库修复与回滚：本批没改到本地修复脚本，不跑"; fi
 if touched graphics/tools/direct/repair_compute.py graphics/tools/direct/tests/t_repair_loader graphics/nvn/gfx/nvn/nvn_mtl.m graphics/nvn/lib_pack; then
