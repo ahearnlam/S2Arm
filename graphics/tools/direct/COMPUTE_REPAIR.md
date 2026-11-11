@@ -40,6 +40,7 @@ python3 graphics/tools/direct/repair_compute.py \
 
 - `python3 graphics/tools/direct/tests/t_compute_outline.py`：通过生产 `GiantFix` 边界验证拆分与拒绝条件，编译 Mac / iOS 合成着色器，并把 Mac GPU 结果与独立的 uint32 CPU 判据对照。
 - `python3 graphics/tools/direct/tests/t_repair_compute.py`：验证索引读取、应用、重复应用、回滚、切换中断恢复、拒绝覆盖已变化的游戏、缓存完整性。测试只使用原创合成数据。
+- `python3 graphics/tools/direct/tests/t_repair_loader.py`：通过生产 `shader_build`、库容器与 `ulibs` 缓存，分别验证同批兄弟先加载、替换函数先加载的真实 GPU 结果；恢复旧 `fn_lib` 后两种顺序都必须失败。此测试直接提供 Metal device，不验证完整宿主初始化或 NVN 命令回放。
 - 原有 `t_dmsh_giant.py` 继续验证深层控制流改形及 GPU 差分。
 
 管线创建成功不能替代 GPU 结果验证，合成计算核也不能证明全游戏正确。日志的 `still compiling after 5000 ms` 是告警，不是编译取消或 GPU 算力预算。无自建管线归档的测试仍可能命中系统编译缓存，因此不能把单次耗时当作冷编译性能数据。

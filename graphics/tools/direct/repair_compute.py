@@ -15,10 +15,8 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import struct
 import subprocess
-import sys
 import tempfile
 import zlib
 
@@ -124,14 +122,21 @@ def closed():
         raise ValueError("Quit S2Arm and all running games before switching the library index")
 
 
-def atomic(path, data):
-    temp = path.with_name(path.name + ".compute-tmp")
-    with temp.open("xb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.chmod(temp, path.stat().st_mode & 0o777)
-    os.replace(temp, path)
+def atomic(path, data, create=False):
+    fd, name = tempfile.mkstemp(prefix=path.name + ".compute-", dir=path.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp, path.stat().st_mode & 0o777 if path.exists() else 0o600)
+        if create:
+            os.link(temp, path)  # Publish a complete new shard without overwriting a concurrent writer.
+        else:
+            os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def switch(library, work, rollback=False):
@@ -159,16 +164,14 @@ def switch(library, work, rollback=False):
     shard = library.path / report["shard"]
     if not rollback:
         source = work / report["shard"]
-        if digest(source.read_bytes()) != report["shard_sha256"]:
+        data = source.read_bytes()
+        if digest(data) != report["shard_sha256"]:
             raise ValueError("Prepared repair checksum failed")
         if shard.exists():
             if digest(shard.read_bytes()) != report["shard_sha256"]:
                 raise ValueError("Repair shard name already in use")
         else:
-            with shard.open("xb") as output, source.open("rb") as inp:
-                shutil.copyfileobj(inp, output)
-                output.flush()
-                os.fsync(output.fileno())
+            atomic(shard, data, create=True)
         atomic(index, index_data)
     else:
         atomic(index, index_data)
@@ -189,11 +192,40 @@ def prepare_manifest(manifest, outliner, library, work, report):
     patched = (work / "patched.idx").read_bytes()
     info["files"][str(relative / "lib.idx")] = [len(patched), report["after"]]
     info["files"][str(relative / report["shard"])] = [(work / report["shard"]).stat().st_size, report["shard_sha256"]]
-    info["localComputeRepair"] = {"originalIndexSha256": report["before"], "outlinerSha256": digest(outliner.read_bytes()), "replaced": report["compute_replaced"]}
+    info["localComputeRepair"] = {"originalIndexSha256": report["before"], "outlinerSha256": digest(outliner.read_bytes()),
+                                "translatorSha256": digest(outliner.with_name("S2A.Dsh.dll").read_bytes()), "replaced": report["compute_replaced"]}
     updated = (json.dumps(info, indent=2, ensure_ascii=False) + "\n").encode()
     (work / "original-manifest.json").write_bytes(original)
     (work / "patched-manifest.json").write_bytes(updated)
     report.update(manifest=str(manifest), manifest_before=digest(original), manifest_after=digest(updated))
+
+
+def write_replacements(library, work, replacements):
+    records = bytearray(library.index[library.base:])
+    shard_name = f"lib.{library.shards:03}.pak"
+    with (work / shard_name).open("xb") as shard:
+        for key, data in sorted(replacements.items()):
+            # The runtime has another cache keyed by fn_lib, in addition to the container's slice cache.
+            # A single-function replacement must not retain the shared batch identity from its original JSON.
+            meta = json.loads(library.read(key, 1))
+            meta.pop("fn_lib", None)
+            reflection = (json.dumps(meta, ensure_ascii=False) + "\n").encode()
+            for kind, payload in ((0, data), (1, reflection)):
+                shard.write(b"\0" * (-shard.tell() % 16))  # Same segment alignment as LibPack.PackFiles.
+                if shard.tell() + len(payload) > 64 << 20:
+                    raise ValueError("Repair exceeds one library shard; rebuild the shader library instead")
+                offset = shard.tell()
+                shard.write(payload)
+                i, _, reserved, _, _ = library.records[key, kind]
+                RECORD.pack_into(records, i * RECORD.size, key, kind, library.shards, reserved, len(payload), offset)
+        size = shard.tell()
+    header = bytearray(library.index[:48])
+    struct.pack_into("<I", header, 16, library.shards + 1)
+    patched = header + library.index[48:library.base] + struct.pack("<QQ", size, 0) + records
+    (work / "original.idx").write_bytes(library.index)
+    (work / "patched.idx").write_bytes(patched)
+    return {"library": str(library.path), "before": digest(library.index), "after": digest(patched), "shard": shard_name,
+            "shard_sha256": digest((work / shard_name).read_bytes()), "compute_replaced": [f"{key:016x}" for key in sorted(replacements)]}
 
 
 def prepare(options, library, work):
@@ -215,7 +247,7 @@ def prepare(options, library, work):
         wanted[key] = prefix
     print(f"Checking exact cached source for {len(wanted)} compute shaders", flush=True)
     checker = work / "compute-probe"
-    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-framework", "Foundation", "-framework", "Metal", str(Path(__file__).with_name("compute_probe.m")), "-o", str(checker)], check=True, timeout=60)
+    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-framework", "Foundation", "-framework", "Metal", str(options.probe_source), "-o", str(checker)], check=True, timeout=60)
     replacements = {}
     for key, source in find_sources(options.cache, wanted):
         # Match the production outliner's size floor without launching dotnet for small kernels.
@@ -244,22 +276,8 @@ def prepare(options, library, work):
         print(f"Validated compute {name}", flush=True)
     if not replacements:
         raise ValueError("No safely outlineable large compute shaders found; installed library unchanged")
-    records = bytearray(library.index[library.base:])
-    shard_name = f"lib.{library.shards:03}.pak"
-    with (work / shard_name).open("xb") as shard:
-        for key, data in sorted(replacements.items()):
-            offset = shard.tell()
-            shard.write(data)
-            i, _, reserved, _, _ = library.records[key, 0]
-            RECORD.pack_into(records, i * RECORD.size, key, 0, library.shards, reserved, len(data), offset)
-        size = shard.tell()
-    header = bytearray(library.index[:48])
-    struct.pack_into("<I", header, 16, library.shards + 1)
-    patched = header + library.index[48:library.base] + struct.pack("<QQ", size, 0) + records
-    (work / "original.idx").write_bytes(library.index)
-    (work / "patched.idx").write_bytes(patched)
-    report = {"library": str(library.path), "before": digest(library.index), "after": digest(patched), "shard": shard_name,
-              "shard_sha256": digest((work / shard_name).read_bytes()), "compute_checked": len(wanted), "compute_replaced": [f"{key:016x}" for key in sorted(replacements)]}
+    report = write_replacements(library, work, replacements)
+    report["compute_checked"] = len(wanted)
     if options.manifest:
         prepare_manifest(options.manifest, options.outliner, library, work, report)
     (work / "repair.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -274,6 +292,7 @@ def main():
     parser.add_argument("--dotnet", type=Path, help=".NET 10 runtime; preparation only")
     parser.add_argument("--outliner", type=Path, help="built dsh_batch.dll; preparation only")
     parser.add_argument("--manifest", type=Path, help="Mac image manifest.json; required when the library belongs to a managed image")
+    parser.add_argument("--probe-source", type=Path, default=Path(__file__).resolve().parents[2] / "metal/compute_probe.m", help="Metal pipeline probe source; preparation only")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--rollback", action="store_true")
