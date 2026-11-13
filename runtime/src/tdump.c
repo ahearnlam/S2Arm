@@ -22,8 +22,7 @@ static void out(const char *fmt, ...) {
     if (g_fd >= 0) { b[n] = '\n'; write(g_fd, b, (size_t)n + 1); }
 }
 static void where(uint64_t a, char *b, size_t n) {
-    module_t *m = module_of((void *)a);   // 装载器（loader.c）：游戏模块
-    if (m) { snprintf(b, n, "%s+%#llx", m->name, (unsigned long long)(a - (uint64_t)m->base)); return; }
+    if (s2a_guest_where(a, b, n)) return;   // 装载器（loader.c）：游戏模块，带导出名（#806）
     Dl_info di;
     if (dladdr((void *)a, &di) && di.dli_sname) { snprintf(b, n, "%s+%#llx（%s）", di.dli_sname, (unsigned long long)(a - (uint64_t)di.dli_saddr), di.dli_fname ? strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname : "?"); return; }
     snprintf(b, n, "%#llx", (unsigned long long)a);
