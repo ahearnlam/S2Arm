@@ -30,6 +30,39 @@ Ryujinx game rendering. No game-specific
 addresses, assets, firmware, keys, storage permissions, or network permission
 are included.
 
+## FPS overlay
+
+In the game library, **Show FPS (successful frame submissions)** controls the
+game overlay for this app package. It is off by default and persists across
+launches. The existing `s2arm.fps=on|off` Intent override writes the same
+`display` / `fps` preference; returning to the library refreshes its checkbox.
+The library does not load the native runtime or start an overlay timer.
+
+The overlay refreshes once per second. NVN direct sessions read the atomic
+successful-present counter through `s2a_android_nvn_present_count`; Vulkan
+guest-direct sessions and the legacy counter retain their existing sources.
+Missing windows, acquire timeouts and failed presents do not add NVN samples.
+This is a submission rate, not the screen refresh rate or GPU completion rate.
+The first sample and a paused/stopping session show `FPS —`; a valid sample
+with no new submissions shows `FPS 0.0`.
+
+Host coverage: `bash android/core-runtime/fps-tests/test.sh` and
+`python3 android/tests/nvn_present_count_test.py`. Diagnostic UI coverage uses
+`-Ps2arm.testRunner=org.s2arm.android.FpsOverlayInstrumentation`; add the existing
+debug-only `-Ps2arm.testAppIdSuffix=.w2` for an isolated install when needed.
+The runner restores only the original FPS preference. Diagnostic samples are
+unavailable and do not certify real NVN game frame rates.
+
+The separate `android_fps_table` CTest exercises the 60 FPS patch table, not
+the overlay sampler. Its enabled scenario explicitly sets `S2A_FPS60=1`;
+leaving the variable unset preserves the game's native frame-rate policy.
+
+The protected device runner requires a POSIX host (`fcntl`, `fork`, and
+process-exit monitoring); native Windows Python cannot provide this lock.
+Its `getprop` preflight accepts multiline property values, including boot
+history, while still rejecting malformed, duplicate, or incomplete records.
+This does not bypass debug-property admission or installation-state protection.
+
 ## Which build path to use
 
 Docker is no longer the default way to build Android packages. The backend is
@@ -626,6 +659,8 @@ S2ARM_ANDROID_CS_SERVICES=static S2ARM_ANDROID_GAME_DIR=build/android-game/<titl
 python3 android/tools/game_apk.py --resources build/pack/<game> \
   android/app/build/outputs/apk/debug/app-debug.apk build/pack/<game>-res   # what that app installs
 ```
+
+出包链路（`pack/targets/android/package.py`）给 `--resources` 加 `--reuse-from <上一个已发布 release 的 resources/>`：上一包自己的 index 里与新包同路径、同大小、同 SHA-256 的**只读**文件改成硬链接，不再各写一份（ext4 没有 reflink，以前每个 release 的 `resources/` 都是一整份 RomFS）。链接后仍逐个核新包的 index；上一包不可用（读不出、与输出或输入重叠）、跨盘、链接被拒、文件可写或字节已变的，一律退回复制。所以同一台机器上相邻 release 的只读文件共享同一个 inode：别原地改 release 里的文件（先改权限再写会同时改到两个包），删哪个 release 都不影响另一个。
 
 构建后的设备部署统一用 `python3 android/tools/deploy_game.py --pack <完整源包> --apk <最终签名APK> --serial <设备> --mode direct`。
 脚本冻结 APK、生成配套资源绑定、安装、导入并核对设备 APK 哈希，避免重编后反复出现 `artifact.apk.sha256` 不匹配。

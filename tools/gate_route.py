@@ -9,7 +9,7 @@
   python3 tools/gate_route.py evidence <改到的文件…> → 这次改动要的最小充分证据（合入前自验 / 起不起局、起哪几款），一行一条
 改到的文件为空 = 不知道改了啥 → 全跑（手动跑门禁时的缺省）。
 单测的覆盖面自动推：单测文本里出现的文件名（*.sh *.py *.c *.h *.tsv *.mk）按文件名对上仓库里 tools/ pack/ tests/ 的文件，
-再顺着被测脚本里出现的文件名传递闭包（dev_run.sh → devlock.sh → devbattery.sh …）；单测自己被改也跑。
+再顺着被测脚本里出现的文件名传递闭包（dev_run.sh → devlock.sh …）；单测自己被改也跑。
 含中文的引号段（echo / fail / print 的提示、单测标签）里的文件名不算点名，像命令的段照算（drop_prose）。
 单测头部可加「# 门禁覆盖：<通配…>」补推不出的面（例：shell_lint 覆盖 *.sh），「# 门禁：每次」= 每次都跑，
 「# 门禁只看：<通配…>」= 覆盖面只有单测自己 + 这些（不推闭包：文本推导把提示字符串里的文件名、被单测换成桩的下游脚本都算进去，
@@ -21,8 +21,9 @@ import fnmatch, os, re, subprocess, sys, tempfile
 TOK = re.compile(r'(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:sh|py|c|h|m|mm|cc|cpp|swift|cs|tsv|mk|json)\b')   # 带目录的写法整段取（graphics/tools/shbake/xc_key.sh），见 refs
 LOCAL = ('tools/', 'pack/', 'tests/')   # 本线目录：单测覆盖面只在这里面推
 DOC = re.compile(r'^docs/|\.md$|^\.github/ISSUE_TEMPLATE/')   # 与 tools/gate_plan.sh GATE_DOC_RE 同一条
-# 无钩子路径（过渡，11-11 维护者：旧安卓三钩子删除）：android/ 眼下没有钩子认领，改到它不选钩子、也不算表外触发全跑；
-#   安卓线新 android/gate.sh 头里「# 门禁路由：android/ …」接上时删掉这一条（单测照旧按覆盖面路由）
+# 无钩子路径（过渡，11-11 维护者：旧安卓三钩子删除）：改到 android/ 不算表外、不触发钩子全跑（文件头路由点到的钩子照常选中，
+#   如安卓新层的 android/native/gfx_plat/gate.sh）；test_wired 也跳过这里旧层单测的接线检查（清空后约 162 处没接线，多是旧图形层单测）。
+#   留到安卓线删旧层源码那一笔一并删（单测照旧按覆盖面路由）
 NOHOOK = ('android/',)
 
 # 独立测试的显式覆盖合同（#925）：已有 shell 引用推导不解析 MSBuild 项目，

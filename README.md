@@ -53,7 +53,11 @@ It moves forward with a few commands, and you can watch every step in the launch
 /Applications/S2Arm.app/Contents/Resources/s2armctl diag export ~/Desktop/S2Arm-diagnostics.zip   # export a diagnostic bundle if it cannot fix a problem
 ```
 
-Anything only you can do (system permission prompts, signing in with your Apple ID, tapping Trust on your phone), the AI stops and asks you to do. On Windows, use `s2armctl.cmd` in the launcher folder with the same commands; exporting a diagnostic bundle is currently Mac-only.
+Anything only you can do (system permission prompts, signing in with your Apple ID, tapping Trust on your phone), the AI stops and asks you to do. On Windows, use `s2armctl.cmd` in the launcher folder with the same commands. Windows builds iPhone / iPad packages only, so for problems inside a game export the diagnostic bundle on the phone: long-press the game screen with four fingers for 1.5 seconds and choose Export diagnostics.
+
+**Something wrong inside a game** (graphics, frame rate, stutter, crashes)? Send your AI:
+
+> Please read https://github.com/jhaizhou-ops/S2Arm/blob/main/skills/player-game-triage/SKILL.md . My S2Arm game has this problem: <describe it>. Check the settings first, then collect diagnostics; if you can change code, fix it at the root and open a PR, otherwise help me file an issue.
 
 ## Tested at scale
 
@@ -81,6 +85,14 @@ A Switch 2 game, measured on an iPhone 17 Pro Max: a **full 60 fps** while the p
 | Android / HarmonyOS | Coming soon |
 
 [Evidence](docs/validation/EVIDENCE.md#platforms)
+
+## Downstream deep ports
+
+Some games have a deep port made specially by the community. S2Arm recognizes these games: on export it shows a page explaining the option, and you can switch to the downstream project's route (importing, packing and installing are still buttons in S2Arm, with the downstream project's implementation underneath) or keep the standard route. The registry is [`pack/downstream/schemes.json`](pack/downstream/schemes.json); the contract between the two is the downstream project's document.
+
+| Route | Project | Devices | Contract |
+|---|---|---|---|
+| D2R-Mobile | [jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) | iPhone / iPad (iOS 26 and later; Android and HarmonyOS in progress) | [docs/S2ARM.md](https://github.com/jhaizhou-ops/d2r-mobile/blob/main/docs/S2ARM.md) |
 
 ## Getting started
 

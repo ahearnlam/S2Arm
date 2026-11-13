@@ -368,7 +368,9 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     if (!o->mem && (o->flags & 0x200)) o->mem = vpool_reserve(o);   // every virtual pool: its own address range, a page table over physical pools (see MapVirtual)
     else if (o->mem) { nvn_be_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
     if (!o->mem && !(o->flags & 0x200)) LOG("【红】 MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
-    o->gva = o->mem || (o->flags & 0x200) ? gva_alloc((uint64_t)(uintptr_t)o->mem, o->size) : 0;   // 虚拟池的 CPU 侧是它自己的预留段（预留失败时没有，GPU 地址照给：真机初始化即有）
+    // Switch 2（NVN2）：池建在 gsv GPU 可访问内存上，那段内存的 GPU 虚拟地址就是它的 CPU 虚拟地址，缓冲区地址 = 存储的 CPU 地址；游戏会拿 GetBufferAddress 的结果加偏移直接用 CPU 读写
+    //   （#351：给窗口地址时 CPU 读 0xC086D00000 一带非法地址崩）。所以 NVN2 不另分窗口地址，pool_ga 回存储地址，nvn_ga2ca 对它原样过。窗口只给 Switch 1（大页对齐语义，见上）
+    o->gva = !nvn2_on() && (o->mem || (o->flags & 0x200)) ? gva_alloc((uint64_t)(uintptr_t)o->mem, o->size) : 0;   // 虚拟池的 CPU 侧是它自己的预留段（预留失败时没有，GPU 地址照给：真机初始化即有）
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
     return 1;
@@ -1607,10 +1609,14 @@ static snode *g_sh_bkt[SH_NBKT];
 static srec g_sh_all = { .prev = &g_sh_all, .next = &g_sh_all };
 static srec *g_sh_qhead, *g_sh_qtail; static uint64_t g_sh_qbytes;
 static uint64_t g_sh_nlive, g_sh_live_bytes, g_sh_unanchored;
+typedef struct { uint64_t h; uint32_t len; struct sblk *b; } sintern;
+static sintern *g_sh_it; static size_t g_sh_itcap, g_sh_itn; static uint64_t g_sh_shared_n;   // interned recordings (sh_intern)
 static uint32_t sh_hash(uintptr_t page) { return (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 48) & (SH_NBKT - 1); }
 static void sh_live(uint64_t *recs, uint64_t *bytes) { pthread_mutex_lock(&g_sh_mu); *recs = g_sh_nlive; *bytes = g_sh_live_bytes; pthread_mutex_unlock(&g_sh_mu); }
 // Live recordings (begun and not released), for diagnostics and the unit tests
 uint64_t s2a_hle_cmdshadow_live(void) { uint64_t r, b; sh_live(&r, &b); return r; }
+uint64_t s2a_hle_cmdshadow_live_bytes(void) { uint64_t r, b; sh_live(&r, &b); return b; }
+uint64_t s2a_hle_cmdshadow_shared(void) { pthread_mutex_lock(&g_sh_mu); uint64_t n = g_sh_shared_n; pthread_mutex_unlock(&g_sh_mu); return n; }   // 单测：按内容共用了几次
 // 帧录（nvn_frame_rec.inc）：命令记录都在宿主块里（游戏窗口外），录像按原地址另存，回放映射回原地址
 int s2a_hle_cmdshadow_list(void (*cb)(void *ctx, const void *mem, size_t size), void *ctx) {
     pthread_mutex_lock(&g_sh_mu); int n = 0; size_t pg = (size_t)getpagesize();
@@ -1714,7 +1720,7 @@ static void sh_shutdown(void) {   // session end: every recording and chunk goes
     for (int i = 0; i < g_sh_nchunk; i++) sh_chunk_unmap(g_sh_chunk[i].mem);
     free(g_sh_chunk); g_sh_chunk = NULL; g_sh_nchunk = g_sh_cchunk = 0;
     memset(g_sh_carving, 0, sizeof g_sh_carving); memset(g_sh_free, 0, sizeof g_sh_free); memset(g_sh_bkt, 0, sizeof g_sh_bkt);
-    g_sh_all.next = g_sh_all.prev = &g_sh_all; g_sh_qhead = g_sh_qtail = NULL; g_sh_qbytes = g_sh_nlive = g_sh_live_bytes = g_sh_unanchored = 0;
+    g_sh_all.next = g_sh_all.prev = &g_sh_all; g_sh_qhead = g_sh_qtail = NULL; g_sh_qbytes = g_sh_nlive = g_sh_live_bytes = g_sh_unanchored = 0; free(g_sh_it); g_sh_it = NULL; g_sh_itcap = g_sh_itn = 0; g_sh_shared_n = 0;
     pthread_mutex_unlock(&g_sh_mu);
 }
 // The open recording leaves the command buffer's current window: note the device bytes it took there. In a host-lent window it took none of the game's memory; it hangs off
@@ -1813,10 +1819,49 @@ static void sh_anchor_empty(cmd_t *o, srec *r) {
     uintptr_t a = o->gvirt ? o->vanc : o->gcur > o->gstart ? o->gcur - 1 : o->gend ? o->gend - 1 : 0;
     if (a) { r->iv[0] = (siv){a, a + 1}; r->niv = 1; }
 }
+// Recordings that take none of the game's command memory and hold only control-memory records (texture / sampler pool binds) and their END are interned by content
+//   (#783). Nothing the device cursor writes ever covers them, so they hung off a 1-byte anchor; one first in a fresh segment anchored at the segment's last byte, a tail
+//   the game never writes, and none was ever released: Ocarina of Time on Switch 2 ends ~10 such lists a frame (9 of them empty), thousands piled on one byte, ~10 MB of
+//   host blocks a minute. These records carry only the pool pointer and are fixed once ended, so every recording with the same bytes replays the same from one permanent
+//   copy, and the copies are as many as the distinct contents. Empty recordings (only END) share one copy in every mode. Other records are not interned: some keep host
+//   addresses inside their own recording, which a copy would leave pointing at the old block
+#define SH_INTERN_MAX 256
+static uint64_t sh_fnv(const uint8_t *p, size_t n) { uint64_t h = 0xcbf29ce484222325ull; while (n--) { h ^= *p++; h *= 0x100000001b3ull; } return h; }
+static int sh_intern(cmd_t *o, srec *r) {   // g_sh_mu held: 1 = r dropped, handle now the shared copy
+    sblk *b = r->blk; if (!b || b != r->last || o->begin != (uint8_t *)(b + 1) || o->cur < o->begin) return 0;
+    size_t len = (size_t)(o->cur - o->begin); if (!len || len > SH_INTERN_MAX) return 0;
+    if (r->niv && len != 8) return 0;   // takes device bytes and is not empty: released by overwrite as before
+    for (const uint8_t *p = o->begin; p < o->cur; ) {   // only pool binds and END
+        op_hdr h; memcpy(&h, p, sizeof h);
+        if (h.size < sizeof h || p + h.size > o->cur || (h.op != OP_END && h.op != OP_SET_TEX_POOL && h.op != OP_SET_SAMP_POOL) || (r->niv && h.op != OP_END)) return 0;
+        p += h.size;
+    }
+    uint64_t hv = sh_fnv(o->begin, len); size_t i; sblk *copy = NULL;
+    if (g_sh_itcap) for (i = hv & (g_sh_itcap - 1); g_sh_it[i].b; i = (i + 1) & (g_sh_itcap - 1))
+        if (g_sh_it[i].h == hv && g_sh_it[i].len == len && !memcmp(g_sh_it[i].b + 1, o->begin, len)) { copy = g_sh_it[i].b; break; }
+    if (!copy) {
+        if ((g_sh_itn + 1) * 2 > g_sh_itcap) {   // grow (load <= 1/2) and rehash
+            size_t nc = g_sh_itcap ? g_sh_itcap * 2 : 64; sintern *t = calloc(nc, sizeof *t); if (!t) return 0;
+            for (size_t k = 0; k < g_sh_itcap; k++) if (g_sh_it[k].b) { size_t j = g_sh_it[k].h & (nc - 1); while (t[j].b) j = (j + 1) & (nc - 1); t[j] = g_sh_it[k]; }
+            free(g_sh_it); g_sh_it = t; g_sh_itcap = nc;
+        }
+        copy = sh_blk_get(sizeof(sblk) + len, sizeof(sblk) + len); copy->next = NULL; memcpy(copy + 1, o->begin, len);
+        for (i = hv & (g_sh_itcap - 1); g_sh_it[i].b; i = (i + 1) & (g_sh_itcap - 1)) {}
+        g_sh_it[i] = (sintern){hv, (uint32_t)len, copy}; g_sh_itn++;
+    }
+    r->prev->next = r->next; r->next->prev = r->prev; g_sh_nlive--; g_sh_live_bytes -= r->bytes;
+    b->next = g_sh_free[b->cls]; g_sh_free[b->cls] = b;   // nothing points into it yet: the handle is handed out below
+    if (r->iv != r->ivs) free(r->iv);
+    free(r);
+    o->begin = (uint8_t *)(copy + 1); o->cur = o->end = NULL; g_sh_shared_n++;
+    return 1;
+}
 static void sh_end(cmd_t *o) {
-    srec *r = o->rec; sh_piece(o); sh_anchor_empty(o, r);
+    srec *r = o->rec; sh_piece(o);
     uint64_t h = r->rbytes + OP_RESERVE + sizeof(sblk); o->hint = (uint32_t)(h < 256 ? 256 : h > (1u << 20) ? (1u << 20) : h);
-    pthread_mutex_lock(&g_sh_mu); r->open = 0;
+    pthread_mutex_lock(&g_sh_mu);
+    if (sh_intern(o, r)) { pthread_mutex_unlock(&g_sh_mu); o->rec = NULL; return; }
+    sh_anchor_empty(o, r); r->open = 0;
     uint64_t un = 0; if (r->niv) sh_index(r); else un = ++g_sh_unanchored;
     pthread_mutex_unlock(&g_sh_mu);
     if (un && (un == 1 || un % 1024 == 0)) LOG("【黄】[nvn] command recording without any of the game's memory: its host blocks stay until the session ends (%llu so far)", (unsigned long long)un);
@@ -1930,7 +1975,10 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
 // NVN 四边形条带（NVN_DRAW_PRIMITIVE_QUAD_STRIP = 8，Metal 没有）就地改成三角形条带（5）：第 i 个四边形 (2i, 2i+1, 2i+3, 2i+2) 正好是三角形条带第 2i、2i+1 两个三角形
 //   （同一组顶点、同一片覆盖面）；四边形条带不画末尾落单的那个顶点，三角形条带会多画一个三角形 → CPU 知道个数的把个数向下取偶（间接绘制的个数在 GPU 上，原样）。
 //   11-06 无人深空测试设备1：这类绘制原先在回放里整笔丢掉（「primitive type 8 not implemented」），录到 8 笔
-static void prim_quad_strip(int32_t *prim, int32_t *count) { if (*prim == 8) { *prim = 5; if (*count > 0) *count &= ~1; } }
+// NVN 多边形（NVN_DRAW_PRIMITIVE_POLYGON = 9，Metal 没有）就地改成三角形扇（6）：凸多边形 v0..vn-1 = 以 v0 为扇心的 (v0, vi, vi+1)，覆盖面相同
+//   （上游参考实现同样处理：Ryujinx.Graphics.Vulkan EnumConversion Polygon → TriangleFan）；扇形之后各条路径（展开、间接转换）照旧。
+//   #635：0100F43008C44000 Mac 局 16 笔「primitive type 9 not implemented」整笔丢掉（曾被当成曲面细分，日志里 hull / domain 都是「-」）
+static void prim_quad_strip(int32_t *prim, int32_t *count) { if (*prim == 8) { *prim = 5; if (*count > 0) *count &= ~1; } else if (*prim == 9) *prim = 6; }
 static void rec_draw(NVNcommandBuffer *c, p_draw d) { prim_quad_strip(&d.prim, &d.count); size_t n = d.ind || d.mdi_cnt || d.tfc ? sizeof d : offsetof(p_draw, ind); memcpy(rec(c, OP_DRAW, n), &d, n); }
 static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
     prim_quad_strip(&d.prim, &d.count);
@@ -2120,7 +2168,7 @@ static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int fir
         int tb = CB(c)->tex_base, sb = CB(c)->samp_base;
         for (int i = 0; i < n && (tb || sb); i++) {
             uint64_t v = r->h[i], tid = v & 0xfffff, sid = v >> 20;
-            if (op == OP_BIND_SAMP) { if (sid) r->h[i] = (sid + (uint64_t)sb) << 20; }
+            if (op == OP_BIND_SAMP) { r->h[i] = (sid + (uint64_t)sb) << 20; }
             else { tid += (uint64_t)tb; if (sid && op == OP_BIND_TEX) sid += (uint64_t)sb; r->h[i] = tid | sid << 20; }   // texture ID 0 is that pool's first entry, moved like any other
         }
     }
@@ -3069,6 +3117,10 @@ static int dcmp(const void *a, const void *b);
 //   （10-30 iOS 功耗测量口径修法 5：task_gpu_utilisation / 资源联盟的 GPU 能耗在真机一直读 0）
 static double g_gpu_busy_ms;
 double s2a_gpu_busy_ms(void) { return g_gpu_busy_ms; }
+// 入账到哪儿的 GPU 时钟（已入账各帧最晚 GPU 结束，毫秒）：GPU 忙晚 8 帧、在 CPU 的帧边界入账，CPU 一顿（慢帧）顿前的 GPU 时间就挤进下一个墙钟窗口，
+//   HUD 按墙钟算的「GPU 忙」跳过 1000 ms/s（#647：GPU 只有一条时间线，独占时间不可能超过 1 秒每秒）。按这个时钟差当分母，入账节奏不再进读数
+static double g_gpu_clk_ms;
+double s2a_gpu_clock_ms(void) { return g_gpu_clk_ms; }
 static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 // Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
@@ -3604,7 +3656,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         trow(f, "@sub_wall_ms", sw / 1e6); trow(f, "@sub_cpu_ms", atomic_exchange(&g_sub_cpu_ns, 0) / 1e6); trow(f, "@sub_instr", (double)atomic_exchange(&g_sub_instr, 0));
     } else atomic_store(&g_nvn_ns, 0);
     g_acq_wait_ns = g_pq_wait_ns = 0;
-    if (f >= 8) { double g = nvn_be_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_gpu_busy_ms += g; }   // GPU time is taken 8 frames late (already completed)
+    if (f >= 8) { double g = nvn_be_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_gpu_busy_ms += g; uint64_t a, b; if (nvn_be_gpu_span(f - 8, &a, &b) && b / 1e6 > g_gpu_clk_ms) g_gpu_clk_ms = b / 1e6; }   // GPU time is taken 8 frames late (already completed)
         { lf_rec *r = &g_lf[(f - 8) % LFN];   // long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, and it is clearly above recent conditions
           static int on = -1; if (on < 0) { const char *e = getenv("DM_LONGFRAME"); on = !(e && !strcmp(e, "0")); }
           // "Long" is relative to recent conditions: when running steadily at 30 fps (menus / windowless host) or under sustained overload, every frame is > 20 ms; those are not long frames and must not flood the log - a frame has to be 40% above the sliding mean of the last 16 frames to count

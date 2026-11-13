@@ -53,7 +53,8 @@ struct StorageOverviewSection: View {
             if let o = model.overview {
                 CardGroup(t("locations")) {
                     ForEach(o.locations) { l in
-                        CardRow(l.volume.isEmpty ? l.path : l.volume, detail: detail(l), detail2: l.path, dot: l.connected ? LauncherPalette.ready : LauncherPalette.unbuilt) {
+                        // 行首给具体路径（不再给卷名、路径缩到副行）：几行都叫「系统盘」分不清（名字同出包页下拉框 locationName）
+                        CardRow(S2ArmLauncherModel.locationName(path: l.path, volume: l.volume), detail: detail(l), dot: l.connected ? LauncherPalette.ready : LauncherPalette.unbuilt) {
                             Text(l.isDefault ? t("location.default") : "").font(.manrope(12)).foregroundStyle(.secondary)
                         }
                         if l.id != o.locations.last?.id { CardDivider() }
@@ -69,11 +70,15 @@ struct StorageOverviewSection: View {
                 }
                 CardGroup(t("games"), footnote: BackendText.launcherText("library.sizes.sourcesNote", language: loc.lang == .zh ? "zh-Hans" : "en")) {
                     ForEach(o.games) { g in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(g.name).font(.manrope(13.5, .semibold))
-                            GameSizesList(sizes: g.sizes, compact: true)
+                        // 与 CardRow 同一套边距（18 + 圆点位 7 + 间距 12），游戏名和上面两张卡的行标题、分隔线对齐。
+                        HStack(alignment: .top, spacing: 12) {
+                            Color.clear.frame(width: 7, height: 7)
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(g.name).font(.manrope(14, .semibold)).fixedSize(horizontal: false, vertical: true)
+                                GameSizesList(sizes: g.sizes, compact: true)
+                            }
                         }
-                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .padding(.horizontal, 18).padding(.vertical, 13)
                         if g.id != o.games.last?.id { CardDivider() }
                     }
                 }

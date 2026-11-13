@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import S2ArmShellBridge
-import ShellUI
+@testable import ShellUI
 @testable import S2ArmShellHost
 
 // 期望值按 Fixtures/catalogue.json 手算：8 条里重复的 Alpha 丢弃 → 7 条；状态按字段逐条对位
@@ -61,6 +61,36 @@ import ShellUI
     #expect(model.games.isEmpty)
 }
 
+// v0.3.0 资源包挪出 Documents：游戏根是 <家>/Documents/games 时资源包在 <家>/Library/Application Support/S2Arm/games/<游戏号>/资源包（同宿主 s2a_pack_root）。
+//   只在新位置的别处电脑款照样认出；还没迁的老位置照样认；删除（不留存档）把新位置的资源包一起挪走、存档留在 Documents。期望按目录手写
+@MainActor @Test func packInLibraryIsFoundAndDeleted() throws {
+    let fm = FileManager.default, home = fm.temporaryDirectory.appendingPathComponent("s2a-home-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: home) }
+    let games = home.appendingPathComponent("Documents/games"), packs = home.appendingPathComponent("Library/Application Support/S2Arm/games")
+    let derived = S2ArmShellHostModel.packGamesRoot(for: games, home: home)?.standardizedFileURL.path
+    #expect(derived == packs.standardizedFileURL.path)
+    #expect(S2ArmShellHostModel.packGamesRoot(for: home.appendingPathComponent("x"), home: home) == nil)
+    let (a, newStray, oldStray) = ("0100000000010000", "0100000000060000", "0100000000070000")
+    let placed: [(URL, String)] = [(packs, a), (packs, newStray), (games, oldStray)]
+    for item in placed {
+        let pack = item.0.appendingPathComponent(item.1).appendingPathComponent("资源包")
+        try fm.createDirectory(at: pack, withIntermediateDirectories: true)
+        try Data("sha".utf8).write(to: pack.appendingPathComponent(".applied"))
+    }
+    try fm.createDirectory(at: games.appendingPathComponent("\(a)/S2A/ryujinx/bis/user/save"), withIntermediateDirectories: true)
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), installState: { _ in 1 }, gamesRoot: games, packGamesRoot: packs)
+    #expect(model.games.map(\.id) == [a, newStray, oldStray])
+    let oldDir: String = S2ArmShellHostModel.packDir(oldStray, games: games, packs: packs).path
+    let newDir: String = S2ArmShellHostModel.packDir(a, games: games, packs: packs).path
+    #expect(oldDir == games.appendingPathComponent(oldStray).appendingPathComponent("资源包").path)
+    #expect(newDir == packs.appendingPathComponent(a).appendingPathComponent("资源包").path)
+    let delete = try #require(model.actions.onDeleteGame)
+    delete(a, false)
+    #expect(!fm.fileExists(atPath: packs.appendingPathComponent(a).path))
+    #expect(try fm.contentsOfDirectory(atPath: games.appendingPathComponent(a).path) == ["S2A"])
+}
+
 // v0.2.6「点删除没反应」：删除不在主线程同步做，点下当场离开列表、提示「正在删除」，后台删完提示释放了多少；挪不动提示原因、游戏留着；
 //   上次删到一半留下的 .deleting 下次打开时清掉。释放量期望手算：资源包 10 个 8192 字节 + 1 个 16384 字节文件 = 98304（APFS 按 4096 对齐，正好整块）
 @MainActor @Test func deleteGameIsInstantThenReportsFreedSpace() async throws {
@@ -117,7 +147,8 @@ import ShellUI
     var played: [String] = [], picked: [String] = []
     let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) },
                                     installState: { ready.contains($0) ? 1 : 0 }, pickGameData: { picked.append($0) })
-    #expect(model.games.map(\.id) == ["0100000000020000"])   // 只显示这台设备上资源到位的款
+    // 审计 P1-155：资源没到位、玩家也没删过的款留在库里，显示「需要游戏数据」，点进去看说明
+    #expect(model.games.map(\.id) == ["0100000000010000", "0100000000020000"] && model.games.map(\.game.state) == [.needsGameData, .needsGameData])
     model.actions.onPlay("0100000000010000")
     #expect(played.isEmpty && picked == ["0100000000010000"])
     model.actions.onPickGameData("0100000000010000")
@@ -129,7 +160,32 @@ import ShellUI
     ready.remove("0100000000010000")              // 库开着时资源包被拿走：Play 当场重判、不放行
     model.actions.onPlay("0100000000010000")
     #expect(played == ["0100000000010000"] && picked.count == 3)
-    #expect(model.games.map(\.id) == ["0100000000020000"])   // 删掉后不再显示
+    #expect(model.games.map(\.game.state) == [.needsGameData, .needsGameData])   // 资源被拿走（不是玩家删的）：留在库里、回到「需要游戏数据」
+}
+
+// 审计 P1-155：玩家在这台设备上删掉的款，资源不在时不再显示（删除名单 .s2a-removed.txt 跨重开有效）；电脑重新装过来、资源回来就又显示
+@MainActor @Test func deletedGameStaysHiddenUntilItsDataReturns() async throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("s2a-removed-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let (a, b) = ("0100000000010000", "0100000000020000")
+    try fm.createDirectory(at: root.appendingPathComponent("\(a)/资源包"), withIntermediateDirectories: true)
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"}]}"#.utf8)
+    let state: (String) -> Int32 = { fm.fileExists(atPath: root.appendingPathComponent("\($0)/资源包").path) ? 1 : 0 }
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: state, gamesRoot: root)
+    #expect(model.games.map(\.id) == [a, b] && model.games.map(\.game.state) == [.playable, .needsGameData])
+    model.deleteGame(a, saves: true)
+    #expect(model.games.map(\.id) == [b])                          // 删掉的当场离开列表，没删的 B 照旧在
+    let again = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: state, gamesRoot: root)
+    #expect(again.games.map(\.id) == [b])                          // 重开 App 仍不显示
+    try fm.createDirectory(at: root.appendingPathComponent("\(a)/资源包"), withIntermediateDirectories: true)
+    again.refreshGameData()
+    #expect(again.games.map(\.id) == [a, b])                       // 电脑重新装过来：又显示
+    let third = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: { $0 == a ? 0 : 0 }, gamesRoot: root)
+    #expect(third.games.map(\.id) == [a, b])                       // 已从删除名单摘掉：资源再不在也显示「需要游戏数据」
 }
 
 // 宿主「重新检查」→ s2a_shell_refresh → 登记的处理函数
@@ -168,6 +224,13 @@ nonisolated(unsafe) private var lastPlayed = ""
     var s = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false))
     #expect(row(s, "fps60")?.value == "on" && row(s, "widenForce")?.value == "off" && row(s, "vpadOpacity")?.value == "100")
     #expect(row(s, "vpadHoldLock")?.value == "on")
+    #expect(row(s, "splitScreen")?.value == "auto" && row(s, "screenOrientation")?.value == "auto")
+    S2ArmGameSettings.apply(id: "G1", setting: "splitScreen", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "screenOrientation", value: "portrait", stores: stores)
+    let sharedScreen = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(sharedScreen, "splitScreen")?.value == "on" && row(sharedScreen, "screenOrientation")?.value == "portrait")
+    S2ArmGameSettings.apply(id: "G1", setting: "splitScreen", value: "invalid", stores: stores)
+    #expect(app.string(forKey: "splitScreen") == "on")
     #expect(row(S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false, holdLock: false)), "vpadHoldLock")?.value == "off")
     if case .choice(let o) = row(s, "vpadLayout")?.kind { #expect(o.map(\.id) == ["default", "edit"]) } else { Issue.record("布局行应是多选") }
     // 改：G1 关 60 帧、开宽屏强制、透明度 40 → G1 两项变了、G2 不变；透明度全局 0.4
@@ -321,15 +384,41 @@ nonisolated(unsafe) private var lastPlayed = ""
     #expect(model.games.first?.game.state == .installing(InstallStage(.transferring, fraction: 750.0 / 900)))
 }
 
-// 正在解别的款（宿主拒绝起第二个）：这款排着显示「安装中」，不算没解成，下一次刷新再试
+// iOS 装机剃刀 #41：没有传输清单（老电脑端推的）也要能判传断了。夹具：资源包里只有一个没写完的包，宿主报阶段 3。
+//   期望按时钟手写：刚改过 → 传输中；过了 transferStall + 5 秒没动 → 传输中断（原先永远「传输中」）；包又长了、时钟回到现在 → 又是传输中
+@MainActor @Test func transferWithoutListStillDetectsStall() throws {
+    let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent("s2a-nolist-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let id = "0100000000010000", pack = root.appendingPathComponent("\(id)/资源包")
+    try fm.createDirectory(at: pack.appendingPathComponent(".incoming"), withIntermediateDirectories: true)
+    try Data(count: 30).write(to: pack.appendingPathComponent(".incoming/1_000.tar"))
+    var clock = Date()
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), installState: { _ in 3 },
+                                    now: { clock }, gamesRoot: root)
+    #expect(model.games.first?.game.state.installPhase == .transferring)
+    clock = clock.addingTimeInterval(S2ArmShellHostModel.transferStall + 5); model.refreshGameData()
+    #expect(model.games.first?.game.state.installPhase == .interrupted)
+    try Data(count: 60).write(to: pack.appendingPathComponent(".incoming/1_000.tar"))
+    clock = Date(); model.refreshGameData()
+    #expect(model.games.first?.game.state.installPhase == .transferring)
+}
+
+// 正在解别的款（宿主拒绝起第二个）：这款排着，卡片说在等什么（iOS 装机剃刀 #46 / #47：宿主答 1 另一款在解 → 第 4 步「等另一款装完」，
+//   2 在整理游戏目录 → 第 5 步；原先一律只写「安装中」），不算没解成，下一次刷新再试
 @MainActor @Test func secondUnpackWaitsItsTurn() {
-    var accept = false, installs = 0
+    var accept = false, installs = 0, wait: Int32 = 1
     let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
     let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")),
-                                    installState: { _ in 2 }, installGame: { _ in installs += 1; return accept }, installProgress: { _ in nil })
-    #expect(model.games.first?.game.state == .installing(InstallStage(.installing)) && installs == 1)
+                                    installState: { _ in 2 }, installGame: { _ in installs += 1; return accept }, installProgress: { _ in nil },
+                                    installWait: { wait })
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, step: 4)) && installs == 1)
+    wait = 2; model.refreshGameData()
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, step: 5)) && installs == 2)
+    wait = 0; model.refreshGameData()
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing)) && installs == 3)
     accept = true; model.refreshGameData()
-    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, fraction: 0)) && installs == 2)
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, fraction: 0)) && installs == 4)
 }
 
 // 开着库时电脑才开始推（真机实测：库里一直看不到这款）：每秒重判，它一开始传就出现；全都能玩了也不停——
@@ -339,7 +428,7 @@ nonisolated(unsafe) private var lastPlayed = ""
     let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
     let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), installState: { _ in stage },
                                     gamesRoot: URL(fileURLWithPath: "/nonexistent"))
-    #expect(model.games.isEmpty && model.watching)
+    #expect(model.games.map(\.game.state) == [.needsGameData] && model.watching)   // 审计 P1-155：还没推过来也留在库里，显示「需要游戏数据」
     stage = 3; model.refreshGameData()
     #expect(model.games.first?.game.state.installPhase == .transferring && model.watching)
     stage = 1; model.refreshGameData()
@@ -368,3 +457,57 @@ nonisolated(unsafe) private var lastPlayed = ""
     model.refreshGameData(); #expect(model.games.first?.game.isNew == true)   // 再装一版
 }
 
+
+// 单一 IMG 的「安装中」蒙版（v0.3.0）：解开时宿主报阶段 1 / 2 / 3 与这一段比例，卡片写正在做哪一步、圈按这一段画；
+//   解完仍是阶段 2（没解成）→「安装没完成」，说明里带宿主给的那句原因。期望按 ShellUI 文案手写（英文界面）
+@MainActor @Test func imgInstallShowsStepAndFailureReason() {
+    var phase: (Int, Double?)? = (2, 0.37), installs = 0
+    let why = "Unpacking small files from game.img (unknown format, please update S2Arm)"
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")),
+                                    installState: { _ in 2 }, installGame: { _ in installs += 1; return true }, installProgress: { _ in nil },
+                                    installPhase: { _ in phase }, installFailure: { _ in why }, gamesRoot: URL(fileURLWithPath: "/nonexistent"))
+    #expect(model.games.first?.game.state == .installing(InstallStage(.installing, fraction: 0.37, step: 2)))
+    #expect(["Unpacking small files… 37%", "解出小文件… 37%"].contains(model.games.first?.game.state.title ?? ""))
+    phase = nil; model.refreshGameData()   // 第一次刷新时宿主已在解（报了阶段），这里不再起：installTried 里没有它 → 起一次
+    phase = nil; model.refreshGameData()   // 起过、宿主说已不在解、还是阶段 2 → 没解成
+    let state = model.games.first?.game.state
+    #expect(state == .installing(InstallStage(.failed, reason: why)))
+    #expect(state?.explanation.hasPrefix(why + "\n") == true)
+}
+
+// 共享表 app scope 的规范 id，与原生 / 设置 App 共用；旧键只迁移一次。
+@MainActor @Test func playSettingsCanonicalMigration() throws {
+    let suite = "s2a.test.play." + UUID().uuidString
+    let app = try #require(UserDefaults(suiteName: suite))
+    defer { app.removePersistentDomain(forName: suite) }
+    let stores = S2ArmGameSettings.Stores(game: { _ in nil }, app: app)
+    func value(_ key: String, game: String = "G1") -> String? {
+        S2ArmGameSettings.sections(for: game, stores: stores, state: .init(selected: "default", hasMine: false)).flatMap(\.rows).first { $0.id == key }?.value
+    }
+    #expect(value("splitScreen") == "auto" && value("screenOrientation") == "auto")
+    #expect((app.persistentDomain(forName: suite) ?? [:]).isEmpty)
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen") == "on" && value("screenOrientation") == "portrait")
+    #expect(app.string(forKey: "splitScreen") == "on" && app.string(forKey: "screenOrientation") == "portrait")
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
+    app.set("off", forKey: "splitScreen"); app.set("landscape", forKey: "screenOrientation")
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen", game: "G2") == "off" && value("screenOrientation", game: "G2") == "landscape")
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
+    app.register(defaults: ["splitScreen": "auto", "screenOrientation": "auto"])
+    #expect(value("splitScreen") == "off" && value("screenOrientation") == "landscape")
+    app.set(42, forKey: "splitScreen"); app.set([], forKey: "screenOrientation")
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen") == "auto" && value("screenOrientation") == "auto")
+    #expect((app.persistentDomain(forName: suite) ?? [:]).isEmpty)
+    for (key, values) in [("splitScreen", ["auto", "on", "off"]), ("screenOrientation", ["auto", "landscape", "portrait"])] {
+        for selected in values {
+            S2ArmGameSettings.apply(id: "G1", setting: key, value: selected, stores: stores)
+            #expect(app.string(forKey: key) == selected && value(key, game: "G2") == selected)
+        }
+        S2ArmGameSettings.apply(id: "G1", setting: key, value: "invalid", stores: stores)
+        #expect(app.string(forKey: key) == values.last)
+    }
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
+}

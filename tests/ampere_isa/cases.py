@@ -99,6 +99,24 @@ for left in (True, False):
                          inp, body, want, '64位整数字段独立期望；零值缺陷/非零正控；默认32位clamp端点另待规格裁决')
 
 
+# ---- #798 Maxwell FMUL / FFMA .FMZ（InstEmitFloatArithmetic EmitFmz，不走 Ampere AFmz）：积里有一个因子是 0，积就是 0（D3D9 规则，Inf / NaN × 0 = 0）----
+#   编码按 Ryujinx 解码器（InstDecoders.cs InstFmulR / InstFfmaR）：FMUL R = 0101110001101…（0x5c68 << 48），Rd 0..8、Ra 8..16、Rb 20..28、守卫 16..19 = PT、
+#   .FMZ = 44..46 取 2、乘数缩放 41..44 = 0（不缩放）；FFMA R = 010110011…（0x5980 << 48），Rc 39..47、.FMZ = 53..55 取 2。期望按规则手算，不跑翻译器
+def maxwell_load(rd, word): return 0x4c40000000000000 | 7 << 48 | 3 << 41 | 3 << 34 | word << 20 | 7 << 16 | 255 << 8 | rd   # LOP.PASS_B Rd, RZ, c[3][4·word]（同上 SHF 例）
+def maxwell_fmul_fmz(rd, ra, rb): return 0x5c68000000000000 | 2 << 44 | rb << 20 | 7 << 16 | ra << 8 | rd
+def maxwell_ffma_fmz(rd, ra, rb, rc): return 0x5980000000000000 | 2 << 53 | rc << 39 | rb << 20 | 7 << 16 | ra << 8 | rd
+INF, NAN = float('inf'), float('nan')
+fm = [(0.0, INF), (INF, 0.0), (NAN, 0.0), (2.0, 3.0)]   # 车道 3 是非零正控
+case('Maxwell FMUL.FMZ（0 × Inf / Inf × 0 / NaN × 0 = 0）', True, [f32(v) for a in fm for v in a],
+     maxwell_shader([maxwell_load(4 + 2 * i, 2 * i) for i in range(4)] + [maxwell_load(5 + 2 * i, 2 * i + 1) for i in range(4)]
+                    + [maxwell_fmul_fmz(i, 4 + 2 * i, 5 + 2 * i) for i in range(4)]),
+     [0, 0, 0, f32(6.0)], 'D3D9 乘零规则（FMZ）：因子有一个是 0 → 积为 +0；车道 3 = 2 × 3')
+ff = [(0.0, INF, 5.0), (INF, 0.0, -1.0), (NAN, 0.0, 2.0), (2.0, 3.0, 1.0)]
+case('Maxwell FFMA.FMZ（0 × Inf + c = c）', True, [f32(v) for a in ff for v in a],
+     maxwell_shader([maxwell_load(4 + 3 * i + k, 3 * i + k) for i in range(4) for k in range(3)]
+                    + [maxwell_ffma_fmz(i, 4 + 3 * i, 5 + 3 * i, 6 + 3 * i) for i in range(4)]),
+     [f32(5.0), f32(-1.0), f32(2.0), f32(7.0)], 'FMZ：积为 0 → 结果 = 加数 c；车道 3 = 2 × 3 + 1')
+
 # ---- BMSK / UBMSK（0x01b / 0x09b；位置 A、宽度第二源、.W = 75）：PTX bmsk —— .wrap 两者取模 32，.clamp 两者封顶 32；宽 0 → 0；超出 31 位的截掉 ----
 def bmsk(pos, width, wrap):
     if wrap: pos &= 31; width &= 31
@@ -662,18 +680,25 @@ def main():
         err = f'翻不过 {v[1:] if isinstance(v, list) else r}' if not isinstance(v, list) or v[0] == 'fail' else check(v[0], v[1])
         bad += err is not None
         print(f'{"✓" if err is None else "✗"} {name}：{"符合" if err is None else err}（{why}）')
+    # 全部 GPU 用例交给一个 frag_run 进程（--batch，一行一例）：每个用 Metal 的进程退出都会永久漏掉 1 个 IOSurface 名额（macOS 26.4.1 驱动），原先每例一个进程
     with tempfile.TemporaryDirectory() as t:
-        for (name, new, inputs, body, want, why, tex), r in zip(CASES, res):
+        lines, todo = [], []
+        for i, ((name, new, inputs, body, want, why, tex), r) in enumerate(zip(CASES, res)):
             v = r.get('ok')
             if not isinstance(v, list) or v[0] == 'fail':
                 bad += 1; print(f'✗ {name}：翻不过 {v[1:] if isinstance(v, list) else r}'); continue
-            mp = os.path.join(t, 'f.metal'); open(mp, 'w').write(v[0])
+            mp = os.path.join(t, f'f{i}.metal'); open(mp, 'w').write(v[0])
             pool = tex and tex[0] == 'pool'
-            texarg = ['-P', f'{tex[1]}:{tex[2]:x}:{tex[3]}' + ''.join(f':{x}' for x in tex[4:])] if pool else ['-T', f'{os.environ.get("TBUF_FORM", tex[0]) if tex[0] not in ("tex1d", "tex2d") else tex[0]}:{tex[1]}'] if tex else []   # TBUF_FORM=fixed：负对照，宿主按固定 16384 列的行绑
-            p = subprocess.run([run, mp, *arg_spec(v[0], v[1] if pool else None), *texarg, *[f'{w:08x}' for w in inputs]], capture_output=True, text=True, timeout=60)
-            got = [int(w, 16) for w in p.stdout.split()] if p.returncode == 0 else None
+            texarg = ['-P', f'{tex[1]}:{tex[2]:x}:{tex[3]}' + ''.join(f':{x}' for x in tex[4:])] if pool else ['-T', f'{os.environ.get("TBUF_FORM", tex[0]) if tex[0] not in ("tex1d", "tex2d") else tex[0]}:{tex[1]}'] if tex else []   # TBUF_FORM=fixed：负对照
+            lines.append('\t'.join([mp, *arg_spec(v[0], v[1] if pool else None), *texarg, *[f'{w:08x}' for w in inputs]])); todo.append((name, want, why))
+        p = subprocess.run([run, '--batch'], input='\n'.join(lines) + '\n', capture_output=True, text=True, timeout=60 + 5 * len(lines))
+        outs = p.stdout.splitlines()
+        if len(outs) != len(todo): bad += 1; print(f'✗ frag_run 批量只回了 {len(outs)} / {len(todo)} 行（退出 {p.returncode}）：{p.stderr.strip()[:300]}')
+        for (name, want, why), o in zip(todo, outs):
+            f = o.split('\t')
+            got = [int(w, 16) for w in f[1].split()] if f[0] == 'ok' else None
             ok = got == want; bad += not ok
-            print(f'{"✓" if ok else "✗"} {name}：期望 {" ".join(f"{w:08x}" for w in want)} → 真结果 {" ".join(f"{w:08x}" for w in got) if got else p.stderr.strip()[:200]}（{why}）')
+            print(f'{"✓" if ok else "✗"} {name}：期望 {" ".join(f"{w:08x}" for w in want)} → 真结果 {" ".join(f"{w:08x}" for w in got) if got else f[-1][:200]}（{why}）')
     n = len(CASES) + len(REFL)
     print(f'Ampere 指令单测：{n - bad}/{n} 例过（GPU 读回 {len(CASES)} 例 + 只看翻译结果 {len(REFL)} 例；标「新」的 {sum(c[1] for c in CASES) + sum(c[1] for c in REFL)} 例）')
     return 1 if bad or ir_bad else 0

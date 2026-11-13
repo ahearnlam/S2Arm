@@ -330,6 +330,53 @@ static _Atomic int g_shown_external = -1;   // 虚拟按键当前按「实体手
 static void pad_selection_check(void);
 static void pad_face_sync(void);
 
+// 本地多手柄（双人同玩）：槽 0 = 玩家 1，仍走 pad.c（触屏 / NS2 Pro / 系统手柄三选一，服务层读 s2a_pad_read_ex）；
+//   槽 1–3 = 其余系统扩展手柄各一只，服务层读 s2a_vpad_read_pad（协议同 Mac macos/front_mac.m）。分槽规则共用 runtime/src/pad.c s2a_slot_plan。
+//   输入队列上写、服务层输入线程读：按槽原子量（同 front_mac.m）。
+// TODO(多手柄 + 震动 / 体感)：震动会话、Core Haptics 引擎与体感现在都只跟槽 0 那只（g_haptic_device / s2a_pad_rumble_session 单例），
+//   服务层 ControllerFeedback 也只有一个玩家号；玩家 2 的震动 / 体感要先有按槽的反馈导出与服务层按玩家分发，再接到这里的槽位手柄
+#define S2A_IOS_MAX_PADS 4
+static _Atomic uint32_t g_slot_buttons[S2A_IOS_MAX_PADS];
+static _Atomic int32_t g_slot_sticks[S2A_IOS_MAX_PADS][4];
+static _Atomic int g_slot_live = 1;    // 占到的最高槽位 + 1（触屏也算一位，同 Mac 键盘）
+static _Atomic int g_slots_active;     // 前台才喂槽 1–3（后台清零，同 pad.c s2a_pad_set_active）
+// 系统扩展手柄 → Switch 按键位（0..15 + Home 扩展位 16）与摇杆。玩家 1（publishSystem）与槽 1–3 共用
+static void sample_extended(GCExtendedGamepad *pad, uint32_t *out_buttons, int32_t axes[4]) {
+    // GameController 的 ABXY 通常按物理方位定义（南/东/西/北 → Nintendo B/A/Y/X）；任天堂手柄按键帽字母上报（#40），判断同 Mac 侧 front_mac.m。
+    // buttonOptions（「-」）在部分手柄上为 nil；位序不能动，bit11 留给它，nil 时该位恒 0（与 Mac 侧 front_mac.m 一致）。
+    GCControllerButtonInput *options = pad.buttonOptions;
+    GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
+    int order[4]; s2a_pad_abxy_order(s2a_pad_kind(pad.controller.productCategory.UTF8String, [pad isKindOfClass:GCXboxGamepad.class],
+        [pad isKindOfClass:GCDualShockGamepad.class] || [pad isKindOfClass:GCDualSenseGamepad.class]), s2a_pad_layout(), order);   // 按键布局（pad.c）
+    GCControllerButtonInput *keys[16] = {face[order[0]], face[order[1]], face[order[2]], face[order[3]],
+        pad.leftThumbstickButton, pad.rightThumbstickButton, pad.leftShoulder, pad.rightShoulder,
+        pad.leftTrigger, pad.rightTrigger, pad.buttonMenu, options,
+        pad.dpad.left, pad.dpad.up, pad.dpad.right, pad.dpad.down};
+    uint32_t buttons = 0;
+    for (int i = 0; i < 16; i++) if (keys[i].isPressed) buttons |= 1u << i;
+    if (pad.buttonHome.isPressed) buttons |= 1u << 16;   // Home 放扩展位 bit16（同 NS2 手柄）：只用于长按开局内菜单（#276），pad.c 判完就截掉、不进游戏
+    s2a_pad_stick(pad.leftThumbstick.xAxis.value, pad.leftThumbstick.yAxis.value, axes);
+    s2a_pad_stick(pad.rightThumbstick.xAxis.value, pad.rightThumbstick.yAxis.value, axes + 2);
+    *out_buttons = buttons;
+}
+// 接一只系统手柄（玩家 1 与槽 1–3 同一套）：回调放输入队列；「-」「Home」关系统手势。
+//   「-」（buttonOptions）默认是 GCSystemGestureStateEnabled：系统手势识别器先跑、之后才把输入给 app，
+//   短按要等它判定失败才转发（真机约 1 秒），长按完全不转发；iOS 还拿它触发录屏。
+//   Disabled 的语义是「手势识别器完全不跑，输入直接给 app」（GCControllerElement.h:45），这才是我们要的。
+//   不要用 AlwaysReceive：它已废弃（API_DEPRECATED_WITH_REPLACEMENT(…Disabled, ios(14.0, 27.0))），
+//   而且语义是「同时发给 app 和手势识别器」——录屏照旧触发。
+//   「+」（buttonMenu）不设：头文件没有把它标成系统保留键（系统保留做截图/录屏的是 buttonShare / buttonHome），
+//   且真机实测「+」本来即时响应（Enabled 下若绑了手势，短按必然延迟），没有现象就不改。
+static void prepare_pad(GCController *next, dispatch_queue_t queue) {
+    next.handlerQueue = queue;
+    GCExtendedGamepad *pad = next.extendedGamepad;
+    if (@available(iOS 14.0, *)) {
+        if (pad.buttonOptions) pad.buttonOptions.preferredSystemGestureState = GCSystemGestureStateDisabled;
+        // Home 同理（#276）：系统默认拿去开游戏面板 / 回主屏，关掉手势后输入给 App，长按 1.5 秒开局内设置（同长按「+」、四指长按）
+        if (pad.buttonHome) pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
+    }
+}
+
 // BLE 队列已缓存样本；新运动通知唤醒同一 HID 线程，不另建采样线程。
 static void ble_motion(const ns2_motion *motion, void *context) {
     if (motion->known && (uintptr_t)context == atomic_load(&g_session) && atomic_load(&g_ble_ready)) s2a_pad_wake();
@@ -369,6 +416,10 @@ static void log_controllers(int why);   // 下面 systemChanged 旁：GameContro
     GCController *_system; // 仅 inputQueue 访问。
     uint64_t _systemRev;      // 仅 inputQueue 访问：断开复查代次，旧 timer 靠它作废。
     BOOL _systemRecheck;      // 仅 inputQueue 访问：已排了一次延迟复查。
+    // 仅 inputQueue 访问：各槽的手柄身份与强引用。手柄蓝牙休眠 / 断开时系统会释放 GCController，只存裸指针会变悬空（同 front_mac.m pad_owner），
+    //   所以强引用；每次分槽整表重建，不在线的置 nil 才真正释放
+    const void *_slotId[S2A_IOS_MAX_PADS];
+    GCController *_slotOwner[S2A_IOS_MAX_PADS];
     NSString *_rememberedIdentifier;
     BOOL _adapterEnabled, _foreground, _hasSystem, _bleStarted, _bleBusy, _bleWanted, _blePaused, _bleResuming;
 }
@@ -460,7 +511,8 @@ static void pad_face_sync(void) {
         if (previous == self->_adapterEnabled) return;
         if (self->_adapterEnabled) [self reloadRecord];
         [self selectSystem];
-        if (self->_adapterEnabled && !self->_hasSystem && self->_bleWanted) [self resumeBLE];
+        // 玩家刚打开适配（设置页或齿轮菜单）：直接开始连接，不用再点一次连接按钮；记得手柄就直连它，否则扫描配对广播
+        if (self->_adapterEnabled && !self->_hasSystem) { if (self->_bleWanted) [self resumeBLE]; else [self startBLE]; }
         [self updateVisibility];
     });
 }
@@ -489,24 +541,53 @@ static void pad_face_sync(void) {
     _touchEnabled(_foreground && !external);
 }
 - (void)publishSystem:(GCExtendedGamepad *)pad {
-    // GameController 的 ABXY 通常按物理方位定义（南/东/西/北 → Nintendo B/A/Y/X）；任天堂手柄按键帽字母上报（#40），判断同 Mac 侧 front_mac.m。
-    // buttonOptions（「-」）在部分手柄上为 nil；位序不能动，bit11 留给它，nil 时该位恒 0（与 Mac 侧 front_mac.m 一致）。
-    GCControllerButtonInput *options = pad.buttonOptions;
-    GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
-    int order[4]; s2a_pad_abxy_order(s2a_pad_kind(pad.controller.productCategory.UTF8String, [pad isKindOfClass:GCXboxGamepad.class],
-        [pad isKindOfClass:GCDualShockGamepad.class] || [pad isKindOfClass:GCDualSenseGamepad.class]), s2a_pad_layout(), order);   // 按键布局（pad.c）
-    GCControllerButtonInput *keys[16] = {face[order[0]], face[order[1]], face[order[2]], face[order[3]],
-        pad.leftThumbstickButton, pad.rightThumbstickButton, pad.leftShoulder, pad.rightShoulder,
-        pad.leftTrigger, pad.rightTrigger, pad.buttonMenu, options,
-        pad.dpad.left, pad.dpad.up, pad.dpad.right, pad.dpad.down};
-    uint32_t buttons = 0;
-    for (int i = 0; i < 16; i++) if (keys[i].isPressed) buttons |= 1u << i;
-    if (pad.buttonHome.isPressed) buttons |= 1u << 16;   // Home 放扩展位 bit16（同 NS2 手柄）：只用于长按开局内菜单（#276），pad.c 判完就截掉、不进游戏
-    int32_t axes[4];
-    s2a_pad_stick(pad.leftThumbstick.xAxis.value, pad.leftThumbstick.yAxis.value, axes);
-    s2a_pad_stick(pad.rightThumbstick.xAxis.value, pad.rightThumbstick.yAxis.value, axes + 2);
+    uint32_t buttons; int32_t axes[4];
+    sample_extended(pad, &buttons, axes);
     s2a_pad_update(S2A_PAD_SYSTEM, 1, buttons, axes);
     pad_selection_check();
+}
+// 槽 1–3 采一次写进原子量（空槽 / 后台写零）。只在 inputQueue 上跑
+- (void)publishSlot:(int)slot {
+    uint32_t buttons = 0; int32_t axes[4] = {0};
+    GCExtendedGamepad *pad = _slotOwner[slot].extendedGamepad;
+    if (pad && atomic_load(&g_slots_active)) { sample_extended(pad, &buttons, axes); buttons &= 0xffffu; }   // Home 扩展位只给玩家 1 开菜单用
+    for (int i = 0; i < 4; i++) atomic_store(&g_slot_sticks[slot][i], axes[i]);
+    atomic_store(&g_slot_buttons[slot], buttons);
+}
+// 分槽（只在 inputQueue 上跑）：在线扩展手柄按连接顺序交给 s2a_slot_plan，整表重建；槽 1–3 换人时装 / 摘回调。
+//   返回该占槽 0（玩家 1）的手柄，由 selectSystemLocked 照原有的判活 / 延迟复查逻辑接成系统手柄；槽 0 的回调归 attachSystem / clearSystem 管
+- (GCController *)planSlots {
+    const void *ids[9]; GCController *ctrls[9]; int n = 0;   // 数组留得比槽位多，超出的交给 s2a_slot_plan 判 -1 丢弃
+    GCController *current = _system;
+    // 当前玩家 1 的对象自身可用就算在线（同 s2a_system_action：快照抖动期不让出槽 0）
+    if (current.extendedGamepad) { ids[n] = (__bridge const void *)current; ctrls[n] = current; n++; }
+    for (GCController *c in GCController.controllers) {
+        if (!c.extendedGamepad || c == current) continue;
+        if (n >= 9) break;
+        ids[n] = (__bridge const void *)c; ctrls[n] = c; n++;
+    }
+    int slot_of[9];
+    int live = s2a_slot_plan(_slotId, ids, n, S2A_IOS_MAX_PADS, slot_of);
+    GCController *old[S2A_IOS_MAX_PADS];
+    for (int i = 0; i < S2A_IOS_MAX_PADS; i++) { old[i] = _slotOwner[i]; _slotId[i] = NULL; _slotOwner[i] = nil; }
+    for (int j = 0; j < n; j++) if (slot_of[j] >= 0) { _slotId[slot_of[j]] = ids[j]; _slotOwner[slot_of[j]] = ctrls[j]; }
+    __weak S2AController *weakSelf = self;
+    for (int i = 1; i < S2A_IOS_MAX_PADS; i++) {
+        if (old[i] == _slotOwner[i]) continue;   // 原样在槽里：回调已装
+        if (old[i] && old[i] != _system) old[i].extendedGamepad.valueChangedHandler = nil;   // 离开的手柄摘回调（强引用随 old 一起释放）
+        GCController *next = _slotOwner[i];
+        if (!next) continue;
+        prepare_pad(next, _inputQueue);
+        next.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *pad, GCControllerElement *element) {
+            S2AController *owner = weakSelf;
+            if (!owner) return;
+            for (int k = 1; k < S2A_IOS_MAX_PADS; k++) if (owner->_slotOwner[k].extendedGamepad == pad) { [owner publishSlot:k]; break; }
+        };
+        LOG("系统手柄：%s 接入玩家 %d", next.vendorName.UTF8String ?: "GameController", i + 1);
+    }
+    for (int i = 1; i < S2A_IOS_MAX_PADS; i++) [self publishSlot:i];   // 空槽清零；新接入的立即采一次
+    if (atomic_exchange(&g_slot_live, live) != live) LOG("系统手柄：槽位 %d 个（含触屏 / 玩家 1）", live);
+    return _slotOwner[0];
 }
 // 换到另一个系统手柄对象：旧对象的 handler 必须摘掉（它已经不在快照里），新对象装上同一套回调。
 // 只在 inputQueue 上跑。
@@ -517,20 +598,7 @@ static void pad_face_sync(void) {
     _systemRev++;          // 挂起的延迟复查作废：已经有新对象了
     _systemRecheck = NO;
     system_select_device(next);   // 震动侧跟着换设备（原 selectSystem 里的调用，挪到这里）
-    next.handlerQueue = _inputQueue;
-    // 「-」（buttonOptions）默认是 GCSystemGestureStateEnabled：系统手势识别器先跑、之后才把输入给 app，
-    //   短按要等它判定失败才转发（真机约 1 秒），长按完全不转发；iOS 还拿它触发录屏。
-    //   Disabled 的语义是「手势识别器完全不跑，输入直接给 app」（GCControllerElement.h:45），这才是我们要的。
-    //   不要用 AlwaysReceive：它已废弃（API_DEPRECATED_WITH_REPLACEMENT(…Disabled, ios(14.0, 27.0))），
-    //   而且语义是「同时发给 app 和手势识别器」——录屏照旧触发。
-    //   「+」（buttonMenu）不设：头文件没有把它标成系统保留键（系统保留做截图/录屏的是 buttonShare / buttonHome），
-    //   且真机实测「+」本来即时响应（Enabled 下若绑了手势，短按必然延迟），没有现象就不改。
-    GCExtendedGamepad *pad = next.extendedGamepad;
-    if (@available(iOS 14.0, *)) {
-        if (pad.buttonOptions) pad.buttonOptions.preferredSystemGestureState = GCSystemGestureStateDisabled;
-        // Home 同理（#276）：系统默认拿去开游戏面板 / 回主屏，关掉手势后输入给 App，长按 1.5 秒开局内设置（同长按「+」、四指长按）
-        if (pad.buttonHome) pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
-    }
+    prepare_pad(next, _inputQueue);   // 回调队列 + 「-」「Home」关系统手势
     __weak S2AController *weakSelf = self;
     next.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *pad, GCControllerElement *element) {
         S2AController *owner = weakSelf;
@@ -565,7 +633,7 @@ static void pad_face_sync(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             S2AController *inner = weakSelf;
             if (!inner) return;
-            inner->_hasSystem = hasSystem;
+            [inner systemPresence:hasSystem];
             [inner updateVisibility];
         });
     });
@@ -574,9 +642,9 @@ static void pad_face_sync(void) {
 - (void)selectSystemLocked:(BOOL)foreground mayClear:(BOOL)mayClear {
     NSArray<GCController *> *controllers = GCController.controllers;
     GCController *current = _system;
-    GCController *candidate = nil;
-    for (GCController *other in controllers)
-        if (other != current && other.extendedGamepad) { candidate = other; break; }
+    // 玩家 1 = 占槽 0 的那只（s2a_slot_plan）：还在线的手柄保留原槽，所以两只时 1 号断开、2 号仍是玩家 2，不顶上来当玩家 1
+    GCController *slot0 = [self planSlots];
+    GCController *candidate = slot0 != current ? slot0 : nil;
     s2a_sys_state state = {
         .foreground = foreground,
         .has_current = current != nil,
@@ -617,9 +685,19 @@ static void pad_face_sync(void) {
         [self selectSystemLocked:foreground mayClear:NO];
         hasSystem = self->_system != nil;
     });
-    _hasSystem = hasSystem;
+    [self systemPresence:hasSystem];
     if (_foreground && _hasSystem) [self stopBLE:"system controller selected"];
     [self updateVisibility];
+}
+// 系统手柄在不在（主线程）：系统手柄接入时 NS2 链路会停（selectSystem），它走了以后原来连着的 NS2 手柄要自己接回来——
+//   以前只有切前后台才会再连，玩家拔掉 / 关掉系统手柄后 NS2 手柄一直不出输入
+- (void)systemPresence:(BOOL)hasSystem {
+    BOOL resume = s2a_ble_resume_after_system(_hasSystem, hasSystem, _foreground, _adapterEnabled, _bleWanted, _bleStarted);
+    _hasSystem = hasSystem;
+    if (resume) {
+        LOG("NS2 Pro：系统手柄已断开，重新连接记住的 NS2 手柄");
+        [self resumeBLE];
+    }
 }
 // 诊断（#456）：列出 GameController 枚举到的全部设备与 profile。只有带 extendedGamepad 的才会被选成系统手柄并打「接入」，
 //   第三方手柄的 Switch 模式若被枚举成只有 micro / 没有标准 profile，或根本没被枚举，原先日志里一片空白，分不清卡在系统层还是 App 层
@@ -727,6 +805,7 @@ static void log_controllers(int why) {   // why：0 启动时、1 连接通知�
     [self updateVisibility];
 }
 - (void)setForeground:(BOOL)foreground {
+    S2A_MAIN_ONLY("-[S2AController setForeground:]");
     if (_foreground == foreground) { if (foreground) [self settingsChanged:nil]; return; }
     _foreground = foreground;
     pthread_mutex_lock(&g_feedback_mu);
@@ -735,6 +814,7 @@ static void log_controllers(int why) {   // why：0 启动时、1 连接通知�
     if (!foreground) atomic_store(&g_ble_ready, 0);
     pthread_mutex_unlock(&g_feedback_mu);
     s2a_pad_set_active(foreground);
+    atomic_store(&g_slots_active, foreground);   // 槽 1–3：下面 selectSystem 分槽时按它采样或清零
     if (foreground) { phone_refresh_availability(); [self reloadAdapterPreference]; if (_adapterEnabled) [self reloadRecord]; }
     if (!foreground && _bleStarted) {
         _bleResuming = NO;
@@ -797,7 +877,25 @@ void s2a_controller_attach(UIView *root, void (^touchEnabled)(BOOL)) {
     watch.cancelsTouchesInView = NO; watch.delaysTouchesBegan = NO; watch.delaysTouchesEnded = NO;
     [root addGestureRecognizer:watch];
 }
-void s2a_controller_set_foreground(int foreground) { [g_controller setForeground:foreground != 0]; }
+// 前后台切换会改手柄 / 虚拟手柄的 UIKit 状态（selectSystem → updateVisibility、S2AVPadView setInputEnabled → clearTouches），只许在主线程做。
+//   v0.3.0 起挂起 / 恢复在串行队列 s2a.ios-lifecycle 上跑（app.m s2a_ios_suspend），从那里直接调会在 UIImageView setHidden 处触发 UIKit 主线程断言、
+//   整个 App 被系统中止（11-11 真机：局中一失焦就崩，崩溃报告 EXC_BREAKPOINT，队列 s2a.ios-lifecycle）。不在主线程就排到主队列：
+//   用 async 不用 sync——调用方可能正持着主线程要等的东西；主队列先进先出，前后台的先后顺序不变
+void s2a_controller_set_foreground(int foreground) {
+    BOOL fg = foreground != 0;
+    if (NSThread.isMainThread) { [g_controller setForeground:fg]; return; }
+    dispatch_async(dispatch_get_main_queue(), ^{ [g_controller setForeground:fg]; });
+}
+
+// 多手柄槽位（服务层 InputPump 按符号查，协议同 macos/front_mac.m）：count = 占到的最高槽位 + 1；
+//   read_pad 读槽 1–3。槽 0（玩家 1）服务层走 s2a_pad_read_ex，这里不代读——那次读会清掉 pad.c 的短按锁存，回零
+__attribute__((visibility("default"), used)) int s2a_vpad_pad_count(void) { return atomic_load(&g_slot_live); }
+__attribute__((visibility("default"), used)) uint32_t s2a_vpad_read_pad(int index, int32_t *sticks) {
+    if (index < 1 || index >= S2A_IOS_MAX_PADS) { for (int i = 0; i < 4; i++) sticks[i] = 0; return 0; }
+    uint32_t buttons = atomic_load(&g_slot_buttons[index]);
+    for (int i = 0; i < 4; i++) sticks[i] = atomic_load(&g_slot_sticks[index][i]);
+    return buttons;
+}
 
 // C# 反馈提交只碰固定 mailbox / 快照，不从游戏线程等待 CoreBluetooth 或 UIKit。
 __attribute__((visibility("default"), used)) uint64_t s2a_pad_rumble_session(void) {
@@ -881,10 +979,32 @@ void s2a_rumble_apply_settings(void) {
 // 菜单里切震动档位 / 打开游戏震动时试震一下（11-09 维护者：「点击强弱机器是没有反应的……切换的时候手机震一下让玩家有感知」）：
 //   走游戏震动同一条出口（s2a_pad_rumble_session 选手机马达或手柄，s2a_pad_set_rumble_pair 按当前档位倍率缩放），震 0.3 秒，几档之间摸得出差别。
 //   基准振幅 0.06（游戏常见值；手机马达 / 系统手柄过 s2a_hp_feel 后约 0.5）：弱 0.18、较弱 0.36、标准 0.51、较强 0.72、强 0.92、震爆我 1（倍率见 s2a_rumble_apply_settings）
+//   #462：菜单多半是手指点的，这时生效来源是触屏，游戏路由选的是手机马达 / 只给体感（s2a_pad_rumble_session），已连接的手柄收不到试震。
+//   试震要让玩家摸到手里手柄的档位差别：有已连接、能震的系统手柄（含走配件协议的 G8+ 这类）或 NS2 Pro，就直接在它那一路播 0.3 秒，
+//   不走游戏路由、不碰选中 / 代次状态（游戏自己的震动照旧按生效来源走）；都没有才照旧走游戏那条出口
 void s2a_rumble_preview(void) {
     if (atomic_load(&g_rumble_gain) <= 0) return;
-    uint64_t session = s2a_pad_rumble_session(); if (!session) { LOG("游戏震动：试震跳过（现在没有可震的设备）"); return; }
     const s2a_pad_vibration v[2] = {{0.06f, 160, 0.06f, 320}, {0.06f, 160, 0.06f, 320}};
+    pthread_mutex_lock(&g_feedback_mu);
+    BOOL sys = g_system_present && g_system_supported && !g_system_transition && g_system_haptics_queue;
+    BOOL ns2 = !sys && atomic_load(&g_adapter_enabled) && atomic_load(&g_ble_ready);
+    pthread_mutex_unlock(&g_feedback_mu);
+    if (sys) {
+        s2a_pad_vibration scaled[2]; rumble_scale_pair(v, scaled, YES);
+        LOG("游戏震动：试震发给已连接的系统手柄（不看当前输入来源）");
+        s2a_pad_vibration l = scaled[0], r = scaled[1];   // 块捕获不了 C 数组，拆成两个值带进去
+        dispatch_async(g_system_haptics_queue, ^{ s2a_pad_vibration p[2] = {l, r}; system_play_on_queue(p); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), g_system_haptics_queue, ^{ system_stop_on_queue(); });
+        return;
+    }
+    if (ns2) {
+        s2a_pad_vibration scaled[2]; rumble_scale_pair(v, scaled, NO);
+        ns2_vibration pair[2] = {{scaled[0].low_amp, scaled[0].low_hz, scaled[0].high_amp, scaled[0].high_hz}, {scaled[1].low_amp, scaled[1].low_hz, scaled[1].high_amp, scaled[1].high_hz}};
+        LOG("游戏震动：试震发给已连接的 NS2 手柄（不看当前输入来源）");
+        atomic_load(&g_ns2)->send_pair_lease(pair, 300);   // 租期 300 ms 到点自停
+        return;
+    }
+    uint64_t session = s2a_pad_rumble_session(); if (!session) { LOG("游戏震动：试震跳过（现在没有可震的设备）"); return; }
     s2a_pad_set_rumble_pair(session, v);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ s2a_pad_stop_rumble(session); });
 }

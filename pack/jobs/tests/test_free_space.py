@@ -2,6 +2,7 @@
 # Copyright 2026 S2Arm contributors
 """启动器「释放空间」+ 游戏库位置预检（11-07）：云盘同步目录、卷格式（Mac / Windows 同一套判法）、按部件统计与删除。
 全为合成路径 / 合成文件，期望值按规则手写。"""
+import json
 import os
 from pathlib import Path
 import sys
@@ -78,7 +79,7 @@ class CloudFolder(unittest.TestCase):
         self.assertIsNone(libloc.cloud_folder("C:\\Users\\player\\OneDrive\\x", system="Windows", home=home, env={}))   # 没装 OneDrive：缺省目录名不算
 
     def test_format_ok(self):
-        for fmt, mac, win in (("apfs", True, False), ("APFS", True, False), ("exfat", False, False), ("msdos", False, False),
+        for fmt, mac, win in (("apfs", True, False), ("APFS", True, False), ("hfs", True, False), ("exfat", True, False), ("msdos", False, False),
                               ("ntfs", False, True), ("NTFS", False, True), ("refs", False, True), ("fat32", False, False), ("", True, True)):
             with self.subTest(fmt=fmt):
                 self.assertEqual(libloc.format_ok(fmt, system="Darwin"), mac)
@@ -86,9 +87,10 @@ class CloudFolder(unittest.TestCase):
 
     def test_problems_codes(self):
         self.assertEqual(libloc.problems("/Volumes/Example/库", system="Darwin", home="/Users/player", fmt="apfs"), [])
-        got = libloc.problems("/Users/player/Library/Mobile Documents/x", system="Darwin", home="/Users/player", fmt="exfat")
+        self.assertEqual(libloc.problems("/Volumes/Example/库", system="Darwin", home="/Users/player", fmt="exfat"), [])
+        got = libloc.problems("/Users/player/Library/Mobile Documents/x", system="Darwin", home="/Users/player", fmt="msdos")
         self.assertEqual([p["code"] for p in got], ["library_in_cloud", "library_not_apfs"])
-        self.assertIn("iCloud 云盘", got[0]["message"]); self.assertIn("EXFAT", got[1]["message"])
+        self.assertIn("iCloud 云盘", got[0]["message"]); self.assertIn("MSDOS", got[1]["message"])
         got = libloc.problems("E:\\库", system="Windows", home="C:\\Users\\player", fmt="exfat")
         self.assertEqual([p["code"] for p in got], ["library_bad_format"]); self.assertIn("NTFS", got[0]["message"])
 
@@ -133,6 +135,88 @@ class LibraryGate(JobCase):
         self.assertEqual(e.exception.code, "library_in_cloud"); self.assertIn("iCloud 云盘", str(e.exception))
         self.assertFalse(lib.exists())   # 拦在建目录之前
 
+    def test_setup_cloud_confirmed_proceeds_and_is_remembered(self):
+        # v0.3.1：云盘目录是认得出的风险——玩家确认（acceptCloud）后照建，选择记进游戏库标识（cloudAccepted）；
+        #   之后再打开同一个库（启动时连已保存的库也走 setup，不带 acceptCloud）不再问、照常打开；别的云盘目录照旧先问
+        lib = self.root / "云盘里的库"; self.c.library = lib; self.c.r["acceptCloud"] = True
+        with patch.object(libloc, "cloud_folder", return_value="iCloud 云盘"):
+            r = library.setup(self.c)
+        self.assertEqual(r["outcome"], "created")
+        self.assertTrue(libloc.cloud_accepted(str(lib)))
+        self.assertFalse(libloc.cloud_accepted(str(self.root / "别的库")))   # 没记过 / 读不到：False
+        self.c.r.pop("acceptCloud")
+        with patch.object(libloc, "cloud_folder", return_value="iCloud 云盘"):
+            self.assertEqual(library.setup(self.c)["outcome"], "opened")
+        self.assertTrue(libloc.cloud_accepted(str(lib)))
+        self.c.library = self.root / "另一个云盘里的库"
+        with patch.object(libloc, "cloud_folder", return_value="iCloud 云盘"), self.assertRaises(Failure) as e:
+            library.setup(self.c)
+        self.assertEqual(e.exception.code, "library_in_cloud")
+
+    def test_windows_exfat_library_confirmed_proceeds_and_is_remembered(self):
+        # v0.3.1：Windows 游戏库在 exFAT / FAT32 上是认得出的风险——不带 acceptFormat 报 library_bad_format（文案说清多占空间、断电要重出），
+        #   带了照建、选择记进标识（formatAccepted）；同一个库再打开不再问；别的 exFAT 文件夹照旧先问
+        lib = self.root / "exFAT 盘上的库"; self.c.library = lib
+        with as_windows(library), patch.object(library, "volume_format", return_value="exfat"), patch.object(libloc, "cloud_folder", return_value=None):
+            with self.assertRaises(Failure) as e:
+                library.setup(self.c)
+            self.assertEqual(e.exception.code, "library_bad_format"); self.assertIn("多占", str(e.exception)); self.assertIn("NTFS", str(e.exception))
+            self.c.r["acceptFormat"] = True
+            self.assertEqual(library.setup(self.c)["outcome"], "created")
+            self.assertTrue(libloc.format_accepted(str(lib)))
+            self.c.r.pop("acceptFormat")
+            self.assertEqual(library.setup(self.c)["outcome"], "opened")
+            self.c.library = self.root / "另一个 exFAT 库"
+            with self.assertRaises(Failure):
+                library.setup(self.c)
+
+    def test_exfat_message_says_how_much_more_space(self):
+        # 文案只写玩家能据此选择的（11-12 维护者：不写断电之类）：按要搬过来的库里现有的款算多占多少。期望手算：
+        #   两款原件 10 GB、3 GB → 每款多两份解包（× 1.1）：2 × (11 + 3.3) = 28.6 GB → 「多占约 29 GB」；exFAT 不提 4 GB，FAT32 提
+        old = self.root / "旧库"; old.mkdir()
+        g = lambda tid, size: dict(id=tid, packages=[dict(type="base", version=0, titleId=tid, sha256=tid.lower() * 4, size=size)])
+        (old / "catalog.json").write_text(json.dumps(dict(schema=1, games=[g("0100000000000000", 10 * 10**9), g("0100000000001000", 3 * 10**9)])), encoding="utf-8")
+        self.c.library = self.root / "exFAT 新库"; self.c.r["moveFrom"] = str(old)
+        for fmt, has4g in (("exfat", False), ("fat32", True)):
+            with self.subTest(fmt=fmt), as_windows(library), patch.object(library, "volume_format", return_value=fmt), \
+                    patch.object(libloc, "cloud_folder", return_value=None), self.assertRaises(Failure) as e:
+                library.setup(self.c)
+            text = str(e.exception)
+            self.assertIn("按现有 2 款游戏算，出包会多占约 29 GB", text); self.assertNotIn("断电", text)
+            self.assertEqual("4 GB" in text, has4g)
+
+    def test_fat32_stops_before_writing_only_when_image_over_4gb(self):
+        # FAT32 单个文件 ≤ 4 GiB − 1：打 iPhone 包要写约等于游戏内容大小的单一 IMG。5 GiB 的款 → 出包开头 fat32_file_too_large、列出 NTFS 盘；
+        #   3 GiB 的款照常；NTFS 存放位置不管多大都照常；Mac 打包（不写 IMG）不判
+        def game(size):
+            return dict(id="0100000000000000", packages=[dict(type="base", version=0, titleId="0100000000000000", sha256="a" * 64, size=size)])
+        self.c.operation = "ipa"
+        with as_windows(library), patch.object(library, "ntfs_drives", return_value=[("D:\\", "NTFS", 900 * 10**9)]):
+            with patch.object(library, "volume_format", return_value="fat32"):
+                with self.assertRaises(Failure) as e:
+                    library.require_fat32_fits(self.c, game(5 << 30), "E:\\库")
+                self.assertEqual(e.exception.code, "fat32_file_too_large"); self.assertIn("D:", str(e.exception)); self.assertIn("4 GB", str(e.exception))
+                library.require_fat32_fits(self.c, game(3 << 30), "E:\\库")
+                self.c.operation = "build"; library.require_fat32_fits(self.c, game(5 << 30), "E:\\库"); self.c.operation = "ipa"
+            with patch.object(library, "volume_format", return_value="ntfs"):
+                library.require_fat32_fits(self.c, game(50 << 30), "D:\\库")
+
+    def test_copy_tree_links_materializes_when_target_has_no_links(self):
+        # 搬库 / 移动游戏到建不了链接的盘：链接指向的目录整份拷过来；产物根的 <款>@现行 拷成真目录、版本名记进 .root_tag（roots 实目录模式按它认）
+        src = self.root / "src"; (src / "roots" / "款@v1").mkdir(parents=True); (src / "roots" / "款@v1" / "f").write_bytes(b"v1")
+        os.symlink("款@v1", src / "roots" / "款@现行")
+        dst = self.root / "dst"
+        real = os.symlink
+        def no_dir_links(a, b, target_is_directory=False, **kw):
+            if target_is_directory:
+                raise OSError(1, "Incorrect function")
+            return real(a, b, **kw)
+        with patch.object(library.os, "symlink", no_dir_links):
+            library.copy_tree_links(src, dst)
+        live = dst / "roots" / "款@现行"
+        self.assertFalse(live.is_symlink()); self.assertEqual((live / "f").read_bytes(), b"v1")
+        self.assertEqual((live / ".root_tag").read_text(encoding="utf-8").strip(), "款@v1")
+
     def test_require_apfs_windows_wants_ntfs(self):
         with as_windows(library):
             for fmt in ("exfat", "fat32"):
@@ -161,6 +245,11 @@ class LibraryGate(JobCase):
         self.assertEqual((row["ok"], row["group"], row["action"], row["diagnostic"]["code"]), (False, "storage", "library", "library_in_cloud"))
         row = run("/Volumes/Example/游戏库")
         self.assertTrue(row["ok"])
+        # 玩家确认过放在云盘里（游戏库标识 cloudAccepted）：照提示（已按你的选择继续用），不算要处理
+        lib = Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/S2Arm"
+        with patch.object(libloc, "cloud_accepted", side_effect=lambda p: p == str(lib)):
+            row = run(str(lib))
+        self.assertTrue(row["ok"]); self.assertIn("已按你的选择继续用", str(row))
 
 
 class FreeSpace(JobCase):
@@ -201,6 +290,8 @@ class FreeSpace(JobCase):
             with self.subTest(part=row["id"]):
                 self.assert_mib(row["bytes"], self.mib[row["id"]])
         self.assertTrue(all(p["title"] and p["rebuild"] for p in g["parts"]))
+        self.assert_mib(g["sharedBytes"], 0)   # 这套合成文件各项不共用
+        self.assert_mib(g["combos"]["ipa+mac"], 5)
         everyone = library.space_survey(self.context("spaceSurvey"))
         self.assertEqual([g["gameId"] for g in everyone["games"]], [GID, OTHER])
         other = everyone["games"][1]
@@ -262,6 +353,53 @@ class FreeSpace(JobCase):
         self.assertEqual((result.returncode, event["state"]), (0, "succeeded"), result.stderr)
         self.assert_mib(event["result"]["freedBytes"], 4)
         self.assertFalse(self.files["legacy"][0].exists()); self.assertTrue(self.files["ipa"][0].exists())
+
+
+
+class SharedBlocks(JobCase):
+    """几项共用的块（APFS 克隆族 / 硬链接）只在都勾上时才算腾出。玩家报：Mac 运行版本和 iPhone 包的 romfs 是同一组克隆块，
+    各项单独量相加显示 15.45 + 15.13 GB，单删 iPhone 包实际只腾出约 1.5 GB。期望值按文件大小手算（各项另有独占文件）"""
+    def setUp(self):
+        super().setUp()
+        self.d = self.root / "parts"
+        self.mac, self.ipa, self.elsewhere = self.d / "mac", self.d / "ipa", self.d / "elsewhere"
+
+    def clone(self, src, dst):
+        import subprocess
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["cp", "-c", str(src), str(dst)], check=True)
+        if library._CloneInfo.get(str(dst)) is None:
+            self.skipTest("这块盘取不到 APFS 克隆信息")
+
+    def assert_mib(self, got, mib):
+        self.assertGreaterEqual(got, mib * MIB); self.assertLess(got, mib * MIB + SLACK)
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS 克隆只在 macOS")
+    def test_clone_family_freed_only_when_every_copy_is_chosen(self):
+        write(self.mac / "romfs" / "big.bin", 4 * MIB); self.clone(self.mac / "romfs" / "big.bin", self.ipa / "pack" / "romfs" / "big.bin")
+        write(self.mac / "app.bin", 1 * MIB); write(self.ipa / "kit.bin", 2 * MIB)
+        got = library.freeable({"mac": [self.mac], "ipa": [self.ipa]})
+        self.assert_mib(got["mac"], 1); self.assert_mib(got["ipa"], 2); self.assert_mib(got["ipa+mac"], 7)
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS 克隆只在 macOS")
+    def test_copy_outside_the_chosen_parts_keeps_the_blocks(self):
+        write(self.mac / "romfs" / "big.bin", 4 * MIB)
+        self.clone(self.mac / "romfs" / "big.bin", self.ipa / "romfs" / "big.bin")
+        self.clone(self.mac / "romfs" / "big.bin", self.elsewhere / "big.bin")   # 第三份在两项之外（别款 / 没列的目录）
+        got = library.freeable({"mac": [self.mac], "ipa": [self.ipa]})
+        self.assert_mib(got["ipa+mac"], 0)
+
+    def test_hard_link_freed_only_when_every_link_is_chosen(self):
+        a = write(self.mac / "a.bin", 3 * MIB); self.ipa.mkdir(parents=True); os.link(a, self.ipa / "a.bin")
+        write(self.ipa / "own.bin", 1 * MIB)
+        got = library.freeable({"mac": [self.mac], "ipa": [self.ipa]})
+        self.assert_mib(got["mac"], 0); self.assert_mib(got["ipa"], 1); self.assert_mib(got["ipa+mac"], 4)
+        os.link(a, self.root / "outside.bin")   # 还有一条链接在外面：都勾也腾不出
+        self.assert_mib(library.freeable({"mac": [self.mac], "ipa": [self.ipa]})["ipa+mac"], 1)
+
+    def test_nested_roots_count_once(self):
+        write(self.mac / "sub" / "x.bin", 2 * MIB)
+        self.assert_mib(library.freeable({"mac": [self.mac, self.mac / "sub"]})["mac"], 2)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import S2ArmShellBridge
+import SaveSync
 import ShellControllers
 import ShellUI
 
@@ -12,9 +13,9 @@ import ShellUI
 public final class S2ArmShellHostModel {
     /// 清单里的全部款（容器里的）
     private var allGames: [GameDetail]
-    /// 这台设备上资源没到位的款：不在库里显示
+    /// 不在库里显示的款：玩家在这台设备上删掉的、资源也确实不在（审计 P1-155：资源没到位但玩家没删的款留在库里，显示「需要游戏数据」、点进去看说明）
     private var notOnDevice: Set<String> = []
-    /// 库里显示的款：只有这台设备上真能玩的（清单列着、资源已到位）
+    /// 库里显示的款：清单列着、且不是玩家删掉的（资源没到位的显示「需要游戏数据」）
     public var games: [GameDetail] { allGames.filter { !notOnDevice.contains($0.id) } }
     public private(set) var controllers: [ControllerInfo] = []
     public private(set) var input = ShellInputLog()
@@ -25,7 +26,12 @@ public final class S2ArmShellHostModel {
     @ObservationIgnored private let installState: (String) -> Int32
     /// 在后台解开阶段 2 的那款（同时只解一款；正在解别的返回 false）；正在解的这款的进度（已解开包数, 总包数）
     @ObservationIgnored private let installGame: (String) -> Bool
+    @ObservationIgnored private let installWait: () -> Int32
     @ObservationIgnored private let installProgress: (String) -> (Int, Int)?
+    /// 单一 IMG 的分段进度（宿主 s2a_shell_install_phase）：正在解这款时 (阶段 1/2/3，这一段的比例，不知道总量为 nil)，否则 nil
+    @ObservationIgnored private let installPhase: (String) -> (Int, Double?)?
+    /// 这一款最后一次解开失败的原因（宿主 s2a_shell_install_failure）；没失败过为 nil
+    @ObservationIgnored private let installFailure: (String) -> String?
     @ObservationIgnored private let now: () -> Date
     /// 这次打开 App 已经起过解包的款：解完仍是阶段 2 = 没解成，显示「安装没完成」，点重试才再起（不自动反复解）
     @ObservationIgnored private var installTried: Set<String> = []
@@ -39,6 +45,9 @@ public final class S2ArmShellHostModel {
     @ObservationIgnored private let pickGameData: (String) -> Void
     /// 这台设备上每款数据的根（宿主同一取法：launch.ctx 的 docs = @home/Documents/games/<游戏号>）；单测可换
     @ObservationIgnored private let gamesRoot: URL
+    /// 资源包的新位置（宿主同一取法，runtime/include/s2a_docs.h s2a_pack_root）：<家>/Library/Application Support/S2Arm/games/<游戏号>/资源包，
+    ///   不进「文件」App、不进 iCloud 备份；游戏根不是 <家>/Documents/games 时（单测换了根）没有新位置，只认老位置 <游戏根>/<游戏号>/资源包
+    @ObservationIgnored private let packGamesRoot: URL?
     /// 清单里写的状态（重判资源包时以它为底，不叠加）
     @ObservationIgnored private let listedStates: [String: GameState]
     @ObservationIgnored private let stores: S2ArmGameSettings.Stores
@@ -55,19 +64,28 @@ public final class S2ArmShellHostModel {
     @ObservationIgnored private var listedBanners: [String: URL] = [:]
     /// 编辑页底图：游戏号 → 封面文件
     public private(set) var bannerURLs: [String: URL]
+    /// 本地玩家（#623，LocalPlayers.swift）：表与当前玩家（存在 App 偏好 stores.app）；切换页开着时 playersOpen
+    @ObservationIgnored private let playerStore: LocalPlayers
+    public private(set) var players: [LocalPlayer]
+    public private(set) var currentPlayer: LocalPlayer
+    public private(set) var playersOpen = false
 
     /// play 缺省走 C 出口；单测可换
     public init(catalogue: Catalogue, play: ((String) -> Void)? = nil, stores: S2ArmGameSettings.Stores = .live,
                 layoutState: @escaping (String) -> S2ArmGameSettings.LayoutState = S2ArmGameSettings.layoutState,
                 installState: ((String) -> Int32)? = nil, installGame: ((String) -> Bool)? = nil, installProgress: ((String) -> (Int, Int)?)? = nil,
+                installPhase: ((String) -> (Int, Double?)?)? = nil, installFailure: ((String) -> String?)? = nil, installWait: (() -> Int32)? = nil,
                 now: @escaping () -> Date = Date.init, pickGameData: ((String) -> Void)? = nil, identityStore: GameIdentityStore = .live,
-                gamesRoot: URL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/games")) {
+                gamesRoot: URL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/games"), packGamesRoot: URL? = nil) {
         self.gamesRoot = gamesRoot
+        self.packGamesRoot = packGamesRoot ?? Self.packGamesRoot(for: gamesRoot)
         self.stores = stores; self.layoutState = layoutState; bannerURLs = catalogue.bannerURLs
+        playerStore = LocalPlayers(shellDefaults: stores.app)
+        players = playerStore.all; currentPlayer = playerStore.current
         self.identityStore = identityStore
         listedTiles = Dictionary(catalogue.tiles.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         listedBanners = catalogue.bannerURLs
-        let strays = Self.otherComputerGames(gamesRoot, listed: Set(catalogue.tiles.map(\.id)))
+        let strays = Self.otherComputerGames(gamesRoot, packRoot: self.packGamesRoot, listed: Set(catalogue.tiles.map(\.id)))
         allGames = catalogue.tiles.map { tile in
             var state = layoutState(tile.id); state.customIdentity = identityStore.load(tile.id) != nil
             return GameDetail(game: tile, sections: S2ArmGameSettings.sections(for: tile.id, stores: stores, state: state))
@@ -76,10 +94,16 @@ public final class S2ArmShellHostModel {
         self.play = play ?? { id in _ = id.withCString { s2a_shell_play($0) } }
         self.installState = installState ?? { id in id.withCString { s2a_shell_game_install_state($0) } }
         self.installGame = installGame ?? { id in id.withCString { s2a_shell_install_game($0) } != 0 }
+        self.installWait = installWait ?? { s2a_shell_install_wait() }
         self.installProgress = installProgress ?? { id in
             var done: Int32 = 0, total: Int32 = 0
             return id.withCString { s2a_shell_install_progress($0, &done, &total) } != 0 ? (Int(done), Int(total)) : nil
         }
+        self.installPhase = installPhase ?? { id in
+            var phase: Int32 = 0, fraction: Double = -1
+            return id.withCString { s2a_shell_install_phase($0, &phase, &fraction) } != 0 ? (Int(phase), fraction < 0 ? nil : fraction) : nil
+        }
+        self.installFailure = installFailure ?? { id in id.withCString { s2a_shell_install_failure($0) }.map { String(cString: $0) } }
         self.now = now
         self.pickGameData = pickGameData ?? { id in id.withCString { s2a_shell_pick_game_data($0) } }
         let savedOrder = stores.app.stringArray(forKey: "S2ALibraryOrder") ?? []
@@ -108,10 +132,11 @@ public final class S2ArmShellHostModel {
     /// 手机上有、容器清单里没有的款：同一台手机在另一台电脑上装过，这台电脑重组容器时带不上（App 里的游戏程序读不回电脑）。
     /// 存档和资源包都还在，显示成不可玩并告诉玩家回原来那台电脑重装。只认目录名是 16 位游戏号、资源包已解开（资源包/.applied）的，别的跳过；
     /// 名字和图标取这款资源包自带的 ctl/control.nacp 与 icon_*.dat，读不到用游戏号、占位图
-    static func otherComputerGames(_ root: URL, listed: Set<String>) -> [GameTile] {
+    static func otherComputerGames(_ root: URL, packRoot: URL?, listed: Set<String>) -> [GameTile] {
         let fm = FileManager.default
-        return ((try? fm.contentsOfDirectory(atPath: root.path)) ?? []).sorted().compactMap { id in
-            let pack = root.appendingPathComponent(id).appendingPathComponent("资源包")
+        let ids = Set([root, packRoot].compactMap { $0 }.flatMap { (try? fm.contentsOfDirectory(atPath: $0.path)) ?? [] })
+        return ids.sorted().compactMap { id in
+            let pack = packDir(id, games: root, packs: packRoot)
             guard isTitleID(id), !listed.contains(id), fm.fileExists(atPath: pack.appendingPathComponent(".applied").path) else { return nil }
             let ctl = pack.appendingPathComponent("ctl")
             let icon = ["SimplifiedChinese", "AmericanEnglish"].lazy.compactMap { try? Data(contentsOf: ctl.appendingPathComponent("icon_\($0).dat")) }.first
@@ -146,11 +171,15 @@ public final class S2ArmShellHostModel {
             let id = allGames[i].id, listed = listedStates[id] ?? allGames[i].game.state
             let want: GameState
             switch installState(id) {
-            case 1: want = listed; installTried.remove(id)
+            case 1, 4: want = listed; installTried.remove(id)   // 4 = 只缺非核心文件：库里照样可玩，点开始时宿主问一次「仍要启动」（v0.3.1）
             case 2: want = .installing(unpackStage(id))
             case 3: want = .installing(transferStage(id))   // 断了也接着看：电脑重新插上续传时字节又涨
-            default: missing.insert(id); want = listed == .playable ? .needsGameData : listed   // 不显示；Play 点到也只给导入说明，不放行
+            default:   // 资源不在：玩家删掉的不显示；没删过的留在库里显示「需要游戏数据」，Play 点到只给导入说明，不放行（审计 P1-155）
+                if removed.contains(id) { missing.insert(id) }
+                want = listed == .playable ? .needsGameData : listed
             }
+            if installState(id) != 0, removed.contains(id) { removed.remove(id); saveRemoved() }   // 资源又回来了（电脑重装）：不再当删掉的
+            noteDataSize(i, ready: [1, 4].contains(installState(id)))
             let fresh = want == .playable && isFresh(id)
             if allGames[i].game.isNew != fresh { allGames[i].game.isNew = fresh }
             if allGames[i].game.state != want {
@@ -160,11 +189,55 @@ public final class S2ArmShellHostModel {
         }
     }
 
+    /// 游戏设置页「游戏数据」那一栏（11-11 宿主梳理：原先永远「未选择数据」、点「选择…」没反应）：资源已就绪的款显示
+    ///   「已就绪 · 本机占用 X」，只读。占用要遍历这款整个数据根（一款约 10 万文件），后台算一次、按游戏缓存；不就绪（没有 / 传着 /
+    ///   解着）就清掉缓存和显示，装好或删除后下一次重判重新算。显示「选择…」只在还没有数据时（ShellUI GameDetailView）
+    @ObservationIgnored private var dataSizes: [String: Int64] = [:]
+    @ObservationIgnored private var sizing: Set<String> = []
+    private func noteDataSize(_ i: Int, ready: Bool) {
+        let id = allGames[i].id
+        guard ready else {
+            dataSizes[id] = nil
+            if !allGames[i].dataSource.isEmpty { allGames[i].dataSource = "" }
+            return
+        }
+        if let size = dataSizes[id] {
+            let img = FileManager.default.fileExists(atPath: packDir(id).appendingPathComponent("game.img").path)
+            let text = shellText("Ready · \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) on this device") + " · "
+                + (img ? shellText("single game file") : shellText("separate files"))
+            if allGames[i].dataSource != text { allGames[i].dataSource = text }
+            return
+        }
+        guard !sizing.contains(id) else { return }
+        sizing.insert(id)
+        let dirs = [gamesRoot.appendingPathComponent(id), packGamesRoot?.appendingPathComponent(id)].compactMap { $0 }   // 存档等 + 新位置的资源包
+        Task { [weak self] in
+            let size = await Task.detached(priority: .utility) { dirs.reduce(Int64(0)) { $0 + Self.allocatedSize($1) } }.value
+            guard let self else { return }
+            self.sizing.remove(id); self.dataSizes[id] = size
+            self.refreshGameData()
+        }
+    }
+    /// 目录下全部文件占用的空间（按分配大小，与「设置 → 储存空间」同口径）
+    nonisolated static func allocatedSize(_ url: URL) -> Int64 {
+        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isDirectoryKey]
+        var total: Int64 = 0
+        guard let walk = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys, options: [], errorHandler: { _, _ in true }) else { return 0 }
+        for case let file as URL in walk {
+            guard let v = try? file.resourceValues(forKeys: Set(keys)), v.isDirectory != true else { continue }
+            total += Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0)
+        }
+        return total
+    }
+
     /// 传完了：没起过就在后台解开（正在解别的款 → 排着，下一秒再试）；起过、宿主说已不在解、还是阶段 2 → 没解成
     private func unpackStage(_ id: String) -> InstallStage {
+        // 单一 IMG：解开推送包 / 解小文件 / 核对三段各画一圈，卡片上写正在做哪一步；引擎没报阶段时照旧按包数画一段
+        if let (phase, fraction) = installPhase(id), phase > 0 { return InstallStage(.installing, fraction: fraction, step: phase) }
         if let (done, total) = installProgress(id) { return InstallStage(.installing, fraction: total > 0 ? Double(done) / Double(total) : nil) }
-        if installTried.contains(id) { return InstallStage(.failed) }
-        guard installGame(id) else { return InstallStage(.installing) }
+        if installTried.contains(id) { return InstallStage(.failed, reason: installFailure(id)) }
+        // 宿主拒了：说清在等什么（4 等另一款装完 / 5 正在整理游戏目录，ShellUI GameState installLabel），下一秒再试
+        guard installGame(id) else { let wait = installWait(); return InstallStage(.installing, step: wait == 2 ? 5 : wait == 1 ? 4 : 0) }
         installTried.insert(id)
         return InstallStage(.installing, fraction: 0)
     }
@@ -172,7 +245,7 @@ public final class S2ArmShellHostModel {
     /// 传着：电脑开推时写的 资源包/.transfer 列了这次要传的文件和字节数，各文件已到多少字节（正在写的也算）÷ 总字节 = 进度；
     ///   传输清单和这些文件里最新的改动时刻离现在超过 transferStall → 传断了。只读这款自己的这几个文件
     private func transferStage(_ id: String) -> InstallStage {
-        let pack = gamesRoot.appendingPathComponent(id).appendingPathComponent("资源包"), list = pack.appendingPathComponent(".transfer")
+        let pack = packDir(id), list = pack.appendingPathComponent(".transfer")
         let fm = FileManager.default
         func info(_ url: URL) -> (Int64, Date)? {
             guard let a = try? fm.attributesOfItem(atPath: url.path), let size = a[.size] as? NSNumber, let at = a[.modificationDate] as? Date else { return nil }
@@ -180,6 +253,13 @@ public final class S2ArmShellHostModel {
         }
         guard let data = try? Data(contentsOf: list), let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let total = (json["total"] as? NSNumber)?.int64Value, total > 0, let files = json["files"] as? [[Any]], let listed = info(list) else {
+            // 没有传输清单（老电脑端推的、被删了）或读不出：看不了进度，但照样按资源包里这几样最新的改动判传断了（iOS 装机剃刀 #41：原先永远「传输中」）。
+            //   一样都看不到时只能说在传
+            let incoming = pack.appendingPathComponent(".incoming")
+            let tars = (try? fm.contentsOfDirectory(at: incoming, includingPropertiesForKeys: nil)) ?? []
+            let seen = ([pack, incoming, list, pack.appendingPathComponent("manifest.json"), pack.appendingPathComponent("index.tsv"),
+                         pack.appendingPathComponent("game.img")] + tars).compactMap { info($0)?.1 }
+            if let latest = seen.max(), now().timeIntervalSince(latest) > Self.transferStall { return InstallStage(.interrupted) }
             return InstallStage(.transferring)
         }
         var got: Int64 = 0, latest = listed.1
@@ -199,11 +279,27 @@ public final class S2ArmShellHostModel {
     private func isFresh(_ id: String) -> Bool {
         let dir = gamesRoot.appendingPathComponent(id), fm = FileManager.default
         func mtime(_ url: URL) -> Date? { (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date }
-        guard let applied = mtime(dir.appendingPathComponent("资源包/.applied")) else { return false }
+        guard let applied = mtime(packDir(id).appendingPathComponent(".applied")) else { return false }
         if let played = mtime(dir.appendingPathComponent(Self.playedMark)) { return applied > played }
         return !fm.fileExists(atPath: dir.appendingPathComponent(Self.saveRoot).path)
     }
     static let playedMark = ".played"
+
+    /// 这款资源包在哪：新位置有就是新位置；只有老位置（还没迁、或电脑往老位置推着）就是老位置；都没有算新位置。
+    ///   同电脑端 pack/jobs/install.py pick_pack_root 的推送规则，宿主迁移（pack_apply.c s2a_pack_migrate_one）后老位置不再存在
+    nonisolated static func packDir(_ id: String, games: URL, packs: URL?) -> URL {
+        let old = games.appendingPathComponent(id).appendingPathComponent("资源包")
+        guard let packs else { return old }
+        let new = packs.appendingPathComponent(id).appendingPathComponent("资源包")
+        let fm = FileManager.default
+        return !fm.fileExists(atPath: new.path) && fm.fileExists(atPath: old.path) ? old : new
+    }
+    private func packDir(_ id: String) -> URL { Self.packDir(id, games: gamesRoot, packs: packGamesRoot) }
+    /// 游戏根是 <家>/Documents/games（宿主的取法）→ <家>/Library/Application Support/S2Arm/games；别的根（单测换了根）→ nil
+    nonisolated static func packGamesRoot(for gamesRoot: URL, home: URL = URL(fileURLWithPath: NSHomeDirectory())) -> URL? {
+        guard gamesRoot.standardizedFileURL.path == home.appendingPathComponent("Documents/games").standardizedFileURL.path else { return nil }
+        return home.appendingPathComponent("Library/Application Support/S2Arm/games")
+    }
 
     private func startTicker() {
         guard ticker == nil else { return }
@@ -216,7 +312,8 @@ public final class S2ArmShellHostModel {
                      onPickGameData: { [weak self] id in self?.requestGameData(id) },
                      onPickShellCloud: Self.pickCloudFolder, onClearShellCloud: Self.pickCloudFolder == nil ? nil : { CloudSaves.forget() },
                      onButtonTest: { [weak self] open in self?.buttonTest(open) },
-                     onDeleteGame: { [weak self] id, saves in self?.deleteGame(id, saves: saves) })
+                     onDeleteGame: { [weak self] id, saves in self?.deleteGame(id, saves: saves) },
+                     onManageSaves: { [weak self] id in self?.manageSaves(id) })
         actions.onReorderGames = { [weak self] sources, before in self?.reorderGames(sources, before: before) ?? false }
         return actions
     }
@@ -248,6 +345,14 @@ public final class S2ArmShellHostModel {
     }
 
     /// 只放行可运行的那款（界面本身也只在 playable 时调 onPlay，这里再守一道）；放行前当场重判资源包（库开着时资源被删 / 换机拷走）
+    /// 长按卡片「管理存档…」（11-11 宿主梳理：原先在主屏快捷菜单里，库里不知道是哪款，一进 App 就弹退出框）：记下这一款
+    ///   「下次开局先进存档管理」（ios/save_transfer.m 同一个按游戏的键 S2ASaveManageOnOpen.<游戏号>），再照常开始这一款，起局前就进存档管理页
+    public func manageSaves(_ id: String) {
+        guard allGames.contains(where: { $0.id == id }), id.allSatisfy({ $0.isHexDigit }) else { return }
+        stores.app.set(true, forKey: "S2ASaveManageOnOpen." + id)
+        requestPlay(id)
+    }
+
     public func requestPlay(_ id: String) {
         if allGames.first(where: { $0.id == id })?.game.state.installPhase == .failed { installTried.remove(id) }   // 「安装没完成」点重试：再解一次
         refreshGameData()
@@ -263,6 +368,19 @@ public final class S2ArmShellHostModel {
 
     /// 存档在这款数据根下的 S2A/（Ryujinx 数据根 <文档根>/S2A/ryujinx，存档 bis/user/save，同 pack/jobs/install.py SAVE_REL）
     static let saveRoot = "S2A"
+    /// 玩家在这台设备上删掉的游戏号（一行一个，<游戏根>/.s2a-removed.txt）：资源不在时这些款不显示，别的款显示「需要游戏数据」
+    nonisolated static let removedList = ".s2a-removed.txt"
+    @ObservationIgnored private lazy var removed: Set<String> = {
+        let text = (try? String(contentsOf: gamesRoot.appendingPathComponent(Self.removedList), encoding: .utf8)) ?? ""
+        return Set(text.split(whereSeparator: \.isNewline).map(String.init).filter { $0.allSatisfy(\.isHexDigit) && !$0.isEmpty })
+    }()
+    private func saveRemoved() {   // 写不进只记日志：最坏是删掉的款下次显示成「需要游戏数据」
+        let text = removed.sorted().joined(separator: "\n")
+        do {
+            try FileManager.default.createDirectory(at: gamesRoot, withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: gamesRoot.appendingPathComponent(Self.removedList), options: .atomic)
+        } catch { NSLog("S2Arm 游戏库：记删除名单失败：%@", error.localizedDescription) }
+    }
 
     /// 删除这款的本机数据：saves = 连存档一起删（整个数据根），否则留下 S2A/（存档与用户资料）、其余（资源包、名字封面等）删掉。
     /// v0.2.6 玩家反馈「点删除完全没反应」：原先在主线程上同步 removeItem，一款资源包约 10 万文件，删完前界面整个冻住、对话框都不关，
@@ -285,7 +403,12 @@ public final class S2ArmShellHostModel {
                     try fm.moveItem(at: item, to: trash.appendingPathComponent(item.lastPathComponent)); moved = true
                 }
             }
+            // 新位置的资源包（Library 下，同一个 App 容器、同卷改名）一起挪进待删目录
+            if let packs = packGamesRoot?.appendingPathComponent(id), fm.fileExists(atPath: packs.path) {
+                try fm.moveItem(at: packs, to: trash.appendingPathComponent(".pack")); moved = true
+            }
         } catch { moveError = error }
+        if moveError == nil { removed.insert(id); saveRemoved() }   // 玩家删的：资源不在时不再显示（没删成的照旧留在库里）
         refreshGameData()
         if let moveError {   // 挪了一半的照样后台删掉，提示失败原因
             NSLog("S2Arm 游戏库：删除 %@ 失败（挪进待删目录）：%@", id, moveError.localizedDescription)
@@ -413,6 +536,39 @@ public final class S2ArmShellHostModel {
             }
         }
         allGames[i].game = tile
+    }
+
+    // MARK: 本地玩家（#623）
+
+    /// 游戏库顶部玩家按钮：开切换页。开着时停手柄监听（页只用触屏），不然按 A 会落到背后库界面的 Play 上
+    public func openPlayers() { playersOpen = true; stopControllers() }
+    public func closePlayers() { guard playersOpen else { return }; playersOpen = false; startControllers() }
+    /// 换玩家：下一局按这个玩家起（宿主 ios/settings.m 起局时读），关页
+    public func selectPlayer(_ uid: String) {
+        playerStore.select(uid); reloadPlayers()
+        NSLog("S2Arm 游戏库：本地玩家切换为 %@", currentPlayer.isFirst ? "第一个玩家" : currentPlayer.uid)
+        closePlayers()
+    }
+    /// 加玩家并选上；名字不行回给玩家看的原因（nil = 成了）
+    public func addPlayer(_ name: String) -> String? {
+        do { let p = try playerStore.add(name); reloadPlayers(); NSLog("S2Arm 游戏库：新建本地玩家 %@（存档位置 %@）", p.uid, p.folder); return nil }
+        catch { return Self.reason(error) }
+    }
+    public func renamePlayer(_ uid: String, _ name: String) -> String? {
+        do { try playerStore.rename(uid, to: name); reloadPlayers(); return nil } catch { return Self.reason(error) }
+    }
+    /// 从表里拿掉（存档不删）
+    public func removePlayer(_ uid: String) {
+        playerStore.remove(uid); reloadPlayers()
+        NSLog("S2Arm 游戏库：拿掉本地玩家 %@（存档留在各款数据里）", uid)
+    }
+    private func reloadPlayers() { players = playerStore.all; currentPlayer = playerStore.current }
+    static func reason(_ error: LocalPlayers.NameError) -> String {
+        switch error {
+        case .empty: shellText("Enter a name.")
+        case .tooLong: shellText("Use \(String(LocalPlayers.nameLimit)) characters or fewer.")
+        case .taken: shellText("That name is already taken.")
+        }
     }
 
     public func startControllers() {

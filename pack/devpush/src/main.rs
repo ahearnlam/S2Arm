@@ -8,6 +8,7 @@
 //   s2a-devpush - - tar-ok-local <本地文件>                       同上，本地文件
 //   s2a-devpush <udid> - install <ipa>               装已签名的 ipa（AFC 传到 PublicStaging + installation_proxy；测试台经转发的设备服务装机用，玩家装机走 Impactor）
 //   s2a-devpush <udid> <包名> uninstall -               卸 App（连容器）：免费账号一台手机最多 3 个 App，测试台腾位用
+//   s2a-devpush <udid> <包名> app-attr <键>              已装 App 的 Info.plist 一个键（installation_proxy）：打值；没装打 S2A_APP_MISSING；没有这个键打「-」
 //   s2a-devpush <udid> <包名> launch [变量=值…]     起 App（先结束在跑的同包进程），带环境变量；打印 pid。Windows 测试台起局 / 只解包用（Mac 用 devicectl）：
 //     经 lockdown 的 CoreDeviceProxy 建用户态隧道（不要管理员、不装驱动）→ RSD → CoreDevice app_service（同 Xcode / devicectl 的起 App 服务；iOS 17+，要开发者模式与已挂开发者镜像）
 // 退出码：0 成功；1 连不上 / 读写失败（错误打到标准错误）
@@ -288,13 +289,39 @@ async fn run(a: &[String]) -> Result<(), String> {
         println!("uninstall {bundle} 完成");
         return Ok(());
     }
+    if op == "app-attr" {   // 已装 App 的 Info.plist 一个键（installation_proxy 查，不进容器）：打印值；没装打 S2A_APP_MISSING；没有这个键 / 不是字符串打「-」。
+        //   作业层装机判「手机上的 App 就是这次组出的」用（键 S2AContainerDigest，pack/jobs/ipa.py 组容器时写；install.py same_app）
+        let key = a.get(4).ok_or("app-attr 缺键名")?;
+        let mut ip = idevice::installation_proxy::InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation_proxy 连不上：{e}"))?;
+        let apps = ip.get_apps(Some("Any"), Some(vec![bundle.clone()])).await.map_err(|e| format!("查 {bundle} 失败：{e}"))?;
+        match apps.get(bundle.as_str()) {
+            None => println!("S2A_APP_MISSING"),
+            Some(v) => println!("{}", v.as_dictionary().and_then(|d| d.get(key.as_str())).and_then(|x| x.as_string()).unwrap_or("-")),
+        }
+        return Ok(());
+    }
     if op == "install" {
         idevice::utils::installation::install_package(&provider, &a[4], None).await.map_err(|e| format!("装 {} 失败：{e}", a[4]))?;
         println!("install {} 完成", a[4]);
         return Ok(());
     }
     let ha = HouseArrestClient::connect(&provider).await.map_err(|e| format!("house_arrest 连不上：{e}"))?;
-    let mut afc = ha.vend_container(bundle.clone()).await.map_err(|e| format!("取不到 {bundle} 的容器（App 没装或不是开发签名）：{e}"))?;
+    let mut afc = match ha.vend_container(bundle.clone()).await {
+        Ok(afc) => afc,
+        Err(e) => {
+            // 进不了容器：App 没装、不是开发签名、锁屏 / 断开都只回同一类原文（11-11 手机删了 S2Arm 后实测只有「device socket io failed」）。
+            //   再用 installation_proxy 按包名查一次：确实没装就打结构化标记 S2A_APP_MISSING（作业层 WinPhone.app_missing 认它），查得到装着或查不了都照原文报
+            let missing = match idevice::installation_proxy::InstallationProxyClient::connect(&provider).await {
+                Ok(mut ip) => match ip.get_apps(Some("Any"), Some(vec![bundle.clone()])).await { Ok(apps) => Some(!apps.contains_key(bundle.as_str())), Err(_) => None },
+                Err(_) => None,
+            };
+            return Err(match missing {
+                Some(true) => format!("S2A_APP_MISSING：手机上没装 {bundle}（installation_proxy 查过；进容器原文：{e}）"),
+                Some(false) => format!("取不到 {bundle} 的容器（App 装着，可能锁屏 / 不是开发签名）：{e}"),
+                None => format!("取不到 {bundle} 的容器（App 没装或不是开发签名）：{e}"),
+            });
+        }
+    };
     match op {
         "put" => {
             let (local, remote) = (&a[4], a[5].trim_start_matches('/').to_string());
@@ -397,6 +424,8 @@ async fn run(a: &[String]) -> Result<(), String> {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]   // idevice AFC 内部用 block_in_place，单线程运行时会直接 panic
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
-    if a.len() < 5 { eprintln!("用法：s2a-devpush <udid> <包名> put <本地> <远端> | put-at <本地> <远端> <偏移> | head <远端> <字节数> <本地> | get <远端> <本地> | ls <目录>"); std::process::exit(2); }
+    // launch 可以不带环境变量（多款容器推完拉起到游戏库，tools/push_pack.py Devpush.launch({})）：原先一律要 ≥ 5 个参数，这种调用只打用法、退 2，
+    //   Windows 上「分开的文件」资源包推完永远拉不起 App（11-11 Windows 实机实测）
+    if a.len() < 5 && !(a.len() == 4 && a[3] == "launch") { eprintln!("用法：s2a-devpush <udid> <包名> put <本地> <远端> | put-at <本地> <远端> <偏移> | head <远端> <字节数> <本地> | get <远端> <本地> | ls <目录>"); std::process::exit(2); }
     if let Err(e) = run(&a).await { eprintln!("{e}"); std::process::exit(1); }
 }

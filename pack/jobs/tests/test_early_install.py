@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from jobcase import JobCase
+from test_jobs import img_step
 from core import Context, Failure
 import build
 import cache_retention
@@ -44,10 +45,13 @@ class EarlyInstallCase(JobCase):
         stamp = lambda what, *a: calls.append((time.time(), what) + a)
 
         def oneclick(args, log=None, env=None, **kwargs):   # 一键出包替身：先写旁路信号，「编直连库」2 秒，再交付
+            if img_step(args, kwargs.get('cwd'), env): return   # 出包收尾转单一 IMG（ipa.to_img 经 c.run）：真跑
             args = [str(a) for a in args]
             if any(a.endswith('ship_ext.py') for a in args) and 'container' in args:   # assemble 的容器组装命令
                 o = Path(args[args.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True)
                 (o / 's2a_catalogue.json').write_text(json.dumps({"schema": 1, "shell_id": "SID1", "games": [{"title_id": GID}]}))
+                return
+            if any(a.endswith('ship_ext.py') for a in args) and 'sign' in args:   # assemble 写完容器摘要后的统一签名
                 return
             if 'write_ipa' in args:   # assemble 的 ipa 打包命令
                 Path(args[-1]).write_bytes(b'early' if early_rc == 0 else b'final')

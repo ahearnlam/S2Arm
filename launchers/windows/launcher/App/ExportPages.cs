@@ -48,8 +48,7 @@ public sealed partial class EnvironmentWindow
     private const string OtherFolder = "__other__";
     // pack job
     private LibraryGame? packGame;
-    private bool packRunning;
-    private CancellationTokenSource? packCancellation;
+    private FrontJob? packJob;   // 当前这款出包的作业登记（ResetPack 登记、RunPackAsync 收尾撤；JobSlots.cs）
     private Task? packOperation;
     private MilestoneTrack packTrack = new();
     private DateTime packStarted;
@@ -60,6 +59,8 @@ public sealed partial class EnvironmentWindow
     private string? packIpa;
     private string? packLocation;
     private long? packIpaBytes, packPackBytes;
+    /// <summary>这一单降级继续的玩家提示（作业层 notes，v0.3.1）：完成卡逐条显示</summary>
+    private IReadOnlyList<string> packNotes = [];
     private PackSpace? packSpace;
     // in-progress capsule (shown while session is hidden)
     private bool sessionHidden;
@@ -71,14 +72,18 @@ public sealed partial class EnvironmentWindow
     /// <summary>上次装机清单认出连着的是 iPad：这几处入口写「装到 iPad」（键名加 _ipad，#487）；没认出照旧写 iPhone。</summary>
     private string PadKey(string key) => readiness?.DeviceKind == "ipad" ? key + "_ipad" : key;
     private string? readinessFor;
-    private bool installChecking, installBusy, installCheckFailed;
+    /// 这次实际装上的那台（装机结果的 deviceKind / deviceName；Windows 设备服务给不出名字时只有类型）：「已装到 iPad」不写死 iPhone
+    private string installedTo = "";
+    private string InstallTargetLabel => installedTo.Length > 0 ? installedTo :
+        readiness?.DeviceKind switch { "ipad" => "iPad", "iphone" => "iPhone", _ => "iPhone / iPad" };
+    private bool installChecking, installCheckFailed;
     private bool customizing;
     private string customizeError = "";
     // A checklist that could not be read must not lock the player out: start and let the install job give the real reason.
-    private bool InstallAllowed => readiness?.Ready == true || (readiness is null && installCheckFailed);
     private string installState = "", installMessage = "", installDiagnostics = "";
     /// <summary>上一次装机失败的错误码（apple_session_expired 时失败页给「打开 Impactor 重新登录」，重新登录完自动再装）</summary>
     private string? installCode;
+    private bool installOpenToFinish;   // 刚装完的那次是单一 IMG：成功卡片多写一句「打开 S2Arm 会自动完成安装」（作业结果 openToFinish）
     private string revealProblem = "";   // 「显示 IPA」「打开游戏文件夹」找不到目标时的提示（不打开空的资源管理器）
     // 当前 / 最近一次手机作业属于哪一款（#308：原先只有一份「当前安装」状态、没记是哪款，回游戏库再点别的游戏，进度会画到那款上）。
     //   installSeen：跑完后玩家回安装页看过结果没有；没看过时顶栏胶囊一直在。进度计数来自作业事件 done / total / unit（推资源包按字节，机上解包按包）
@@ -88,18 +93,22 @@ public sealed partial class EnvironmentWindow
     private DateTime installRateAt; private long installRateBase; private double? installRate;
     private bool installSeen = true;
 
-    /// 开始一个手机作业：记下是哪一款、清掉上次的计数
-    private void BeginPhoneJob(LibraryGame game, string message)
+    /// 开始一个手机作业：登记（只锁这一款）、记下是哪一款、清掉上次的计数
+    private FrontJob BeginPhoneJob(LibraryGame game, string message, string kind = "install")
     {
-        installBusy = true; installState = "running"; installMessage = message; installDiagnostics = "";
+        var job = BeginJob(JobKind.Phone, game.Id);
+        installTrack.Begin(kind, InstallTargetLabel);   // 手机作业结局卡（PhoneJobCard.cs）的过程与事实
+        installState = "running"; installMessage = message; installDiagnostics = "";
         installGameId = game.Id; installGameName = game.Name; installSeen = false;
         installDone = installTotal = null; installUnit = ""; installRate = null;
         Render();
+        return job;
     }
 
     /// 作业事件 → 安装页文字与计数（推资源包：已传 / 本次待传字节；机上解包：k / n 包）。单位变了（传完进解包）计数与速度重新算
     private void IngestPhoneEvent(JsonElement e)
     {
+        installTrack.Ingest(e);
         if (e.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String && m.GetString() is { Length: > 0 } text) installMessage = text;
         if (e.TryGetProperty("done", out var d) && d.ValueKind == JsonValueKind.Number && e.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number && t.GetInt64() > 0)
         {
@@ -125,8 +134,8 @@ public sealed partial class EnvironmentWindow
     private Button? PhonePill()
     {
         if (installGameId is null || (!installBusy && installSeen) || (page == "install" && SelectedGame?.Id == installGameId)) return null;
-        var key = installBusy ? "install.pill.running" : installState == "succeeded" ? "install.pill.done" : installState == "needsPlayer" ? "install.pill.needs_player" : "install.pill.failed";
-        var text = T(key).Replace("{0}", installGameName ?? installGameId);
+        var key = installBusy ? "install.pill.running" : installState == "succeeded" ? (installTrack.ExportFolder.Length > 0 ? "install.pill.exported" : "install.pill.done") : installState == "needsPlayer" ? "install.pill.needs_player" : "install.pill.failed";
+        var text = T(key).Replace("{0}", installGameName ?? installGameId).Replace("{1}", InstallTargetLabel);
         if (installBusy && installDone is { } d && installTotal is { } t && t > 0) text += " · " + (100 * d / t) + "%";
         var pill = new Button { Content = text, Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(16),
             Background = Brush.Parse("#29292D"), Foreground = Ink };
@@ -157,15 +166,26 @@ public sealed partial class EnvironmentWindow
     private DispatcherTimer? ticker;
 
     private bool PackBusy => packRunning || installBusy;
-    /// 这款现在能不能动（选、出包、移动、清缓存、删除）：游戏库作业或出包在跑时都不能；装机在跑时只锁正在装的那款（玩家装一款大游戏的十几分钟里别的照常用）
-    private bool BusyFor(LibraryGame game) => libraryBusy || packRunning || (installBusy && installGameId == game.Id);
+
+    /// 因为「有任务在跑」而置灰的按钮：悬停说明在等哪个任务、为什么（维护者 11-11：同一时间只跑一个任务是单壳方案的特点，不改，但要说清）。
+    ///   置灰的控件缺省不弹提示，所以打开 ShowOnDisabled；不忙时什么都不挂
+    private void BusyHint(Control c)
+    {
+        if (!PackBusy) return;
+        var (action, name) = packRunning ? (T("busy.export"), packGame?.Name) : (T("busy.install"), installGameName);
+        var hint = T("busy.hint").Replace("{0}", action).Replace("{1}", string.IsNullOrEmpty(name) ? "" : T("busy.game").Replace("{0}", name));
+        ToolTip.SetTip(c, hint); ToolTip.SetShowOnDisabled(c, true);
+    }
+    /// 这款现在能不能动（选、出包、移动、清缓存、删除）：只问作业登记（JobSlots.cs FrontJob.Blocks）——游戏库 / 导入 / 出包 / 释放空间在跑时都不能；
+    /// 装机在跑时只锁正在装的那款（玩家装一款大游戏的十几分钟里别的照常用）。原先漏了导入：导入中还能点出包（启动器剃刀 W20）
+    private bool BusyFor(LibraryGame game) => jobs.Any(j => j.Blocks(game.Id));
     private LibraryGame? SelectedGame => catalog?.Games.FirstOrDefault(g => g.Id == selectedGame && !g.Hidden);
     private static double Clock => DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
 
     /// <summary>Pages owned by this file; false = not one of them.</summary>
     private bool RenderPackPages(StackPanel body)
     {
-        if (page is not ("build" or "progress" or "install")) return false;
+        if (page is not ("build" or "progress" or "install" or "phoneupdate")) return false;
         EnsureTicker();
         if (page == "progress" && packGame is null) page = "build";
 
@@ -174,6 +194,7 @@ public sealed partial class EnvironmentWindow
 
         if (page == "build") RenderExport(contentBody);
         else if (page == "progress") RenderProgress(contentBody);
+        else if (page == "phoneupdate") contentBody.Children.Add(Card(PhoneUpdateCard()));   // 更新手机上的 S2Arm（InstallModePage.cs）
         else RenderInstall(contentBody);
 
         // 底部操作栏
@@ -198,11 +219,11 @@ public sealed partial class EnvironmentWindow
 
         if (page == "progress" && packRunning)
         {
-            var stop = new Button { Content = T("progress.stop"), IsEnabled = packCancellation is not null,
+            var stop = new Button { Content = T("progress.stop"), IsEnabled = packJob is not null,
                 Padding = new Thickness(16, 9), Background = Brush.Parse("#29292D"), Foreground = Ink,
                 CornerRadius = new CornerRadius(8) };
             AutomationId(stop, "progress.stop");
-            stop.Click += (_, _) => packCancellation?.Cancel();
+            stop.Click += (_, _) => packJob?.Cancellation.Cancel();
             inner.Children.Add(stop);
 
             var backBtn = new Button { Content = T("export.running.back"), Padding = new Thickness(16, 9),
@@ -238,10 +259,12 @@ public sealed partial class EnvironmentWindow
         ticker.Tick += (_, _) =>
         {
             if (page is "progress" or "batch" && packRunning) RefreshLive();   // 计时 / 进度 / 当前阶段只刷新各自的格子（清单页也画正在出的阶段），不整页重画
-            // The checklist changes when the player plugs a phone in or installs Impactor: re-ask every 5 s while visible and idle.
-            if (page == "install" && !installBusy && !installChecking && DateTime.UtcNow - lastCheck > TimeSpan.FromSeconds(5))
+            // The checklist changes when the player plugs a phone in or installs Impactor: re-ask every 5 s while visible, idle and in front
+            //   （剃刀 W13：窗口不在前台就不问，原先后台也每 5 秒起作业；切回来立刻问一次，见下面 Activated）
+            if (IsActive && page == "install" && !installBusy && !installChecking && DateTime.UtcNow - lastCheck > TimeSpan.FromSeconds(5))
                 _ = CheckInstallAsync();
         };
+        Activated += (_, _) => { if (page == "install" && !installBusy && !installChecking) _ = CheckInstallAsync(); };
         ticker.Start();
         Closed += (_, _) => ticker.Stop();
     }
@@ -358,9 +381,9 @@ public sealed partial class EnvironmentWindow
         var blocker = ExportBlocker(game);
         var reason = new StackPanel { Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
         reason.Children.Add(Muted(blocker ?? T("export.hint"), 14));
-        if (blocker == T("export.block.keys")) reason.Children.Add(Action("nav.library", () => Navigate("library")));
+        if (ExportBlockerKind(game) == "keys") reason.Children.Add(Action("nav.library", () => Navigate("library")));
         bar.Children.Add(reason);
-        var start = Primary(T("export.start"), () => StartPack(game), blocker is null);
+        var start = Primary(T("export.start"), () => StartPack(game), !ExportStops(game));   // 缺文件 / 缺 keys 只在左边提示，不置灰（作业层核实）
         AutomationId(start, "export.start");
         Grid.SetColumn(start, 1); bar.Children.Add(start);
         body.Children.Add(Card(bar, 18));
@@ -381,8 +404,8 @@ public sealed partial class EnvironmentWindow
         var options = new List<(string path, string label)>();
         foreach (var r in rows)
         {
-            // 卷名重名（几个位置在同一块盘上）时用路径，免得几项分不清
-            var name = r.Volume.Length == 0 || rows.Count(o => o.Volume == r.Volume) > 1 ? r.Path : r.Volume;
+            // 显示具体路径，不显示卷名（同 Mac 出包页）：同一块盘上的几个位置卷名一样，只给卷名分不清是哪个文件夹
+            var name = r.Path;
             options.Add((r.Path, r.Connected
                 ? T("export.location.free").Replace("{0}", name).Replace("{1}", r.FreeBytes is { } free ? FormatBytes(free) : "?")
                 : T("export.location.offline").Replace("{0}", name)));
@@ -456,12 +479,26 @@ public sealed partial class EnvironmentWindow
     private static void AutomationId(Control control, string id) => Avalonia.Automation.AutomationProperties.SetAutomationId(control, id);
 
     /// <summary>Why export cannot start now (null = it can). Order as the Mac export page: platform → game files → keys → busy.</summary>
-    private string? ExportBlocker(LibraryGame game)
+    private string? ExportBlocker(LibraryGame game) => ExportBlockerKind(game) switch
     {
-        if (!exportIos) return T("export.block.no_platform");
-        if (game.Missing.Count > 0) return T("library.requirements") + " · " + string.Join(" / ", game.Missing);
-        if (game.NeedsKeys && catalog?.KeysReady != true) return T("export.block.keys");
-        if (BusyFor(game) || busy || batchRunning) return T("export.block.busy");   // 只锁正在装的那款（后端安装不占出包执行锁）；批量出包进行中两款之间也不插单款
+        "platform" => T("export.block.no_platform"),
+        "files" => T("library.requirements") + " · " + string.Join(" / ", game.Missing),
+        "keys" => T("export.block.keys"),
+        "busy" => T("export.block.busy"),
+        _ => null,
+    };
+
+    /// <summary>挡路的是哪一类（按种类判，不拿显示文案做字符串相等，剃刀 W10）：platform / files / keys / busy；null = 能出。</summary>
+    /// <summary>挡不挡开始：缺文件（files）/ 缺 keys（keys）只提示、不挡（v0.3.1「拿不准不停」，同 Mac ExportBlocker.stopsStart）——
+    /// 两项来自游戏库读数、可能是旧的；出包作业开头自己核（library.requirement_errors：input_missing / keys_missing），真缺才停</summary>
+    private bool ExportStops(LibraryGame game) => ExportBlockerKind(game) is { } kind && kind is not ("files" or "keys");
+
+    private string? ExportBlockerKind(LibraryGame game)
+    {
+        if (!exportIos) return "platform";
+        if (game.Missing.Count > 0) return "files";
+        if (game.NeedsKeys && catalog?.KeysReady != true) return "keys";
+        if (BusyFor(game) || busy || batchRunning) return "busy";   // 只锁正在装的那款（后端安装不占出包执行锁）；批量出包进行中两款之间也不插单款
         return null;
     }
 
@@ -472,7 +509,7 @@ public sealed partial class EnvironmentWindow
 
     private void StartPack(LibraryGame game, bool spaceOverride = false)
     {
-        if (ExportBlocker(game) is not null) return;
+        if (ExportStops(game)) return;
         // 「仍然出包」重试沿用这一款上次选的位置；出包页没读到这款时不传，后端按这款现在的位置
         if (!spaceOverride || packGame?.Id != game.Id) packLocation = locationsFor == game.Id && exportLocation.Length > 0 ? exportLocation : null;
         ResetPack(game);
@@ -480,70 +517,108 @@ public sealed partial class EnvironmentWindow
         packOperation = RunPackAsync(game, spaceOverride);
     }
 
-    /// 开始出一款前清掉上一款的出包状态（出包页「开始出包」与批量出包 StartBatchPack 共用）
+    /// 开始出一款前清掉上一款的出包状态，并登记这次出包的作业（出包页「开始出包」）
     private void ResetPack(LibraryGame game)
     {
-        packGame = game; packRunning = true; packState = "running"; packTrack = new(); packStarted = DateTime.UtcNow;
-        packSeconds = null; packSummary = ""; packDiagnostics = ""; packIpa = null;
-        packIpaBytes = null; packPackBytes = null; packSpace = null; sessionHidden = false; packFailureCode = null;
+        ResetPackView(game);
+        packJob = BeginJob(JobKind.Pack, game.Id);
     }
 
-    private async Task RunPackAsync(LibraryGame game, bool spaceOverride)
+    /// 只清显示：批量出包时编排作业一步换一款，作业登记一批只有一份（BatchPage.cs RunBatchExport）
+    private void ResetPackView(LibraryGame game)
     {
-        using var cancellation = new CancellationTokenSource();
-        packCancellation = cancellation;
+        packGame = game; packState = "running"; packTrack = new(); packStarted = DateTime.UtcNow;
+        packSeconds = null; packSummary = ""; packDiagnostics = ""; packIpa = null;
+        packIpaBytes = null; packPackBytes = null; packNotes = []; packSpace = null; sessionHidden = false; packFailureCode = null;
+        exportStepEnded = false; exportChildReport = null;
+    }
+
+    /// <summary>出包页单款：同批量出包走出包编排作业（剃刀 H13），计划只有这一款的 iPhone、不写批次文件</summary>
+    private Task RunPackAsync(LibraryGame game, bool spaceOverride) =>
+        RunExportAsync(ExportStream.InlinePlan(game.Id, game.Name, ["iphone"], packLocation, spaceOverride), batch: false);
+
+    // 这一步收到 stepEnded 没有（没收到 = 编排作业在第一步前就结束了：被拒、已有一个在出、取消）；子作业的终态（失败页的原因 / 建议从这里读）
+    private bool exportStepEnded;
+    private LibraryJobResult? exportChildReport;
+
+    /// <summary>跑一个出包编排作业：每一步的开始 / 子作业事件 / 结局都由 OnExportEvent 显示；取消 = 取消这个作业（它把正在出的那步停下）</summary>
+    private async Task RunExportAsync(Dictionary<string, object?> plan, bool batch)
+    {
+        var front = packJob!;
+        LibraryJobOutput? job = null;
+        string? error = null, endState = null;
         try
         {
-            var extra = new Dictionary<string, object?>();
-            if (spaceOverride) extra["spaceOverride"] = true;
-            if (packLocation is not null) extra["location"] = packLocation;   // pack/jobs/library.py apply_location：在别的位置就先整个搬过去
-            var job = await PackJobClient.RunAsync(PackRequest("ipa", game.Id, extra),
-                e => Dispatcher.UIThread.Post(() =>
-                {
-                    packTrack.Ingest(e, Clock);
-                    // space event: { "type": "space", "space": { "volumes": [...] } }
-                    if (e.TryGetProperty("type", out var et) && et.GetString() == "space" &&
-                        e.TryGetProperty("space", out var sp))
-                        packSpace = PackSpace.TryParse(sp);
-                }), cancellation.Token);
-            packState = job.Report.State;
-            packSummary = job.Report.Message;
-            packDiagnostics = JobDiagnostics(job);
-            packFailureCode = job.Report.Succeeded ? null : DiagnosticCode(job.Report.Diagnostics);
-            if (job.Report.Succeeded)
-            {
-                if (job.Report.Result.TryGetProperty("ipa", out var ipa) && ipa.ValueKind == JsonValueKind.String)
-                    packIpa = ipa.GetString();
-                if (job.Report.Result.TryGetProperty("ipaBytes", out var ib) && ib.ValueKind == JsonValueKind.Number)
-                    packIpaBytes = ib.GetInt64();
-                if (job.Report.Result.TryGetProperty("packBytes", out var pb) && pb.ValueKind == JsonValueKind.Number)
-                    packPackBytes = pb.GetInt64();
-            }
+            job = await PackJobClient.RunAsync(PackRequest("export", "", new Dictionary<string, object?> { ["plan"] = plan }),
+                e => Dispatcher.UIThread.Post(() => OnExportEvent(e, batch)), front.Token, front.Next());
         }
-        catch (LibraryProtocolException error) { packState = "invalid"; packDiagnostics = error.Message; }
-        catch (OperationCanceledException) { packState = "cancelled"; }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
+        catch (LibraryProtocolException e) { endState = "invalid"; error = e.Message; }
+        catch (OperationCanceledException) { endState = "cancelled"; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
             PlatformNotSupportedException or System.ComponentModel.Win32Exception)
-        { packState = "failed"; packDiagnostics = error.Message; }
+        { endState = "failed"; error = e.Message; }
         finally
         {
-            // Posted events may still be queued: finish the track after them.
+            // 事件还在排队：排在它们后面收尾
             Dispatcher.UIThread.Post(() =>
             {
+                if (!exportStepEnded && packGame is not null && !batch)
+                {
+                    // 第一步还没结束编排作业就停了：整个作业的结局就是这一款的结局（被拒、已有一个在出、取消、起不来）
+                    packTrack.Finish(Clock); packSeconds = (DateTime.UtcNow - packStarted).TotalSeconds;
+                    packState = endState ?? (job!.Report.State == "succeeded" ? "failed" : job.Report.State);
+                    packSummary = job?.Report.Message ?? "";
+                    packDiagnostics = job is not null ? JobDiagnostics(job) : error ?? "";
+                    packFailureCode = job is not null ? DiagnosticCode(job.Report.Diagnostics) : null;
+                }
+                EndJob(front); if (packJob == front) packJob = null;
+                Render();
+                if (batch) _ = BatchExportEndedAsync(job?.Report, error);
+            });
+        }
+    }
+
+    /// <summary>编排作业的一条事件（UI 线程）：step 换到这一款、child 喂进度、stepEnded 记这一款的结局</summary>
+    private void OnExportEvent(JsonElement e, bool batch)
+    {
+        ExportStream.Event? ev;
+        try { ev = ExportStream.Read(e); }
+        catch (LibraryProtocolException error) { if (batch) batchError = error.Message; else packDiagnostics = error.Message; return; }
+        switch (ev)
+        {
+            case ExportStream.Started started:
+                if (batch && BatchGame(started.Where.GameId) is { } next) { packLocation = batchState?.Location; ResetPackView(next); sessionHidden = true; }
+                exportStepEnded = false; exportChildReport = null;
+                if (batch) _ = ReloadBatchAsync(); else Render();
+                break;
+            case ExportStream.Child child:
+                packTrack.Ingest(child.Inner, Clock);
+                // space event: { "type": "space", "space": { "volumes": [...] } }
+                if (child.Inner.TryGetProperty("type", out var et) && et.GetString() == "space" && child.Inner.TryGetProperty("space", out var sp))
+                    packSpace = PackSpace.TryParse(sp);
+                if (ExportStream.ChildResult(child.Inner) is { } report) exportChildReport = report;
+                break;
+            case ExportStream.Ended ended:
+                var o = ended.Outcome;
                 packTrack.Finish(Clock); packSeconds = (DateTime.UtcNow - packStarted).TotalSeconds;
-                packCancellation = null; packRunning = false;
-                // 换了存放位置 / 第一次建文件夹：游戏库里这款的位置变了（搬到一半失败也可能已经动了），重读游戏库，出包页下次重读位置表
-                // 出好了（卡片上的 iPhone 就绪状态要更新）或换了存放位置：重读游戏库（社区贡献者补丁 #7：原先只有换位置才重读，卡片停在旧状态）
-                if (!libraryBusy && (packState == "succeeded" || packLocation is not null && !SameFolder(packLocation, game.Location?.Path ?? ""))) { locationsFor = null; libraryOperation = RunLibraryAsync("catalog", null); }
+                packState = o.State == "completed" ? "succeeded" : o.State;
+                packSummary = o.Message; packIpa = o.Ipa; packIpaBytes = o.IpaBytes; packPackBytes = o.PackBytes; packNotes = o.Notes ?? []; packFailureCode = o.Code;
+                packDiagnostics = exportChildReport is { } r
+                    ? JobDiagnostics(new LibraryJobOutput(r, new ProbeOutput(r.State == "succeeded" ? 0 : r.State == "cancelled" ? 130 : 1, "", "")))
+                    : o.Message;
+                exportStepEnded = true;
+                // 出好了（卡片上的 iPhone 就绪状态要更新）或换了存放位置：重读游戏库，出包页下次重读位置表（社区贡献者补丁 #7）
+                var game = BatchGame(ended.Where.GameId);
+                if (packState == "succeeded" || packLocation is not null && game is not null && !SameFolder(packLocation, game.Location?.Path ?? ""))
+                { locationsFor = null; _ = RefreshLibraryAsync(); }   // 在忙就补刷（剃刀 W8）
                 if (packState == "succeeded")
                 {
                     readinessFor = null;
-                    if (packGame is not null)
-                        finishedPacks[packGame.Id] = (packState, packIpa ?? "", packIpaBytes, packPackBytes, packSeconds ?? 0);
+                    if (packGame is not null) finishedPacks[packGame.Id] = (packState, packIpa ?? "", packIpaBytes, packPackBytes, packSeconds ?? 0);
                 }
+                if (batch) _ = ReloadBatchAsync();
                 Render();
-                if (batchRunning) _ = BatchPackEndedAsync(game);   // 批量出包：记这款的结果、接着出下一款（BatchPage.cs）
-            });
+                break;
         }
     }
 
@@ -726,7 +801,7 @@ public sealed partial class EnvironmentWindow
     private Control OverallSection(MilestoneEstimate estimate, double elapsed)
     {
         var plan = packTrack.Plan;
-        var fraction = OverallFraction(estimate, plan);
+        var fraction = OverallFraction(estimate, plan, packTrack.Overall);
         var section = new StackPanel { Spacing = 12 };
 
         // Big %
@@ -778,8 +853,10 @@ public sealed partial class EnvironmentWindow
         return section;
     }
 
-    private static double OverallFraction(MilestoneEstimate estimate, IReadOnlyList<Milestone> plan)
+    /// <summary>作业层给了整单进度就用它（只增不减）；没有时照旧按各步估计</summary>
+    private static double OverallFraction(MilestoneEstimate estimate, IReadOnlyList<Milestone> plan, double? overall)
     {
+        if (overall is { } o) return o;
         if (plan.Count == 0) return 0;
         var weights = Weights(plan); var total = weights.Sum();
         var thisPlatform = total > 0 ? plan.Select((m, k) => estimate.Fill(k) * weights[k]).Sum() / total : 0;
@@ -796,6 +873,14 @@ public sealed partial class EnvironmentWindow
 
     // ---- segmented bar with sweep — 铺满父容器宽度 ----
 
+    /// <summary>第 k 段的填充：有整单进度就按同一套权重从它切出这一段（各段与大百分比一致、只增不减），否则照旧按估计</summary>
+    private double SegmentFill(MilestoneEstimate estimate, IReadOnlyList<Milestone> plan, int k)
+    {
+        if (packTrack.Overall is not { } o) return estimate.Fill(k);
+        var w = Weights(plan); var total = w.Sum(); var before = w.Take(k).Sum();
+        return k < w.Length && w[k] > 0 && total > 0 ? Math.Clamp((o * total - before) / w[k], 0, 1) : 0;
+    }
+
     private Control SegmentedBar(MilestoneEstimate estimate, IReadOnlyList<Milestone> plan)
     {
         var weights = Weights(plan); var total = Math.Max(weights.Sum(), 1);
@@ -804,7 +889,7 @@ public sealed partial class EnvironmentWindow
         var bar = new Grid { ColumnDefinitions = new ColumnDefinitions(colDefs), Height = 10, ColumnSpacing = 3 };
         for (var k = 0; k < plan.Count; k++)
         {
-            var fill = estimate.Fill(k);
+            var fill = SegmentFill(estimate, plan, k);
             var active = k == estimate.Index && packRunning;
             var seg = new Grid();
             seg.ColumnDefinitions = new ColumnDefinitions($"{fill}*,{Math.Max(0, 1 - fill)}*");
@@ -924,6 +1009,15 @@ public sealed partial class EnvironmentWindow
             if (packIpaBytes is { } ib) BigStat(T("export.done.ipa"), FormatBytes(ib));
             if (packPackBytes is { } pb) BigStat(T("export.done.pack"), FormatBytes(pb));
             result.Children.Add(stats);
+            if (packNotes.Count > 0)   // 降级继续的玩家提示（作业层原句）：出成了照常给按钮，这里说清哪里用了兼容做法（同 Mac ExportSessionView）
+            {
+                var notes = new StackPanel { Spacing = 6 };
+                AutomationId(notes, "progress.notes");
+                var head = new TextBlock { Text = "⚠ " + T("export.done.notes"), FontSize = 14, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#FFC857") };
+                notes.Children.Add(head);
+                foreach (var note in packNotes) notes.Children.Add(WrappedMuted(note, 13));
+                result.Children.Add(notes);
+            }
 
             // 两个大按钮
             var buttons = new WrapPanel { Orientation = Orientation.Horizontal };
@@ -975,6 +1069,7 @@ public sealed partial class EnvironmentWindow
                 buttons.Children.Add(copy);
             }
             result.Children.Add(buttons);
+            if (packState == "failed") result.Children.Add(ReportHintText());
             var feedback = new WrapPanel { Orientation = Orientation.Horizontal };
             feedback.Children.Add(Muted(T("export.fail.feedback"), 12));
             var gh = new Button { Content = T("export.fail.github"), Background = Transparent,
@@ -995,26 +1090,6 @@ public sealed partial class EnvironmentWindow
         return result;
     }
 
-    /// 「复制错误摘要」：正文由作业层 report.py 生成（Mac / Windows 同一份）；没有作业记录才用 fallback。
-    /// operations 为 null：这种失败没有作业记录（环境检查），直接用 fallback。
-    private Button CopyReportButton(string? gameId, string[]? operations, Func<string> fallback)
-    {
-        var copy = new Button { Content = T("export.fail.copy"), Padding = new Thickness(16, 9),
-            Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8) };
-        copy.Click += async (_, _) =>
-        {
-            var extra = System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
-            {
-                ["app"] = AppVersion,
-                ["checks"] = (report?.Checks ?? []).Where(c => c.Status != "ok")
-                    .Select(c => new Dictionary<string, string> { ["name"] = c.Name, ["message"] = c.Message }).ToList()
-            });
-            var text = (operations is null ? null : await JobReportClient.RunAsync(paths, privateRoot, gameId, operations, extra)) ?? fallback();
-            if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard) await clipboard.SetTextAsync(text);
-            copy.Content = T("export.fail.copied");
-        };
-        return copy;
-    }
 
     // ---- error summary for clipboard (only when the job left no record) ----
 
@@ -1108,7 +1183,7 @@ public sealed partial class EnvironmentWindow
         var buttons = new WrapPanel { Orientation = Orientation.Horizontal };
         var recheck = Action("action.recheck", () => _ = CheckInstallAsync(), !installChecking && !installBusy);
         recheck.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(recheck);
-        var start = Primary(T("install.start"), () => _ = InstallAsync(game), InstallAllowed && !installBusy && !packRunning);
+        var start = Primary(T("install.start"), () => _ = InstallAsync(game), !installBusy && !packRunning);   // 不按清单置灰（同 Mac InstallView）：真做不下去的作业层开头判、回真实原因
         AutomationId(start, "install.start");
         buttons.Children.Add(start);
         var remove = new Button { Content = T("install.remove_game"), IsEnabled = !installBusy && !packRunning,
@@ -1118,6 +1193,7 @@ public sealed partial class EnvironmentWindow
         AutomationId(remove, "install.remove_game");
         remove.Click += (_, _) => _ = ConfirmRemoveAsync(game);
         buttons.Children.Add(remove);
+        BusyHint(start); BusyHint(remove);   // 出包 / 装机在跑时置灰：悬停说在等谁、为什么（同 Mac BusyHint.swift）
         if (game.IphoneRestorable)
         {
             // 手机上的 S2Arm 换了新版运行层（只换宿主）后不好用：装回上一版（installRestore，同 Mac 装机页）
@@ -1127,6 +1203,7 @@ public sealed partial class EnvironmentWindow
                 VerticalAlignment = VerticalAlignment.Center };
             AutomationId(restore, "install.restore");
             restore.Click += (_, _) => _ = ConfirmRestoreAsync(game);
+            BusyHint(restore);
             buttons.Children.Add(restore);
         }
         if (readiness is { IpaPath.Length: > 0 } located)   // 装机时组装的那份（默认位置根 S2Arm.ipa），还没装过就没有
@@ -1148,7 +1225,7 @@ public sealed partial class EnvironmentWindow
         {
             // 正在装 / 刚装完的是另一款：这里不画它的进度（原先会画到当前这款上），给一个回去的入口
             var other = new StackPanel { Spacing = 8 };
-            other.Children.Add(Muted(T(installBusy ? "install.pill.running" : installState == "succeeded" ? "install.pill.done" : installState == "needsPlayer" ? "install.pill.needs_player" : "install.pill.failed").Replace("{0}", installGameName ?? installGameId)));
+            other.Children.Add(Muted(T(installBusy ? "install.pill.running" : installState == "succeeded" ? (installTrack.ExportFolder.Length > 0 ? "install.pill.exported" : "install.pill.done") : installState == "needsPlayer" ? "install.pill.needs_player" : "install.pill.failed").Replace("{0}", installGameName ?? installGameId).Replace("{1}", InstallTargetLabel)));
             other.Children.Add(Action("install.pill.open", OpenPhoneJob));
             body.Children.Add(Card(other));
         }
@@ -1157,39 +1234,24 @@ public sealed partial class EnvironmentWindow
             if (!installBusy) installSeen = true;   // 回到这款的安装页看过结果，顶栏胶囊收起
             body.Children.Add(LiveSlot(() => InstallStateCard(game)));   // 装机进度事件只刷新这一格（IngestPhoneEvent）
         }
-        if (installDiagnostics.Length > 0)
-            body.Children.Add(new Expander { Header = T("library.job_diagnostics"), IsExpanded = installState is "failed" or "invalid",
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                Content = new TextBox { Text = installDiagnostics, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 260 } });
+        // 作业诊断并进结局卡的「详细过程」（PhoneJobCard），不再另挂一个展开框
     }
 
     /// 安装页的状态卡：标题、进度条、已推 / 剩余、作业说明、复制错误摘要
     private Control InstallStateCard(LibraryGame game)
     {
-        var state = new StackPanel { Spacing = 8 };
-        state.Children.Add(Label(T(installState switch
-        {
-            "running" => "install.running", "succeeded" => "install.done", "needsPlayer" => "install.needs_player", "cancelled" => "progress.cancelled",
-            "invalid" => "library.invalid_result", _ => "install.failed"
-        }), 18));
-        if (installBusy)
-        {
-            var counted = installDone is { } d && installTotal is { } t && t > 0;
-            state.Children.Add(counted
-                ? new ProgressBar { Minimum = 0, Maximum = 1, Value = (double)installDone!.Value / installTotal!.Value, Height = 6 }
-                : new ProgressBar { IsIndeterminate = true, Height = 4 });
-            if (PhoneProgressText() is { Length: > 0 } progress) state.Children.Add(Muted(progress));
-        }
-        if (installMessage.Length > 0) state.Children.Add(Muted(installMessage));
+        // 装机 / 续签 / 删除 / 装回：同一张结局卡（PhoneJobCard.cs，同 Mac PhoneJobPanel）；Apple ID 登录过期另给「打开 Impactor 重新登录」
+        var notes = new List<string>();
+        if (installState == "succeeded" && installTrack.Kind == "install" && installOpenToFinish) notes.Add(T("install.done.open"));
+        var state = new StackPanel { Spacing = 16 };
+        state.Children.Add(PhoneJobCard(installTrack, installState, installMessage, installDiagnostics, game.Id, notes));
         if (installState is "failed" && installCode == "apple_session_expired")
         {
-            // Apple ID 登录过期（Apple 1100）：打开 Impactor 让玩家自己重新登录（密码不经手），登录好再点一次「装到 iPhone」（上面的说明写了步骤）
+            // Apple ID 登录过期（Apple 1100）：打开 Impactor 让玩家自己重新登录（密码不经手），登录好再点一次「装到 iPhone」
             var relogin = Action("install.relogin", OpenBundledImpactor, File.Exists(BundledImpactor) && !installBusy);
             AutomationId(relogin, "install.relogin");
             state.Children.Add(relogin);
         }
-        if (installState is "failed" or "invalid")
-            state.Children.Add(CopyReportButton(game.Id, ["install", "installRemove", "installRestore"], () => installMessage + "\n" + installDiagnostics));
         return Card(state);
     }
 
@@ -1202,7 +1264,8 @@ public sealed partial class EnvironmentWindow
         var before = (readiness is null, readinessRaw, installCheckFailed, installDiagnostics);   // 换了一款（readiness 清空）必重画
         try
         {
-            var job = await PackJobClient.RunAsync(PackRequest("installCheck", game.Id), null, CancellationToken.None);
+            // 装过的款（续签 / 重装）清单只看当初那台；没装过的看唯一连着的那台（清单把它的设备号报回来，装机就带它）
+            var job = await PackJobClient.RunAsync(PackRequest("installCheck", game.Id, DeviceExtra(game.IphoneInstallDevice)), null, CancellationToken.None);
             if (readinessFor == game.Id)
             {
                 if (job.Report.Succeeded) { readiness = InstallReadiness.Parse(job.Report.Result); readinessRaw = job.Report.Result.GetRawText(); installCheckFailed = false; }
@@ -1219,17 +1282,35 @@ public sealed partial class EnvironmentWindow
         }
     }
 
-    /// <summary>acceptDropped: the player confirmed games installed from another computer can't come along this time
-    /// (job code container_would_drop). ask = false (control port) fails as-is instead of popping the dialog.</summary>
-    private async Task InstallAsync(LibraryGame game, bool acceptDropped = false, bool ask = true)
+    /// <summary>
+    /// 作业层认得出、玩家同意就能继续的停装码 → 续跑时带的参数（同 Mac S2ArmLauncherModel.confirmCodes）。
+    /// 维护者 11-11：「玩家都主动点装机了……能认出的问题让用户确认，用户确认可以继续装，认不出的直接装」。
+    /// container_would_drop：手机上别的电脑装的游戏这次带不上；save_backup_failed：覆盖前没能备份手机上的存档；container_stale：旧资源包要按新版重出。
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> ConfirmCodes = new Dictionary<string, string>
     {
-        if (installBusy || !InstallAllowed) return;
-        BeginPhoneJob(game, "");
-        string? dropAsk = null;
+        ["container_would_drop"] = "acceptDropped", ["save_backup_failed"] = "acceptNoBackup", ["container_stale"] = "acceptStale",
+        ["device_space_low"] = "acceptLowSpace",
+    };
+
+    /// <summary>可确认的停装码要问的那句标题：文案表有 errors.&lt;码&gt;.title 就用它，没有用通用的 install.drop_title</summary>
+    private string ConfirmTitle(string? code) => code is { Length: > 0 } && text.Has("errors." + code + ".title") ? T("errors." + code + ".title") : T("install.drop_title");
+
+    /// <summary>控制口请求里带的确认参数（acceptDropped / acceptNoBackup / acceptStale）</summary>
+    private static HashSet<string> AcceptFlags(ControlRequest r) => ConfirmCodes.Values.Where(r.Flag).ToHashSet();
+
+    /// <summary>accept：玩家已同意的确认参数（ConfirmCodes 的值，逐次累积）。ask = false（控制口）原样失败、不弹确认，由调用方带参数再发。</summary>
+    private async Task InstallAsync(LibraryGame game, IReadOnlySet<string>? accept = null, bool ask = true)
+    {
+        if (installBusy) return;
+        accept ??= new HashSet<string>();
+        var front = BeginPhoneJob(game, "");
+        string? dropAsk = null, askCode = null;
         try
         {
-            var job = await PackJobClient.RunAsync(PackRequest("install", game.Id, DropExtra(acceptDropped)), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), CancellationToken.None);
-            if (ask && JobCode(job) == "container_would_drop") dropAsk = job.Report.Message;
+            var job = await PackJobClient.RunAsync(PackRequest("install", game.Id, AcceptExtra(accept, InstallDevice(game))), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), front.Token, front.Next());
+            if (ask && JobCode(job) is { } c && ConfirmCodes.ContainsKey(c)) { dropAsk = job.Report.Message; askCode = c; }
+            installedTo = job.Report.Succeeded ? InstalledLabel(job.Report.Result) : "";
             installCode = job.Report.Succeeded ? null : JobCode(job);
             installState = job.Report.State;
             installMessage = job.Report.Succeeded && job.Report.Result.TryGetProperty("device", out var device) && device.ValueKind == JsonValueKind.String
@@ -1237,17 +1318,44 @@ public sealed partial class EnvironmentWindow
             // 资源传完但电脑没拉起 App 解开（作业结果 unpackPending，11-09 #336）：不显示「已装到 iPhone」，显示还差的一步和原因 / 办法
             if (job.Report.Succeeded && job.Report.Result.TryGetProperty("unpackPending", out var pending) && pending.ValueKind == JsonValueKind.String)
             { installState = "needsPlayer"; installMessage = pending.GetString() ?? ""; }
+            installOpenToFinish = job.Report.Succeeded && job.Report.Result.TryGetProperty("openToFinish", out var open) && open.ValueKind == JsonValueKind.True;
             installDiagnostics = JobDiagnostics(job);
+            installTrack.Finish(job, GameName);
+            if (job.Report.Succeeded && installTrack.ExportFolder.Length > 0) OpenFolder(installTrack.ExportFolder);   // 导出模式：打开放好的文件夹
         }
         catch (LibraryProtocolException error) { installState = "invalid"; installDiagnostics = error.Message; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
             OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { installState = "failed"; installDiagnostics = error.Message; }
-        finally { installBusy = false; readinessFor = null; Render(); }
-        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk)) await InstallAsync(game, acceptDropped: true);
+        finally { EndJob(front); readinessFor = null; Render(); }
+        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk, ConfirmTitle(askCode)))
+            await InstallAsync(game, new HashSet<string>(accept) { ConfirmCodes[askCode!] });
     }
 
-    private static Dictionary<string, object?>? DropExtra(bool acceptDropped) => acceptDropped ? new() { ["acceptDropped"] = true } : null;
+    /// 装到哪台：清单报回来的那台（续签时就是当初那台，在线才有），没有就是装机记录里的那台（不在线时作业层如实说「它不在线」）。
+    /// 作业层收不到设备号就拒绝、不自己挑（11-11：续签时同网的 iPad 被装上）
+    private string InstallDevice(LibraryGame game) =>
+        readiness is { Device.Length: > 0 } r && readinessFor == game.Id ? r.Device : game.IphoneInstallDevice;
+
+    private string GameName(string id) => catalog?.Games.FirstOrDefault(g => string.Equals(g.Id, id, StringComparison.OrdinalIgnoreCase))?.Name ?? id;
+
+    private static string InstalledLabel(JsonElement result)
+    {
+        string S(string k) => result.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+        var kind = S("deviceKind"); var name = S("deviceName");
+        if (kind.Length == 0) kind = "iPhone / iPad";
+        return name.Length > 0 ? kind + "「" + name + "」" : kind;
+    }
+
+    private static Dictionary<string, object?>? DeviceExtra(string device) => device.Length > 0 ? new() { ["device"] = device } : null;
+
+    private static Dictionary<string, object?>? AcceptExtra(IReadOnlySet<string> accept, string device = "")
+    {
+        var extra = new Dictionary<string, object?>();
+        foreach (var key in accept) extra[key] = true;
+        if (device.Length > 0) extra["device"] = device;
+        return extra.Count > 0 ? extra : null;
+    }
 
     private static string? JobCode(LibraryJobOutput job)
     {
@@ -1331,20 +1439,36 @@ public sealed partial class EnvironmentWindow
         if (await ConfirmInstallActionAsync("install.restore")) await RunPhoneJobAsync(game, "installRestore", "install.restore");
     }
 
+    /// <summary>换游戏库 setup 撞上认得出的风险 → 问玩家时带的参数（同 Mac S2ArmLauncherModel.libraryConfirmCodes）：
+    /// library_in_cloud 选的文件夹在云盘同步目录里；library_folder_not_empty 文件夹里已有别的文件、又不是游戏库（S2Arm 只动自己建的文件）</summary>
+    internal static readonly IReadOnlyDictionary<string, string> LibraryConfirmCodes = new Dictionary<string, string>
+    {
+        ["library_in_cloud"] = "acceptCloud", ["library_folder_not_empty"] = "acceptForeign",
+    };
+
+    /// <summary>setup 没成、失败码是认得出的风险、这一项还没确认过：问「仍然继续 / 先不」；同意就把对应参数加进 accept 返回 true，调用方带着它重发（参数累积）</summary>
+    private async Task<bool> ConfirmLibraryAsync(LibraryJobOutput setup, HashSet<string> accept)
+    {
+        if (setup.Report.Succeeded || JobCode(setup) is not { } code || !LibraryConfirmCodes.TryGetValue(code, out var flag) || accept.Contains(flag)) return false;
+        if (!await ConfirmInstallActionAsync("install.drop", setup.Report.Message, ConfirmTitle(code))) return false;
+        accept.Add(flag);
+        return true;
+    }
+
     /// <summary>Confirm dialog for a phone-side action; texts are &lt;prefix&gt;_title / _body / _confirm.</summary>
-    private async Task<bool> ConfirmInstallActionAsync(string prefix, string? bodyText = null)
+    private async Task<bool> ConfirmInstallActionAsync(string prefix, string? bodyText = null, string? titleText = null)
     {
         if (installBusy || packRunning) return false;
         var dialog = new Window
         {
-            Title = T(prefix + "_title"), Width = 420, SizeToContent = SizeToContent.Height,
+            Title = titleText ?? T(prefix + "_title"), Width = 420, SizeToContent = SizeToContent.Height,
             CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Background = Canvas, Foreground = Ink,
             FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope")
         };
         var confirmed = false;
         var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
-        body.Children.Add(Label(T(prefix + "_title"), 20));
+        body.Children.Add(Label(titleText ?? T(prefix + "_title"), 20));
         body.Children.Add(Muted(bodyText ?? T(prefix + "_body"), 14));
         var buttons = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         var cancel = new Button { Content = T("action.cancel"), Padding = new Thickness(16, 9),
@@ -1364,25 +1488,28 @@ public sealed partial class EnvironmentWindow
     }
 
     /// <summary>installRemove / installRestore; texts are &lt;prefix&gt;_running / _done / _failed.</summary>
-    private async Task RunPhoneJobAsync(LibraryGame game, string operation, string prefix, bool acceptDropped = false, bool ask = true)
+    private async Task RunPhoneJobAsync(LibraryGame game, string operation, string prefix, IReadOnlySet<string>? accept = null, bool ask = true)
     {
         if (installBusy || packRunning) return;
-        BeginPhoneJob(game, T(prefix + "_running"));
-        string? dropAsk = null;
+        accept ??= new HashSet<string>();
+        var front = BeginPhoneJob(game, T(prefix + "_running"), operation);
+        string? dropAsk = null, askCode = null;
         try
         {
-            var job = await PackJobClient.RunAsync(PackRequest(operation, game.Id, DropExtra(acceptDropped)), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), CancellationToken.None);
-            if (ask && JobCode(job) == "container_would_drop") dropAsk = job.Report.Message;
+            var job = await PackJobClient.RunAsync(PackRequest(operation, game.Id, AcceptExtra(accept, game.IphoneInstallDevice is { Length: > 0 } d ? d : InstallDevice(game))), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), front.Token, front.Next());
+            if (ask && JobCode(job) is { } c && ConfirmCodes.ContainsKey(c)) { dropAsk = job.Report.Message; askCode = c; }
             installState = job.Report.State;
             installMessage = job.Report.Succeeded ? T(prefix + "_done") : job.Report.Message;
             installDiagnostics = JobDiagnostics(job);
+            installTrack.Finish(job, GameName);
         }
         catch (LibraryProtocolException error) { installState = "invalid"; installDiagnostics = error.Message; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
             OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { installState = "failed"; installMessage = T(prefix + "_failed"); installDiagnostics = error.Message; }
-        finally { installBusy = false; Render(); }
-        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk)) await RunPhoneJobAsync(game, operation, prefix, acceptDropped: true);
+        finally { EndJob(front); Render(); }
+        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk, ConfirmTitle(askCode)))
+            await RunPhoneJobAsync(game, operation, prefix, new HashSet<string>(accept) { ConfirmCodes[askCode!] });
     }
 
     /// <summary>Closing while a pack runs: cancel through the job control plane first, then close.</summary>
@@ -1391,7 +1518,7 @@ public sealed partial class EnvironmentWindow
         if (!packRunning) return;
         args.Cancel = true;
         batchRunning = false;   // 关窗口不算取消整批：批次里这款留着「正在出」，下次打开 recover 记成被打断、重新排队（同 Mac）
-        packCancellation?.Cancel();
+        packJob?.Cancellation.Cancel();
         if (packOperation is { } operation) await operation;
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
         Close();

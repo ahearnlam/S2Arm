@@ -21,32 +21,6 @@ sys.path.insert(0, str(JOBS))
 import core
 
 
-def private_fixture(path, everyone=False):
-    """Set the DACL of this test-created leaf only; never alter its parent."""
-    import winproc as w
-    sid = w._current_sid()
-    string = C.c_void_p()
-    w._checked(w._api('advapi32', 'ConvertSidToStringSidW', W.BOOL, C.c_void_p, C.c_void_p)(sid, C.byref(string)))
-    try:
-        user = C.wstring_at(string)
-    finally:
-        w._api('kernel32', 'LocalFree', C.c_void_p, C.c_void_p)(string)
-    sddl = 'D:P(A;;FA;;;' + user + ')(A;;FA;;;SY)(A;;FA;;;BA)' + ('(A;;FR;;;WD)' if everyone else '')
-    descriptor, size = C.c_void_p(), W.DWORD()
-    w._checked(w._api('advapi32', 'ConvertStringSecurityDescriptorToSecurityDescriptorW', W.BOOL,
-                     W.LPCWSTR, W.DWORD, C.c_void_p, C.c_void_p)(sddl, 1, C.byref(descriptor), C.byref(size)))
-    try:
-        present, defaulted, dacl = W.BOOL(), W.BOOL(), C.c_void_p()
-        w._checked(w._api('advapi32', 'GetSecurityDescriptorDacl', W.BOOL, C.c_void_p, C.c_void_p,
-                         C.c_void_p, C.c_void_p)(descriptor, C.byref(present), C.byref(dacl), C.byref(defaulted)))
-        result = w._api('advapi32', 'SetNamedSecurityInfoW', W.DWORD, W.LPWSTR, C.c_int, W.DWORD,
-                        C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p)(str(path), 1, 0x80000004, None, None, dacl, None)
-        if result:
-            raise C.WinError(result)
-    finally:
-        w._api('kernel32', 'LocalFree', C.c_void_p, C.c_void_p)(descriptor)
-
-
 class PinnablePath(unittest.TestCase):
     """逐级钉句柄打开的起点（纯字符串判断，各平台都跑）：盘符根、网络共享根放行（#427 游戏库在 SMB 共享盘上），设备路径和相对路径拒绝。期望手写"""
     def test_drive_and_share_roots(self):
@@ -61,6 +35,25 @@ class PinnablePath(unittest.TestCase):
         for text in (r'\\?\C:\x', r'\\.\pipe\x', 'logs', r'S2Arm\logs'):
             with self.subTest(text=text), self.assertRaises(OSError):
                 w.pinnable_path(text)
+
+
+class ReferencedNamesExist(unittest.TestCase):
+    """全仓（pack/ tools/）代码里引用的 winproc.<名字> 都得在 winproc 里有，各平台都跑。
+    11-11 删请求文件 ACL 复核时把 _current_sid 一起删了，pack/orch/roots.py _win_acl 还在调，Windows 播种 / 删目录全部 AttributeError，
+    而 Windows 专属用例只在真 Windows 上跑、门禁没拦住（#669 复现时发现）"""
+    def test_every_reference_resolves(self):
+        import ast
+        import winproc as w
+        repo = JOBS.parents[1]
+        missing = []
+        for path in [*repo.joinpath('pack').rglob('*.py'), *repo.joinpath('tools').rglob('*.py')]:
+            if path.name == 'winproc.py' or 'tests' in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding='utf-8'), str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'winproc' and not hasattr(w, node.attr):
+                    missing.append(f'{path.relative_to(repo)}:{node.lineno} winproc.{node.attr}')
+        self.assertEqual(missing, [])
 
 
 class OriginalContracts(unittest.TestCase):
@@ -143,21 +136,6 @@ class WindowsBoundaries(OriginalContracts):
         self.addCleanup(cleanup)
         return p
 
-    def test_private_acl_and_everyone_read(self):
-        from jobcase import _windows_private_request
-        p = self.root/'request';_windows_private_request(p,{})
-        self.assertTrue(self.w.request_is_private(p))
-        private_fixture(p,everyone=True)
-        self.assertFalse(self.w.request_is_private(p))
-
-    def test_owner_mismatch_and_query_failure_are_not_private(self):
-        from jobcase import _windows_private_request
-        p = self.root/'request';_windows_private_request(p,{})
-        with patch.object(self.w,'_current_sid',return_value=self.w._well_known_sid(1)):
-            self.assertFalse(self.w.request_is_private(p))
-        with patch.object(self.w,'_private_security',side_effect=PermissionError()):
-            self.assertFalse(self.w.request_is_private(p))
-
     def junction(self, target, link):
         import _winapi
         _winapi.CreateJunction(str(target),str(link))
@@ -167,7 +145,6 @@ class WindowsBoundaries(OriginalContracts):
         link=self.root/'link';self.junction(target,link)
         self.addCleanup(lambda: os.rmdir(link))
         with self.assertRaises(OSError): self.w.open_dir_nofollow(link)
-        self.assertFalse(self.w.request_is_private(link/'private'))
 
     def test_process_runs_only_after_job_assignment(self):
         mark=self.root/'ran'

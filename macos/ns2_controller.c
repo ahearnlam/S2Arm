@@ -5,6 +5,7 @@
 #include "ns2_relay.h"
 #include "../ios/haptic_retry.h"
 #include <errno.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -13,12 +14,15 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t relayWriteLock = PTHREAD_MUTEX_INITIALIZER;
 static ns2_state input;
-static ns2_motion relayMotion;
+static ns2_motion relayMotion, relayMotionLeft;   // relayMotionLeft：Joy-Con 2 拼对时左只的（INPUT 包 motion_left）
+static ns2_mouse relayMouse[2];   // Joy-Con 2 光学鼠标 [0] 左只 / [1] 右只（INPUT 包 mouse，mouse_kind 标哪一只；一对时两只轮流来；旧启动器没有 → known = 0）
+static uint64_t relayMouseUs[2];   // 各侧收到的时刻（超过 250 毫秒没来就当没有）
 static ns2_kind relayKind;   // 通道 v2 带来的对外输出型号（持 lock）
 static ns2_status status;
 static int directStarted, ready, foreground, motion_requested;
@@ -29,6 +33,8 @@ static int relayThreadStarted;
 static uint64_t epoch = 1;
 static uint16_t back_buttons[2];
 static float rumble_scale = 1;
+// 游戏这一格现在的手柄样式（Ryujinx ControllerType 位；InputPump 改配后经 s2a_vpad_set_style 告诉这里；0 = 还不知道）
+static _Atomic int gameStyle;
 
 static float rumble_amplitude(float amplitude) {
     return fminf(1, s2a_hp_feel(amplitude) * rumble_scale);
@@ -107,6 +113,8 @@ static int receive_all(int fd, void *buffer, size_t length) {
     return 1;
 }
 
+static uint64_t s2a_mac_ns2_now_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u; }
+
 static void *relay_read_main(void *context) {
     int fd = (int)(intptr_t)context;
     ns2_relay_packet packet;
@@ -132,6 +140,18 @@ static void *relay_read_main(void *context) {
         relayKind = connected ? (ns2_kind)packet.kind : NS2_KIND_NONE;
         if (packet.motion_known) relayMotion = packet.motion;
         else memset(&relayMotion, 0, sizeof relayMotion);
+        // 拼对时左只的六轴（ns2_relay.h motion_left；旧启动器发 0 → 只有右只，照旧）
+        if (packet.motion_known && packet.motion_left_known) {
+            const ns2_relay_motion_left *l = &packet.motion_left;
+            relayMotionLeft = (ns2_motion){.known = 1, .host_timestamp_us = (uint64_t)l->host_timestamp_us_hi << 32 | l->host_timestamp_us_lo,
+                .acceleration_x = l->acceleration_x, .acceleration_y = l->acceleration_y, .acceleration_z = l->acceleration_z, .gyro_x = l->gyro_x, .gyro_y = l->gyro_y, .gyro_z = l->gyro_z};
+        } else memset(&relayMotionLeft, 0, sizeof relayMotionLeft);
+        if (connected && (packet.mouse_kind == NS2_KIND_JOYCON_L || packet.mouse_kind == NS2_KIND_JOYCON_R)) {
+            const ns2_relay_mouse *m = &packet.mouse;
+            int side = packet.mouse_kind == NS2_KIND_JOYCON_R;
+            relayMouse[side] = (ns2_mouse){.known = 1, .kind = (ns2_kind)packet.mouse_kind, .x = m->x, .y = m->y, .surface = m->surface, .distance = m->distance};
+            relayMouseUs[side] = s2a_mac_ns2_now_us();
+        } else if (!connected) memset(relayMouse, 0, sizeof relayMouse);
         pthread_mutex_unlock(&lock);
     }
 
@@ -143,6 +163,8 @@ static void *relay_read_main(void *context) {
         epoch++;
         memset(&input, 0, sizeof input);
         memset(&relayMotion, 0, sizeof relayMotion);
+        memset(&relayMotionLeft, 0, sizeof relayMotionLeft);
+        memset(relayMouse, 0, sizeof relayMouse);
         relayKind = NS2_KIND_NONE;
     }
     pthread_mutex_unlock(&lock);
@@ -214,6 +236,7 @@ int s2a_mac_ns2_connect(void) {
         return 1;
     }
 
+    ns2_set_joycon_raw(1);   // 单只 Joy-Con 报原始方向，转不转由 s2a_mac_ns2_read 按游戏样式定（同通道那头的连接程序）
     int started = ns2_start_with_motion(receive_input, receive_status, receive_motion, NULL);
     if (started) {
         pthread_mutex_lock(&lock);
@@ -273,13 +296,42 @@ void s2a_mac_ns2_focus(int focused) {
     }
 }
 
-int s2a_mac_ns2_read(ns2_state *state) {
+// 单只 Joy-Con（#520 A）：传输层报原始方向（ns2_set_joycon_raw），这里按游戏这一格的样式定——
+//   游戏用的是这只那一侧的单只样式（JoyLeft / JoyRight）就原样给，由游戏按 NpadJoyHoldType 自己转竖 / 横（同真机）；
+//   双 Joy-Con（InputPump 只在游戏不收 Pro 时报它，ReportedStyle）也原样给：真机是双手模式只接一侧、直握（11-11 实机：一款体育游戏的球类项目）；
+//   否则（游戏收 Pro、宿主扮 Pro / 掌机）转成横握视角，同改前
+enum { STYLE_JOYCON_PAIR = 1 << 2, STYLE_JOYCON_LEFT = 1 << 3, STYLE_JOYCON_RIGHT = 1 << 4 };   // Ryujinx ControllerType
+enum { KEY_SL_LEFT = 1u << 24, KEY_SR_LEFT = 1u << 25, KEY_SL_RIGHT = 1u << 26, KEY_SR_RIGHT = 1u << 27 };   // Ryujinx ControllerKeys
+int s2a_mac_ns2_raw_wanted(ns2_kind kind, int style) {
+    return (kind == NS2_KIND_JOYCON_L && (style == STYLE_JOYCON_LEFT || style == STYLE_JOYCON_PAIR)) ||
+           (kind == NS2_KIND_JOYCON_R && (style == STYLE_JOYCON_RIGHT || style == STYLE_JOYCON_PAIR));
+}
+int s2a_mac_ns2_single_style(ns2_kind kind) {
+    return kind == NS2_KIND_JOYCON_L ? STYLE_JOYCON_LEFT : kind == NS2_KIND_JOYCON_R ? STYLE_JOYCON_RIGHT : 0;
+}
+uint32_t s2a_mac_ns2_shape(ns2_kind kind, int raw, ns2_state *s) {
+    if (kind != NS2_KIND_JOYCON_L && kind != NS2_KIND_JOYCON_R) return 0;
+    if (!raw) { ns2_joycon_raw_to_sideways(kind, s); return 0; }
+    int left = kind == NS2_KIND_JOYCON_L;
+    uint32_t keys = (s->buttons >> NS2_BUTTON_SL & 1 ? (left ? KEY_SL_LEFT : KEY_SL_RIGHT) : 0) |
+                    (s->buttons >> NS2_BUTTON_SR & 1 ? (left ? KEY_SR_LEFT : KEY_SR_RIGHT) : 0);
+    s->buttons &= ~((1ull << NS2_BUTTON_SL) | (1ull << NS2_BUTTON_SR));
+    return keys;
+}
+void s2a_mac_ns2_set_game_style(int style) { atomic_store(&gameStyle, style); }
+static ns2_kind kind_locked(void) { return !ready ? NS2_KIND_NONE : relayFD >= 0 ? relayKind : ns2_get_output_kind(); }
+int s2a_mac_ns2_raw_now(void) { return s2a_mac_ns2_raw_wanted(s2a_mac_ns2_kind(), atomic_load(&gameStyle)); }
+
+int s2a_mac_ns2_read(ns2_state *state, uint32_t *side_keys) {
     pthread_mutex_lock(&lock);
     int available = ready && foreground;
     *state = available ? input : (ns2_state){0};
+    ns2_kind kind = available ? kind_locked() : NS2_KIND_NONE;
     if (state->buttons & (1ull << 19)) state->buttons |= back_buttons[0];
     if (state->buttons & (1ull << 20)) state->buttons |= back_buttons[1];
     pthread_mutex_unlock(&lock);
+    uint32_t keys = s2a_mac_ns2_shape(kind, s2a_mac_ns2_raw_wanted(kind, atomic_load(&gameStyle)), state);
+    if (side_keys) *side_keys = keys;
     return available;
 }
 
@@ -296,7 +348,7 @@ int s2a_mac_ns2_relay_due(ns2_status status, const char *relay) {
 
 ns2_kind s2a_mac_ns2_kind(void) {
     pthread_mutex_lock(&lock);
-    ns2_kind kind = !ready ? NS2_KIND_NONE : relayFD >= 0 ? relayKind : ns2_get_output_kind();
+    ns2_kind kind = kind_locked();
     pthread_mutex_unlock(&lock);
     return kind;
 }
@@ -372,18 +424,71 @@ EXPORT void s2a_mac_ns2_set_motion_enabled(int enabled) {
     }
 }
 
+static s2a_pad_motion pad_motion(const ns2_motion *m) {
+    return (s2a_pad_motion){m->host_timestamp_us, m->acceleration_x, m->acceleration_y, m->acceleration_z, m->gyro_x, m->gyro_y, m->gyro_z};
+}
+
+// Joy-Con 2 左右拼成一对：out[0] 左只、out[1] 右只，返回 2；只有一路（Pro / 单只 / 旧启动器）时 out[0] 是它、返回 1；没有返回 0
+EXPORT int s2a_mac_ns2_read_motion_pair(s2a_pad_motion out[2]) {
+    ns2_motion left = {0}, right = {0};
+    pthread_mutex_lock(&lock);
+    if (ready && foreground && motion_requested) {
+        if (relayFD >= 0) { right = relayMotion; left = relayMotionLeft; }
+        else { ns2_get_motion(&right); ns2_get_motion_left(&left); }
+    }
+    pthread_mutex_unlock(&lock);
+    out[0] = out[1] = (s2a_pad_motion){0};
+    if (!right.known) return 0;
+    if (!left.known) { out[0] = pad_motion(&right); return 1; }
+    out[0] = pad_motion(&left);
+    out[1] = pad_motion(&right);
+    return 2;
+}
+
+
+// Joy-Con 2 光学鼠标，左右各一份：连着 Joy-Con 2（单只 / 一对）就返回有几侧（游戏靠它认 Joy-Con 2，没有鼠标读数也照报；窗口失焦也照报，
+//   免得样式来回切、游戏收到手柄重配）。out[0] 左只、out[1] 右只，side 填好；单只时只有那一侧（另一侧 side = 0xff）。
+//   读数取通道 / 直连最近一笔（各侧 250 毫秒内），失焦时不给
+EXPORT int s2a_mac_ns2_read_mouse_pair(s2a_pad_mouse out[2]) {
+    if (!out) return 0;
+    out[0] = out[1] = (s2a_pad_mouse){0};
+    ns2_mouse mouse[2] = {{0}};
+    pthread_mutex_lock(&lock);
+    int on = ready, live = ready && foreground;
+    uint64_t now = s2a_mac_ns2_now_us();
+    for (int side = 0; side < 2; side++) {
+        if (live && relayFD >= 0) { if (now - relayMouseUs[side] <= 250000) mouse[side] = relayMouse[side]; }
+        else if (live) ns2_get_mouse_side(side, &mouse[side]);
+    }
+    pthread_mutex_unlock(&lock);
+    if (!on) return 0;
+    ns2_kind kind = s2a_mac_ns2_kind();
+    int has[2] = {kind == NS2_KIND_JOYCON_L || kind == NS2_KIND_JOYCON_PAIR, kind == NS2_KIND_JOYCON_R || kind == NS2_KIND_JOYCON_PAIR};
+    int n = 0;
+    for (int side = 0; side < 2; side++) {
+        out[side].side = has[side] ? (uint8_t)side : 0xff;
+        if (!has[side]) continue;
+        n++;
+        out[side].host_timestamp_us = now;
+        if (mouse[side].known) { out[side].known = 1; out[side].x = mouse[side].x; out[side].y = mouse[side].y; out[side].distance = mouse[side].distance; }
+    }
+    return n;
+}
+
 EXPORT int s2a_mac_ns2_read_motion(s2a_pad_motion *out) {
     ns2_motion sample = {0};
+    ns2_kind kind = NS2_KIND_NONE;
     pthread_mutex_lock(&lock);
     if (ready && foreground && motion_requested) {
         if (relayFD >= 0) sample = relayMotion;
         else ns2_get_motion(&sample);
+        kind = kind_locked();
     }
     pthread_mutex_unlock(&lock);
+    // 单只 Joy-Con 的六轴同按键：游戏用单只样式就原样给，否则换成横握视角（传输层原始方向时不转）
+    if (!s2a_mac_ns2_raw_wanted(kind, atomic_load(&gameStyle))) ns2_joycon_sideways_motion(kind, &sample);
     *out = (s2a_pad_motion){0};
     if (!sample.known) return 0;
-    *out = (s2a_pad_motion){sample.host_timestamp_us,
-        sample.acceleration_x, sample.acceleration_y, sample.acceleration_z,
-        sample.gyro_x, sample.gyro_y, sample.gyro_z};
+    *out = pad_motion(&sample);
     return 1;
 }

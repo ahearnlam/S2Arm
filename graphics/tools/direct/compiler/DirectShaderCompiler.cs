@@ -20,6 +20,9 @@ namespace S2A.DirectCompiler
     public static class DirectShaderCompiler
     {
         public const string RequestSchema = "s2a-direct-compile-v1";
+        // v2 图形 stages 是五个 NVN 槽 [vs,fs,gs,tcs,tes]，未绑定的写 null。
+        // 只接 VS / VS+FS / VS+GS+FS；v1 的图形和计算合同保持原样。
+        public const string GraphicsRequestSchemaV2 = "s2a-direct-compile-v2";
         public const string ResultSchema = "s2a-direct-program-v1";
         public const string ContentContract = "s2a-direct-program-content-v1";
         public const int MaxRequestBytes = 256 << 20;
@@ -32,8 +35,10 @@ namespace S2A.DirectCompiler
                 throw new DirectCompileException("INVALID_JSON", "request root is not an object");
             JsonStrict.OnlyKeys(root, "request", "schema", "session", "generation", "requestId",
                 "directABI", "translatorClosure", "runtimeCompilerABI", "sourceParserVersion", "kindCheck", "profile", "program");
-            if (JsonStrict.String(root, "schema", "request") != RequestSchema)
-                throw new DirectCompileException("UNSUPPORTED_VERSION", "request.schema is not " + RequestSchema);
+            string requestSchema = JsonStrict.String(root, "schema", "request");
+            int requestVersion = requestSchema == RequestSchema ? 1 : requestSchema == GraphicsRequestSchemaV2 ? 2 : 0;
+            if (requestVersion == 0)
+                throw new DirectCompileException("UNSUPPORTED_VERSION", "unknown request.schema " + requestSchema);
             // 描述符种类校验开关：native 过了调试门、debug.s2a.kind_check=0 才在请求里带 kindCheck=false；
             // 缺省（离线库/CLI）为开。这里只从请求读，不读进程环境变量。
             bool kindCheck = JsonStrict.OptionalBool(root, "kindCheck", "request", true);
@@ -55,7 +60,17 @@ namespace S2A.DirectCompiler
             DirectProfile profile = DirectProfile.Parse(JsonStrict.Object(root, "profile", "request"), "request.profile");
             if (profile.DirectAbi != directAbi || profile.TranslatorClosure != closure || profile.RuntimeCompilerAbi != compilerAbi)
                 throw new DirectCompileException("IDENTITY", "request identity does not match the effective profile");
-            DirectProgram program = DirectProgram.Parse(JsonStrict.Object(root, "program", "request"), "request.program", profile);
+            DirectProgram program = DirectProgram.Parse(JsonStrict.Object(root, "program", "request"), "request.program", profile, requestVersion);
+            if (program.StageOf("gs") is DirectStage gs)
+            {
+                if (!profile.Caps.SupportsGeometryShader)
+                    throw new DirectCompileException("UNSUPPORTED_PROGRAM", "geometryShader is not enabled in the profile");
+                if (program.Graphics.State.Topology is InputTopology.LinesAdjacency or InputTopology.TrianglesAdjacency)
+                    throw new DirectCompileException("UNSUPPORTED_PROGRAM", "geometry adjacency topology is not implemented");
+                uint header = BinaryPrimitives.ReadUInt32LittleEndian(gs.Code);
+                if (((header >> 10) & 15) != 4 || (header & (1u << 24)) != 0)
+                    throw new DirectCompileException("UNSUPPORTED_PROGRAM", "GS must have a non-passthrough geometry header");
+            }
             _ = sourceParserVersion;
 
             var queries = new List<DirectQuery>();
@@ -79,18 +94,23 @@ namespace S2A.DirectCompiler
                 }
                 else
                 {
-                    // 先按 VS 再 FS 解码：共享 allocator 的绑定号必须反映合同规定的 stage 顺序。
-                    DirectStage vs = program.StageOf("vs"), fs = program.StageOf("fs");
-                    var vsAccessor = new DirectGpuAccessor(profile, program, vs, 1, allocator, queries);
-                    var fsAccessor = new DirectGpuAccessor(profile, program, fs, 5, allocator, queries);
-                    accessors.Add(vsAccessor); accessors.Add(fsAccessor);
-                    TranslatorContext vsContext = ShaderCache.DecodeGraphicsShader(vsAccessor, TargetApi.Vulkan, ShaderCache.DefaultFlags, 0);
-                    TranslatorContext fsContext = ShaderCache.DecodeGraphicsShader(fsAccessor, TargetApi.Vulkan, ShaderCache.DefaultFlags, 0);
-                    vsContext.SetNextStage(fsContext);
-                    ShaderProgram vsShader = vsContext.Translate();
-                    ShaderProgram fsShader = fsContext.Translate();
-                    translated.Add((vs, vsShader, vsAccessor));
-                    translated.Add((fs, fsShader, fsAccessor));
+                    // NVN 槽序 VS/FS/GS 与执行序不同；解码后按实际管线顺序显式串联。
+                    var ordered = new[] { (name: "vs", index: 1), (name: "gs", index: 4), (name: "fs", index: 5) };
+                    var contexts = new List<(DirectStage stage, DirectGpuAccessor accessor, TranslatorContext context)>();
+                    foreach (var item in ordered)
+                    {
+                        DirectStage stage = program.StageOf(item.name);
+                        if (stage == null) continue;
+                        var accessor = new DirectGpuAccessor(profile, program, stage, item.index, allocator, queries);
+                        accessors.Add(accessor);
+                        contexts.Add((stage, accessor, ShaderCache.DecodeGraphicsShader(accessor, TargetApi.Vulkan, ShaderCache.DefaultFlags, 0)));
+                    }
+                    for (int i = contexts.Count - 2; i >= 0; i--)
+                    {
+                        if (contexts[i].stage.Stage == "gs") contexts[i].context.S2ASetNextStageActual(contexts[i + 1].context);
+                        else contexts[i].context.SetNextStage(contexts[i + 1].context);
+                    }
+                    foreach (var item in contexts) translated.Add((item.stage, item.context.Translate(), item.accessor));
                 }
             }
             catch (DirectCompileException) { throw; }
@@ -105,13 +125,14 @@ namespace S2A.DirectCompiler
                         accessor.Diagnostics[0] + " (stage " + accessorStage(accessor, translated) + ")");
 
             foreach (var entry in translated)
-                ValidateSpirv(entry.stage, entry.shader, entry.accessor, allocator, profile, kindCheck);
+                ValidateSpirv(entry.stage, entry.shader, entry.accessor, allocator, profile, kindCheck, program.StageOf("gs") != null);
             ResolvePoolSlots(translated, allocator);
             ResolveStorageSlots(translated, allocator);
 
-            byte[] content = WriteContent(program, profile, translated, allocator, queries);
+            bool v2 = allocator.Bindings.Any(b => b.SamplerSlot >= 0);
+            byte[] content = WriteContent(program, profile, translated, allocator, queries, v2);
             string contentHash = "sha256-" + Convert.ToHexStringLower(Sha256.HashData(content));
-            return WriteEnvelope(session, generation, requestId, content, contentHash);
+            return WriteEnvelope(session, generation, requestId, content, contentHash, v2);
         }
 
         // 与 runtime/direct/control.c、merge_extract.py:cs_facts 同口径：+0x748 三组、+0x754 shared，
@@ -142,7 +163,7 @@ namespace S2A.DirectCompiler
             translated.FirstOrDefault(t => ReferenceEquals(t.accessor, accessor)).stage?.Stage ?? "?";
 
         private static void ValidateSpirv(DirectStage stage, ShaderProgram shader, DirectGpuAccessor accessor,
-            DirectAllocator allocator, DirectProfile profile, bool kindCheck)
+            DirectAllocator allocator, DirectProfile profile, bool kindCheck, bool rejectViewportArray)
         {
             byte[] spv = shader.BinaryCode;
             if (spv == null || spv.Length < 20 || spv.Length % 4 != 0)
@@ -161,6 +182,16 @@ namespace S2A.DirectCompiler
                 int opcode = (int)(words[i] & 0xFFFF);
                 if (count == 0 || i + count > words.Length)
                     throw new DirectCompileException("SPIRV_INVALID", stage.Stage + ": truncated instruction");
+                // The direct replay path does not implement viewport arrays. Check actual SPIR-V
+                // decorations for all stages in a GS program, including interface-block members.
+                int builtinWord = opcode == (int)Spv.Specification.Op.OpDecorate && count >= 4 &&
+                    words[i + 2] == (uint)Spv.Specification.Decoration.BuiltIn ? i + 3 :
+                    opcode == (int)Spv.Specification.Op.OpMemberDecorate && count >= 5 &&
+                    words[i + 3] == (uint)Spv.Specification.Decoration.BuiltIn ? i + 4 : -1;
+                if (rejectViewportArray && builtinWord >= 0 && words[builtinWord] is
+                    (uint)Spv.Specification.BuiltIn.ViewportIndex or (uint)Spv.Specification.BuiltIn.ViewportMaskNV or
+                    (uint)Spv.Specification.BuiltIn.SecondaryViewportMaskNV or (uint)Spv.Specification.BuiltIn.ViewportMaskPerViewNV)
+                    throw new DirectCompileException("UNSUPPORTED_PROGRAM", stage.Stage + ": viewport arrays are not implemented");
                 if (opcode == 15 && count >= 4)
                 {
                     int nameStart = i + 3;
@@ -226,13 +257,26 @@ namespace S2A.DirectCompiler
                     throw new DirectCompileException("SPIRV_INVALID",
                         binding.Stage + ": " + binding.Kind + " binding " + binding.Set + ":" + binding.Binding + " has no reflected descriptor");
                 TextureDescriptor resolved = found.Value;
+                if (binding.Kind == "texture" && !resolved.Separate &&
+                    entry.accessor.TrySeparateC2(resolved.HandleIndex, resolved.CbufSlot, out int texWord, out int samplerSlot))
+                {
+                    if (binding.Count != 1 || resolved.ArrayLength > 1)
+                        throw new DirectCompileException("UNSUPPORTED_PROGRAM", binding.Stage + ": separate sampler arrays are not implemented");
+                    binding.Slot = texWord;
+                    binding.SamplerSlot = samplerSlot;
+                    continue;
+                }
                 if (resolved.CbufSlot >= 0)
                 {
                     // NVN 的 c2 句柄与直连组合纹理槽一一对应：native 侧按 handleIndex
                     // 找回同一个 nvn_tex_slot（见 nvn_vk_first_draw 的 handleIndex→slot 表）。
                     // 只有该句柄有直接绑定事实时才放行；没有就直接事实的 cbuf 句柄仍是
                     // 未实现路径，不能把槽位绑到别的纹理。
-                    if (binding.Kind != "texture" || !entry.accessor.HasDirectTextureFact(resolved.HandleIndex))
+                    // 例外：着色器按运行时下标取句柄，翻译器把它变成从驱动句柄表（c2）第 0 项起的贴图数组（BindlessToArray）。
+                    // 数组的第 k 项就是句柄表的第 k 个 8 字节项，宿主按项逐个绑（slot = 0、count = 数组长度），不需要逐句柄的事实。
+                    bool handleTableArray = binding.Kind == "texture" && resolved.CbufSlot == 2 && resolved.ArrayLength > 1 &&
+                                            resolved.HandleIndex == 0 && binding.Count == resolved.ArrayLength;
+                    if (!handleTableArray && (binding.Kind != "texture" || !entry.accessor.HasDirectTextureFact(resolved.HandleIndex)))
                         throw new DirectCompileException("UNSUPPORTED_PROGRAM",
                             binding.Stage + ": texture handle from cbuf slot " + resolved.CbufSlot + " is not implemented");
                 }
@@ -316,13 +360,13 @@ namespace S2A.DirectCompiler
 
         private static byte[] WriteContent(DirectProgram program, DirectProfile profile,
             List<(DirectStage stage, ShaderProgram shader, DirectGpuAccessor accessor)> translated,
-            DirectAllocator allocator, List<DirectQuery> queries)
+            DirectAllocator allocator, List<DirectQuery> queries, bool v2)
         {
             using var stream = new MemoryStream();
             using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
             {
                 writer.WriteStartObject();
-                writer.WriteString("contract", ContentContract);
+                writer.WriteString("contract", v2 ? "s2a-direct-program-content-v2" : ContentContract);
                 writer.WriteStartObject("identity");
                 writer.WriteNumber("directABI", profile.DirectAbi);
                 writer.WriteString("translatorClosure", profile.TranslatorClosure);
@@ -413,6 +457,7 @@ namespace S2A.DirectCompiler
                     writer.WriteNumber("binding", binding.Binding);
                     writer.WriteNumber("count", binding.Count);
                     if (binding.Slot >= 0) writer.WriteNumber("slot", binding.Slot);
+                    if (binding.SamplerSlot >= 0) writer.WriteNumber("samp_slot", binding.SamplerSlot);
                     if (binding.Kind == "storage")
                     {
                         // Resolved and uniqueness-checked by ResolveStorageSlots above.
@@ -529,13 +574,13 @@ namespace S2A.DirectCompiler
         };
 
         private static byte[] WriteEnvelope(ulong session, ulong generation, string requestId,
-            byte[] content, string contentHash)
+            byte[] content, string contentHash, bool v2)
         {
             using var stream = new MemoryStream();
             using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
             {
                 writer.WriteStartObject();
-                writer.WriteString("schema", ResultSchema);
+                writer.WriteString("schema", v2 ? "s2a-direct-program-v2" : ResultSchema);
                 writer.WriteStartObject("transport");
                 writer.WriteNumber("session", session);
                 writer.WriteNumber("generation", generation);

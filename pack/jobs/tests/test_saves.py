@@ -168,6 +168,18 @@ class SaveTests(unittest.TestCase):
             self.assertNotIn("payload/system/prod.keys", z.namelist())
         self.assertFalse(list((self.directory / "library/save-transactions").glob("*.json")))
 
+    def test_scan_skips_os_junk_files(self):
+        """exFAT / FAT 上 macOS 给每个带扩展属性的文件生成 ._<名>（AppleDouble），访达写 .DS_Store：不是存档。
+        期望按构造写死：只剩 a.bin 与 sub/b.bin 两个文件、sub 一个目录；修前 ._a.bin、.DS_Store、sub/._b.bin 也进了备份清单"""
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "saves"; (root / "sub").mkdir(parents=True)
+            (root / "a.bin").write_bytes(b"a"); (root / "sub" / "b.bin").write_bytes(b"b")
+            (root / "._a.bin").write_bytes(b"\x00\x05\x16\x07\x00\x02\x00\x00\x09\x00"); (root / ".DS_Store").write_bytes(b"Bud1"); (root / "sub" / "._b.bin").write_bytes(b"\x00\x05")
+            files, dirs = saves.scan(SimpleNamespace(check=lambda: None), root)
+            self.assertEqual(list(files), ["a.bin", "sub/b.bin"])
+            self.assertEqual(dirs, ["sub"])
+
     def test_export_manifest_lists_exact_files_without_keys(self):
         self.backup()
         result = self.preview()
@@ -518,6 +530,19 @@ class SaveTests(unittest.TestCase):
         with self.assertRaises(Failure):
             self.backup()
         self.assertEqual(self.archive.read_bytes(), b"existing backup")
+
+    def test_backup_on_drive_without_hard_links(self):
+        # v0.3.1：存档备份放到位用硬链接（不覆盖地落盘）；exFAT / FAT32 建不了硬链接（WinError 1 / EPERM）→ 退回「核没有同名再改名」，
+        #   备份照样落盘、内容完整；已有同名备份时照旧不覆盖
+        def no_links(*a, **k):
+            raise OSError(1, "Incorrect function")
+        with patch.object(saves.os, "link", no_links):
+            self.backup()
+            self.assertTrue(self.archive.is_file() and self.archive.stat().st_size > 0)
+            before = self.archive.read_bytes()
+            with self.assertRaises(Failure):
+                self.backup()
+            self.assertEqual(self.archive.read_bytes(), before)
 
     def test_disk_shortage_and_cancellation_leave_original_intact(self):
         c = self.prepare_restore()
@@ -941,9 +966,20 @@ class ExternalImportTests(unittest.TestCase):
         log.write_text("启动失败，没灌入", encoding="utf-8")
         saves.finish_seed(c, GID, log)
         self.assertEqual(saves.claim_seed(c, GID), pending)   # 没灌成功：留着，下次启动再放
-        log.write_text("S2A 带存档起局：account ← x（2 个文件，15 字节）", encoding="utf-8")
+        # 审计 P1-156：只有「当前用户」行和前一类成功行、后一类挂不上（没有全部完成那句）→ 种子留着
+        log.write_text("S2A 带存档起局：当前用户 0123\nS2A 带存档起局：account ← x（2 个文件，15 字节）\n"
+                       "带存档起局：挂 device 存档失败", encoding="utf-8")
+        saves.finish_seed(c, GID, log)
+        self.assertEqual(saves.claim_seed(c, GID), pending)
+        log.write_text("S2A 带存档起局：account ← x（2 个文件，15 字节）\nS2A 带存档起局完成：1 类全部灌入", encoding="utf-8")
         saves.finish_seed(c, GID, log)
         self.assertIsNone(saves.claim_seed(c, GID))
+
+    def test_seed_done_line_matches_service_layer(self):
+        # 审计 P1-156：作业层删种子认的那句，必须是服务层每类都灌入后才打的那句（一字不差）
+        cs = (Path(__file__).resolve().parents[3] / "services/S2A.Services/Saves.cs").read_text(encoding="utf-8")
+        self.assertIn(f'SeedAllDoneLine = "{saves.SEED_DONE_LINE}"', cs)
+        self.assertNotIn(saves.SEED_DONE_LINE, "S2A 带存档起局：当前用户 0123")
 
     def test_never_played_game_changed_since_preview_is_refused(self):
         import shutil
@@ -985,6 +1021,82 @@ class ExternalImportTests(unittest.TestCase):
         second = saves.inspect(self.context(operation="saveInspect", path=str(src)))
         self.assertEqual(first["archiveSha256"], second["archiveSha256"])
         self.assertEqual(len(list((self.directory / "library/save-imports" / GID).glob("*.s2asave"))), 1)
+
+
+class LocalPlayerImportTests(unittest.TestCase):
+    """本地玩家（#623）：社区存档导入进当前玩家（请求的 player 字段，同起局）那个用户号的账号存档，别人的不动。
+    期望手写：第一个玩家 = 存档位置 SaveData 里记的用户号（user 文件，或 Ryujinx 导出的 ExtraData0），都没有 = Ryujinx 缺省用户 USER；
+    其他玩家 = 请求里的用户号（同 services/S2A.Services/LocalPlayer.cs 起局选用户的规则）"""
+
+    setUp = SaveTests.setUp
+    context = SaveTests.context
+    put = SaveTests.put
+    community = ExternalImportTests.community
+
+    HONG = "d7a43a96495d0a594e615dd88587b6bf"
+    THIRD = "aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb"
+
+    def players(self, *extra):
+        """账号存档：USER → 存档 1（setUp 已有 checkpoint-one），HONG → 3，extra 里的 → 4、5…"""
+        rows = [(1, GID, 1, USER), (3, GID, 1, self.HONG)] + [(4 + i, GID, 1, u) for i, u in enumerate(extra)]
+        self.put(saves.SAVE_INDEX, synthetic_index(rows))
+        for sid, _, _, user in rows[1:]:
+            self.put("bis/user/save/%016x/0/progress.bin" % sid, b"own-" + user[:4].encode())
+
+    def import_as(self, player, data=b"community"):
+        src = self.community("JKSV-" + uuid.uuid4().hex[:6], {"Synthetic game/Player - 2026-10-20/progress.bin": data})
+        with patch.object(saves.save_formats, "detect", return_value=[]):
+            preview = saves.inspect(self.context(operation="saveInspect", path=str(src), player=player))
+            return saves.restore(self.context(operation="saveRestore", path=str(src), player=player, **preview))
+
+    def slots(self, *sids):
+        return [(self.root / ("bis/user/save/%016x/0/progress.bin" % sid)).read_bytes() for sid in sids]
+
+    def test_second_player_gets_the_import_and_the_first_keeps_his(self):
+        self.players()
+        self.assertTrue(self.import_as(dict(user=self.HONG, name="Hong", folder="SaveData-Hong"))["committed"])
+        self.assertEqual(self.slots(1, 3), [b"checkpoint-one", b"community"])
+
+    def test_first_player_without_a_recorded_user_is_the_default_user(self):
+        self.players()
+        self.assertTrue(self.import_as(dict(user="first", name="", folder="SaveData"))["committed"])
+        self.assertEqual(self.slots(1, 3), [b"community", b"own-d7a4"])
+
+    def test_first_player_follows_the_user_recorded_in_his_save_folder(self):
+        self.players(self.THIRD)
+        folder = self.root.parent / "SaveData"
+        folder.mkdir()
+        (folder / "user").write_text(self.THIRD.upper() + "\n")
+        self.import_as(dict(user="first", name="Ming", folder="SaveData"), b"by-user-file")
+        self.assertEqual(self.slots(1, 3, 4), [b"checkpoint-one", b"own-d7a4", b"by-user-file"])
+        # 没有 user 文件、只有 Ryujinx 导出的 ExtraData0（程序号 @0，用户号两段小端 @0x8 / @0x10，类型 1 @0x20）
+        (folder / "user").unlink()
+        meta = struct.pack("<4Q", int(GID, 16), 0xAAAAAAAAAAAAAAAA, 0xBBBBBBBBBBBBBBBB, 0) + bytes([1]) + bytes(0x1F)
+        (folder / "export/0000000000000004").mkdir(parents=True)
+        (folder / "export/0000000000000004/ExtraData0").write_bytes(meta)
+        self.import_as(dict(user="first", name="Ming", folder="SaveData"), b"by-extra-data")
+        self.assertEqual(self.slots(1, 3, 4), [b"checkpoint-one", b"own-d7a4", b"by-extra-data"])
+
+    def test_player_without_a_save_for_this_game_is_told_to_play_first(self):
+        self.put(saves.SAVE_INDEX, synthetic_index([(1, GID, 1, USER)]))
+        with self.assertRaises(Failure) as e:
+            self.import_as(dict(user=self.HONG, name="Hong", folder="SaveData-Hong"))
+        self.assertEqual(e.exception.code, "save_no_target")
+        self.assertIn("这位玩家", str(e.exception))
+        self.assertEqual(self.slots(1), [b"checkpoint-one"])
+
+    def test_without_a_player_several_users_still_cannot_be_told_apart(self):
+        self.players()
+        with self.assertRaises(Failure) as e:
+            self.import_as(None)
+        self.assertIn("多个用户", str(e.exception))
+        self.assertEqual(self.slots(1, 3), [b"checkpoint-one", b"own-d7a4"])
+
+    def test_bad_player_is_rejected(self):
+        self.players()
+        with self.assertRaises(Failure):
+            self.import_as(dict(user=self.HONG, name="Hong", folder="../SaveData"))
+        self.assertEqual(self.slots(1, 3), [b"checkpoint-one", b"own-d7a4"])
 
 
 if __name__ == "__main__":

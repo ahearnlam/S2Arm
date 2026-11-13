@@ -8,7 +8,7 @@ sed_edit() { sed -i.s2a-bak "$1" "$2" && rm -f "$2.s2a-bak"; }
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 export S2A_DISK_HELD=1   # 工作盘准入闸（tools/disk_admit_gate.sh）由 disk_admit_test 测；本测不读真盘、不写真账
 export S2A_DEVICES_NO_LOCAL=1 S2A_MACHINE_NO_LOCAL=1 S2A_VISION_BRIDGE=0   # 驾驶员桥缺省关（它局中拉信箱文件）；只在专验它的用例里开
-export S2A_TEST_ROOT=$T/lock S2A_DEVICE_NO_USB_CHECK=1 DEVBATTERY_FAKE="80 1 1 0" FAKE_DEV=$T/dev
+export S2A_TEST_ROOT=$T/lock S2A_DEVICE_NO_USB_CHECK=1 FAKE_DEV=$T/dev
 export S2A_OWNPLAY_DIR=$T/ownplay S2A_BOARD=$T/board.tsv S2A_SCHED_DIR=$T/sched S2A_PSO_SEED_DIR=$T/pso_seed S2A_DEVICE_LEDGER=$T/ledger.tsv   # 非测试局日志抢救 / 首遇现编报 / 管线种子来源：只写临时目录，不碰真记分板、收件箱与 pso_seed/
 # 停顿判据缺省 10 秒（同真机缺省）：本机负载高时假 App（python）会被饿住 2–3 秒不出帧，判据 2 秒会把别的用例误判「出图停在」（10-22 晚实测）；
 #   只有专验停帧的用例（stall / livef / gpuslow）各自显式设短
@@ -38,7 +38,7 @@ g_incr() { grp incr   # 增量装包 / 推送：同一台假设备上依次跑
 run; ck "首局 → done" '[[ $RES == RESULT=done* ]]'
 ck "首局装包 1 次" '[ "$(wc -l < $DV/installs.log)" -eq 1 ]'
 ck "首局推 3 个资源文件" 'grep -q "资源包：推 3 个文件" $OUT/run.log'
-[ -z "${S2A_PRIVATE_TOOLS:-}" ] || ck "首局进统一账本：本局目录一行、设备列写设备名「测试设备1」（不是 CoreDevice 标识）、结果 done、窗口 MARK，run.log 记「统一账本」摘要（tools/device_ledger.py）" 'awk -F"\t" -v o=$OUT "\$NF==o && \$4==\"测试设备1\" && \$6==\"done\" && \$7==\"MARK\"{f=1} END{exit !f}" $S2A_DEVICE_LEDGER && grep -q "统一账本（MARK）" $OUT/run.log'
+[ -z "${S2A_PRIVATE_TOOLS:-}" ] || ck "首局进统一账本：本局目录一行、设备列写设备名「测试设备1」（不是 CoreDevice 标识）、结果 done、窗口 MARK，run.log 记「统一账本」摘要（tools/device_ledger.py）" 'LC_ALL=C awk -F"\t" -v o=$OUT "\$NF==o && \$4==\"测试设备1\" && \$6==\"done\" && \$7==\"MARK\"{f=1} END{exit !f}" $S2A_DEVICE_LEDGER && grep -q "统一账本（MARK）" $OUT/run.log'
 ck "首局 run.log 出五问帧率格（按 frames.tsv 同记分板口径；局只有几秒 → 未测）" 'grep -q "五问帧率格：未测（" $OUT/run.log'
 ck "首局机上解包、.applied 对上" '[ "$(cat $DV/apps/com.s2arm.test/Documents/资源包/.applied)" = "$(python3 -c "import json;print(json.load(open(\"$J/pack/manifest.json\"))[\"index_sha256\"])")" ] && [ -f $DV/apps/com.s2arm.test/Documents/资源包/romfs/f2.bin ]'
 ck "存档推到每局独立目录、起局带 S2A_SAVE_DIR 与 S2A_SYSTEM_TIME" 'ls -d $DV/apps/com.s2arm.test/Documents/sv_*/device/s.dat > /dev/null && tail -1 $DV/launches.log | grep -q "\"S2A_SAVE_DIR\": \"sv_" && tail -1 $DV/launches.log | grep -q "\"S2A_SYSTEM_TIME\": \"1600000000\"" && tail -1 $DV/launches.log | grep -q "\"S2A_SYSTEM_LANGUAGE\": \"Japanese\""'
@@ -151,9 +151,9 @@ g_restart() { grp restart   # 进程内重启（11-04 维护者转 Windows 出�
   # 手算：MARK 第 60 帧开窗，第 63 帧重启归零；采 2 秒（30 帧/秒）收局时机上帧号约 50–60 < 开窗帧号 → 旧判据红。分段累计：重启前末个心跳 60 + 重启后帧号 > 60 → 绿
   echo ACT_S=2 >> $J/job.env; FAKE_SCENE=restart MARK_AT=60 run
   ck "MARK 后进程内重启、帧号归零 → done（按重启分段累计帧号，不判「窗口内没出新帧」）" '[[ $RES == RESULT=done* ]] && grep -q "收局：窗口" $OUT/run.log && ! grep -q "没出新帧" $OUT/run.log'
-  [ -z "${S2A_PRIVATE_TOOLS:-}" ] || ck "重启局进统一账本：窗口列「重启后段」（MARK 在重启前，读数取重启后那段）" 'awk -F"\t" -v o=$OUT "\$NF==o && \$7==\"重启后段\"{f=1} END{exit !f}" $S2A_DEVICE_LEDGER'; }
+  [ -z "${S2A_PRIVATE_TOOLS:-}" ] || ck "重启局进统一账本：窗口列「重启后段」（MARK 在重启前，读数取重启后那段）" 'LC_ALL=C awk -F"\t" -v o=$OUT "\$NF==o && \$7==\"重启后段\"{f=1} END{exit !f}" $S2A_DEVICE_LEDGER'; }
 g_nomark() { grp nomark; sed_edit 's/^ARRIVE_S=30$/ARRIVE_S=3/' $J/job.env; FAKE_SCENE=nomark run; ck "没 MARK → 红（没到达代表场景）" '[[ $RES == RESULT=red*没到达* ]]'
-[ -z "${S2A_PRIVATE_TOOLS:-}" ] || ck "没 MARK 的红局也进统一账本：本局目录一行、结果 red、窗口「整局」（tools/device_ledger.py）" 'awk -F"\t" -v o=$OUT "\$NF==o && \$6==\"red\" && \$7==\"整局\"{f=1} END{exit !f}" $S2A_DEVICE_LEDGER'; }
+[ -z "${S2A_PRIVATE_TOOLS:-}" ] || ck "没 MARK 的红局也进统一账本：本局目录一行、结果 red、窗口「整局」（tools/device_ledger.py）" 'LC_ALL=C awk -F"\t" -v o=$OUT "\$NF==o && \$6==\"red\" && \$7==\"整局\"{f=1} END{exit !f}" $S2A_DEVICE_LEDGER'; }
 g_guard() { grp guard   # 起局前的拦截：都不该起局
 mkdir -p $DV; : >> $DV/launches.log; n0=$(wc -l < $DV/launches.log)
 mkipa $T/wrong.ipa com.other; mv $J/app.ipa $T/right.ipa; cp $T/wrong.ipa $J/app.ipa
@@ -240,6 +240,8 @@ reframe; ck "剩余不足 S2A_LIVE_PULL_T → 超时截短到剩余秒数（实�
 lp=; rc=0; T0=$(( $(date +%s) - 101 )); reframe || rc=$?
 ck "剩余 ≤ 0 → 不重读（返回 1）、一次都没拉（实得 rc=${rc}、拉取「${lp}」）" '[ "$rc" = 1 ] && [ -z "$lp" ]'
 }
+g_batt() { grp batt   # 11-13 电量闸已删（维护者：「不用读电量，不要自己挡自己」）：App 报多低的电量都不挡局
+FAKE_BATT='5%，未充电' run; ck "App 报电量 5% 未充电 → 照常 done（不读电量、不挡局）" '[[ $RES == RESULT=done* ]]'; }
 g_con() { grp con   # 局中日志走控制台流（S2A_CONSOLE=1 / 二进制带 S2A_LOG_CONSOLE 自动开）：局中不拉文件；文件服务起局后挂死照样判 MARK / 出帧 / 收局
 S2A_CONSOLE=1 run; ck "控制台流局 → done；起局带 S2A_LOG_CONSOLE=1、流里有 MARK、收局拉回 host.log 与流对得上" '[[ $RES == RESULT=done* ]] && tail -1 $DV/launches.log | grep -q "\"S2A_LOG_CONSOLE\": \"1\"" && grep -q "S2A 标记 MARK" $OUT/live/host.log && grep -q "窗口起点" $OUT/run.log && [ "$(grep -c "心跳" $OUT/live/host.log)" -ge 1 ] && ! grep -q "$(printf "\r")" $OUT/live/host.log && ! grep -q "Launched application" $OUT/live/host.log'
 ck "控制台流里没有 C# 侧 [gal] 行、收局拉回的 host.log 里有（以拉回为准）" '! grep -q "^\[gal\]" $OUT/live/host.log && grep -q "^\[gal\] 帧节拍" $OUT/host.log'
@@ -249,10 +251,6 @@ ck "局中一次文件都不拉：起局后只有收局那 1 次拉（挂住后�
 rm -f $DV/launched; S2A_CONSOLE=1 FAKE_SCENE=crash MARK_AT=100 run; ck "控制台流局 App 崩溃退出 → 红「App 提前退出」带退出码 1" '[[ $RES == RESULT=red*App\ 提前退出*退出码\ 1* ]]'
 w=$T/ipa_con; mkdir -p $w/Payload/X.app; plutil -create xml1 $w/Payload/X.app/Info.plist; plutil -insert CFBundleIdentifier -string com.s2arm.test $w/Payload/X.app/Info.plist; printf 'xx S2A_LOG_CONSOLE yy' > $w/Payload/X.app/S2Arm
 rm -f $J/app.ipa; (cd $w && zip -qr $J/app.ipa Payload); run; ck "缺省 auto：App 二进制带 S2A_LOG_CONSOLE → 自动走控制台流" '[[ $RES == RESULT=done* ]] && [ -s $OUT/live/con.raw ] && grep -q "控制台流" $OUT/run.log'; }
-g_batt() { grp batt   # 电量闸读 App 心跳区的「[s2a] [电] 电量 N%，状态」（日志行带 [s2a] 前缀；10-21 前按行首匹配、一次没读到，局中电量闸形同虚设）
-FAKE_BATT='25%，未充电' run; ck "App 报电量 25% 未充电 → skip（未跑，不是游戏的红）「低于 30%」、落低电量标记" '[[ $RES == RESULT=skip*电量\ 25%* ]] && [ -f $G/lock/battery/device_low_battery ]'
-rm -f $G/lock/battery/device_low_battery; FAKE_BATT='55%，未充电' run; ck "开局电量 55% 未充电 → skip（未跑），理由「开局电量 55% 低于 60%」（10-23 原先收 red、被记分板打成能玩红）" '[[ $RES == RESULT=skip*开局电量\ 55%\ 低于\ 60%* ]]'
-rm -f $G/lock/battery/device_low_battery; FAKE_BATT='25%，充电中' run; ck "电量 25% 但在充电 → 照常 done" '[[ $RES == RESULT=done* ]]'; }
 g_screen() { grp screen   # 整屏截图：正常局 MARK 时与收局前各一张 2868×1320；截屏失败不影响结论；开局挂死也截一张、结论写明
 pngwh() { python3 -c "import struct,sys;b=open(sys.argv[1],'rb').read(24);print('%dx%d' % struct.unpack('>II', b[16:24]))" "$1" 2>/dev/null; }
 S2A_SHOT_MIN_S=0 run; ck "正常局：screen/ 下 mark.png 与 end.png、都是 2868×1320" '[[ $RES == RESULT=done* ]] && [ "$(pngwh $OUT/screen/mark.png)" = 2868x1320 ] && [ "$(pngwh $OUT/screen/end.png)" = 2868x1320 ]'
@@ -339,7 +337,7 @@ g_prune() { grp prune   # 装包 / 推包前机上空间不够 → 卸 24 小时
 g_space() { grp space; run
 echo "file 1 改" > $J/pack/romfs/f1.bin; mkpack $J/pack
 printf '#!/bin/sh\necho 1000\n' > $G/ideviceinfo; chmod +x $G/ideviceinfo; PATH=$G:$PATH run
-ck "① 读到可写 1000 字节 → RESULT=push「测试设备空间不足」、一批没推" '[[ $RES == RESULT=push*测试设备空间不足* ]] && grep -q "测试设备剩余空间不足：可写 0 GB < 要 1 GB" $OUT/run.log && ! ls $DV/apps/com.s2arm.test/Documents/资源包/.incoming/*.tar > /dev/null 2>&1'
+ck "① 读到可写 1000 字节 → RESULT=push「测试设备空间不足」、一批没推" '[[ $RES == RESULT=push*测试设备空间不足* ]] && grep -q "手机剩余空间不足：可写 0 GB < 要 1 GB" $OUT/run.log && ! ls $DV/apps/com.s2arm.test/Documents/资源包/.incoming/*.tar > /dev/null 2>&1'
 FAKE_ENOSPC=.incoming run
 ck "② 读不到剩余、推 tar 时 POSIX 28 → RESULT=push「测试设备空间不足（推 … POSIX 28）」、本机不留 push.tar" '[[ $RES == RESULT=push*测试设备空间不足*POSIX\ 28* ]] && [ ! -e $OUT/push.tar ]'
 printf '#!/bin/sh\necho 1000000000000\n' > $G/ideviceinfo; PATH=$G:$PATH run

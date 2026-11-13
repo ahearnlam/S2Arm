@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # 门禁手动：要联网：调 OpenRouter 对话接口（要仓库外密钥），要传截图与题面
+# 11-13 起中转站是缺省后端（维护者：自动玩家一律走中转站）：S2A_VISION_BACKEND=relay（缺省）只问中转站，=or 只问 OpenRouter。
+#   中转站缺钥匙 / 缺地址、OpenRouter 缺钥匙 / 额度用完 = 打「不可用」、退出 3（vision.sh 据此红停）；这一问没答出 = 退出 1
 # 视觉测试员·看图对话退路（只在 Mac 开发测试里用）：python3 vision_or.py <截图.png> <题面>  → 打印模型回答原文（vision.sh 照 claude CLI 的回答同样解析）
 # vision.sh 在本机 claude CLI 不在或没登录时用它（10-26：Spare-host / gate-host 上远端局用假家目录、ssh 会话拿不到钥匙串，claude CLI 报「Not logged in」，
 #   升级那一问整个白丢）。走 OpenRouter 的对话接口，与 Jev 同一把钥匙（~/.s2arm/.secrets/openrouter.key，不打印、不写日志）。
-# 顺序见下面「唯一顺序」（OpenRouter → 中转站 → OpenRouter 其余，S2A_VISION_OR_MODELS 逗号分隔），任何一档失败落下一档：Spare-host 直连外网时 Anthropic / Google / OpenAI 都回 403（10-26 实测，本机走代理才通），
+# 顺序见下面（OpenRouter 各模型，S2A_VISION_OR_MODELS 逗号分隔），任何一档失败落下一档：Spare-host 直连外网时 Anthropic / Google / OpenAI 都回 403（10-26 实测，本机走代理才通），
 #   月之暗面 kimi-k3 直连能通；三张真截图（银河 2 存档页、创建游戏文件框、暗黑3 选难度）kimi-k3 答 TOUCH:343,420 / TOUCH:820,558 / A，与路线实测一致
 import base64, io, json, os, sys, time, urllib.error, urllib.request
 
 png, prompt = sys.argv[1], sys.argv[2]
 # 外发范围（11-01 维护者核）：每次只发这一张截图（游戏出图帧，转 JPEG）+ 题面文字；不发游戏文件 / 存档 / prod.keys / 局目录其他内容。
 # 密钥只从仓库外 ~/.s2arm/.secrets/openrouter.key 读，只进请求头；不打印、不写日志 / 局目录 / 命令行。按量计费：每次把 OpenRouter 回的费用与 token 写 stderr（进 <回答.json>.err）
-try: key = open(os.path.expanduser(os.environ.get("S2A_VISION_OR_KEY", "~/.s2arm/.secrets/openrouter.key"))).read().strip()   # S2A_VISION_OR_KEY / _RELAY_KEY / _OR_URL / _RELAY_URL 只给单测指到假服务
-except OSError: key = ""   # 没有 OpenRouter 钥匙：OpenRouter 各档不问（快档只问中转站，不该因为缺这把钥匙起不来）
+try: key = open(os.path.expanduser(os.environ.get("S2A_VISION_OR_KEY", "~/.s2arm/.secrets/openrouter.key"))).read().strip()   # S2A_VISION_OR_KEY / _OR_URL 只给单测指到假服务
+except OSError: key = ""   # 没有 OpenRouter 钥匙：下面打「不可用」退出 3
 # 上传用 JPEG（质量 85、分辨率不变；同 vision_jev.py：PNG 690 KB → 90 KB，Spare-host 往返省约 1.2 秒）
 from PIL import Image
 b = io.BytesIO(); Image.open(png).convert("RGB").save(b, "JPEG", quality=85)
@@ -40,12 +42,12 @@ def post(url, rk, m, text):
     body = {"model": m, "max_tokens": 2000, "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": img}}, {"type": "text", "text": text}]}]}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + rk, "Content-Type": "application/json"})
     return json.load(urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=TO))
-# 中转站长尾（11-03 普查读数：中位 7 秒，但 19:30–21:20 一段 13% 的问 ≥ 30 秒、最长 67 秒，单次调用本身慢——不是并发 / 渠道 / 机器，Spare-host 与本机一样）：
-#   发出 S2A_VISION_RELAY_HEDGE 秒（缺省 15，约中位 2 倍）还没回，同题再发一份，谁先回用谁；两份都失败才算失败。线程设成守护线程：先回的那份用完就退出，不等慢的那份
+# 中转站长尾（11-03 普查读数：中位 7 秒，但一段时间里 13% 的问 ≥ 30 秒、最长 67 秒，单次调用本身慢）：
+#   发出 S2A_VISION_RELAY_HEDGE 秒（缺省 15，约中位 2 倍）还没回，同题再发一份，谁先回用谁；两份都失败才算失败。守护线程：先回的那份用完就退出，不等慢的那份
 def hedged(call, text):
     import queue, threading
     q = queue.Queue(); hedge = float(os.environ.get("S2A_VISION_RELAY_HEDGE", 15))
-    def run(t): 
+    def run(t):
         try: q.put((True, call(t)))
         except Exception as e: q.put((False, e))
     threading.Thread(target=run, args=(text,), daemon=True).start(); live, sent2 = 1, False
@@ -58,32 +60,38 @@ def hedged(call, text):
         if ok: return v
         live -= 1
         if live == 0: raise v
-def ask_relay(m):   # 自建 OpenAI 兼容中转站（地址 S2A_VISION_RELAY_URL，不走代理；没设地址 = 这一档失败）；钥匙 ~/.s2arm/.secrets/relay.key 只进请求头，不打印；没钥匙 = 这一档失败
-    if not os.environ.get("S2A_VISION_RELAY_URL"): raise RuntimeError("没设 S2A_VISION_RELAY_URL，中转站这一档跳过")
-    rk = open(os.path.expanduser(os.environ.get("S2A_VISION_RELAY_KEY", "~/.s2arm/.secrets/relay.key"))).read().strip()
-    # 中转站会丢图（11-02 OpenRouter 402 期间全线退到这一档）：同一张截图，短题面每次都带图；整段驾驶员题面（约 5 KB）大多只计约 1400 个输入 token、
-    #   模型回「未收到截图」或瞎猜，8 次里只有 2 次带图，换 Anthropic 原生接口 / 规则放 system / 文字在前都一样。我方改不了中转站，按回的输入 token 判：
-    #   不到「题面字节 ÷ 3.5 + 500」（本图 1280×589 约 1000 个图片 token）就当丢图，题面尾加请求号再问，最多 S2A_VISION_RELAY_TRIES 次（缺省 4），
-    #   仍丢图就算这一档失败、落下一档（最后由 vision.sh 退本机 claude CLI，CLI 直接内联图片）
-    url = os.environ["S2A_VISION_RELAY_URL"]; est = len(prompt.encode()) / 3.5 + 500
-    tries = int(os.environ.get("S2A_VISION_RELAY_TRIES", "2"))
+# 中转站（自建 OpenAI 兼容接口）：钥匙 ~/.s2arm/.secrets/relay.key（S2A_VISION_RELAY_KEY 只给单测），只进请求头，不打印、不写日志；
+#   地址 S2A_VISION_RELAY_URL，没设就读仓库外 ~/.s2arm/.secrets/relay.url 第一行（第三方地址不进公开仓）
+RELAY_KEY = os.path.expanduser(os.environ.get("S2A_VISION_RELAY_KEY", "~/.s2arm/.secrets/relay.key"))
+def relay_url():
+    u = os.environ.get("S2A_VISION_RELAY_URL", "").strip()
+    if u: return u
+    try: return open(os.path.expanduser("~/.s2arm/.secrets/relay.url")).readline().strip()
+    except OSError: return ""
+def ask_relay(m):
+    rk = open(RELAY_KEY).read().strip(); url = relay_url()
+    # 中转站会丢图（11-02 实测：长题面时模型回「未收到截图」）：按回的输入 token 判，不到「题面字节 ÷ 3.5 + 500」（一张截图约 1000 个图片 token）就当丢图，
+    #   题面尾加请求号再问，最多 S2A_VISION_RELAY_TRIES 次（缺省 2）；仍丢图算这一问没答出
+    est = len(prompt.encode()) / 3.5 + 500; tries = int(os.environ.get("S2A_VISION_RELAY_TRIES", "2"))
     for t in range(tries):
         text = prompt if t == 0 else f"{prompt}\n（请求号 {os.getpid()}-{t}）"
-        body = {"model": m, "max_tokens": 2000, "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": img}}, {"type": "text", "text": text}]}]}
         r = hedged(lambda txt: post(url, rk, m, txt), text)
         u = r.get("usage") or {}; pt = u.get("prompt_tokens")
         if isinstance(pt, (int, float)) and pt < est:
             print(f"中转站 {m} 输入只有 {pt} 个 token（带图应 ≥ {est:.0f}），判丢图，第 {t + 1} / {tries} 次", file=sys.stderr); continue
         return r["choices"][0]["message"]["content"] or "", f"模型 中转站/{m}", f"输入 {pt if pt is not None else '?'} 输出 {u.get('completion_tokens', '?')} token"
     raise RuntimeError(f"中转站丢图 {tries} 次")
-# 唯一顺序（11-02 维护者：OpenRouter 不再充值，中转站做主力、本机 claude CLI 兜底）：中转站 → OpenRouter 各模型（1 小时内回过 402 就整档跳过，见 OR402）→ 都失败退出非 0（有中转站钥匙的机器 vision.sh 不再退 CLI：CLI 配的是同一个中转站）。
-#   中转站模型 claude-sonnet-5（11-02 实测：同一张真截图 + 整段驾驶员题面，claude-sonnet-5-5 只有约 30% 带图、和题面长短 / 并发 / 消息结构都无关，
-#   claude-sonnet-5 / claude-opus-5-5 / gemini-3.8-flash 全带图；sonnet-5 两张图各 10 次 20/20 答对、每问约 5 秒）。丢图判据仍留着兜底。任何一档失败（HTTP 错 / 网络 / 超时 / 没钥匙 / 空回答 / 丢图）落下一档。
+# 顺序：OpenRouter 各模型（S2A_VISION_OR_MODELS 逗号分隔），任何一档失败（HTTP 错 / 网络 / 超时 / 空回答）落下一档，都失败退出 1。
 ors = os.environ.get("S2A_VISION_OR_MODELS", "anthropic/claude-sonnet-5.5,moonshotai/kimi-k3").split(",")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import or402   # 402 / 余额不足标记（vision_jev.py / quality_check.py 共用）：永久跳过，直到删标记或换钥匙
-# S2A_VISION_RELAY_ONLY=1（vision.sh 快档）：只问中转站这一个模型，失败就失败，由 vision.sh 升级到中转站 sonnet
-or_ok = bool(key) and not or402.blocked(key) and not os.environ.get("S2A_VISION_RELAY_ONLY")
-chain = [("relay", os.environ.get("S2A_VISION_RELAY_MODEL", "claude-sonnet-5"))] + ([("or", m) for m in ors] if or_ok else [])
+if os.environ.get("S2A_VISION_BACKEND", "relay") == "relay":   # 中转站（缺省）：只问中转站这一个模型（claude-sonnet-5：11-02 / 11-13 实测带图稳定、每问约 5–9 秒），不落 OpenRouter（不再充值）
+    if not os.access(RELAY_KEY, os.R_OK): print(f"中转站后端不可用：没有钥匙（{RELAY_KEY}）", file=sys.stderr); sys.exit(3)
+    if not relay_url(): print("中转站后端不可用：没有地址（设 S2A_VISION_RELAY_URL，或写进 ~/.s2arm/.secrets/relay.url）", file=sys.stderr); sys.exit(3)
+    chain = [("relay", os.environ.get("S2A_VISION_RELAY_MODEL", "claude-sonnet-5"))]
+else:
+    if not key: print("OpenRouter 后端不可用：没有钥匙（~/.s2arm/.secrets/openrouter.key）", file=sys.stderr); sys.exit(3)
+    if or402.blocked(key): print("OpenRouter 后端不可用：这把钥匙回过 402（额度用完，永久标记；删标记或换钥匙才恢复）", file=sys.stderr); sys.exit(3)
+    chain = [("or", m) for m in ors]
 # 这条网络上回过 HTTP 403 的档跳过（11-01 普查：Spare-host 直连每次升级都先请求 sonnet 吃 403，145 次白跑一趟）：缓存只记 403 的「档:模型」，
 #   按「走代理 / 直连」分开存（隧道通了用另一份、照常先试 sonnet）。超时 / 网络抖动这类偶发失败不记——记「上次成功」会把偶发一次落到慢档后永远先问慢档
 def cache(px): return os.path.expanduser("~/.cache/s2a/vision_or_403" + ("_px" if px else ""))

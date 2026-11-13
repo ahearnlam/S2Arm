@@ -137,7 +137,7 @@ class JobCase(unittest.TestCase):
         self.assertTrue(diagnostic["suggestion"])
         self.assertEqual(terminal["message"], diagnostic["summary"])
         self.assertTrue(Path(diagnostic["logPath"]).is_file())
-        saved = json.loads((self.c.library / "logs" / "jobs" / (terminal["taskId"] + ".json")).read_text())   # 库已建好：任务记录在 <库>/logs/jobs
+        saved = json.loads((self.c.private / "logs" / "jobs" / (terminal["taskId"] + ".json")).read_text())   # 任务记录固定在 <私有目录>/logs/jobs（剃刀 H6）
         self.assertEqual(saved["diagnostics"], terminal["diagnostics"])
         return diagnostic
 
@@ -203,6 +203,9 @@ if source.read_bytes() == b"chinese title fixture":   # 标题简体中文优先
     (pathlib.Path(sys.argv[5]) / "0100000000000000.jpg").write_bytes(b"ICON")
     print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000000","baseId":"0100000000000000","type":"base","version":0,"name":"空洞骑士：丝之歌",
         "englishName":"Hollow Knight: Silksong","display":"1.0","guestIsa":"aarch64","builds":{}}]}))
+    raise SystemExit(0)
+if source.read_bytes() == b"update only fixture":   # #797：只有更新包（本体另给）
+    print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000800","baseId":"0100000000000000","type":"update","version":65536,"name":"Synthetic","display":"1.1","guestIsa":"aarch64","builds":{}}]}))
     raise SystemExit(0)
 if source.read_bytes() == b"disappear fixture":
     source.unlink()

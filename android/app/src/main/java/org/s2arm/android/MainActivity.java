@@ -151,7 +151,9 @@ public class MainActivity extends Activity
             // A5/#163 读数落 logcat（采集的 logcat.txt）：数值变化才写一行，插电时
             // unavailable 只在状态变化时报一次；rails 是 Android 15+ 的 CPU/GPU 轨功耗
             //（插电也可读），event 是低频原始值行（保留电流原号，供真机对账）。
-            powerSampler = new SystemPowerSampler(this, lifecycleProbe, new SystemPowerSampler.Sink() {
+            powerSampler = new SystemPowerSampler(this, lifecycleProbe,
+                java.util.concurrent.Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "s2a-power-read"); t.setDaemon(true); return t; }),
+                getMainExecutor(), new SystemPowerSampler.Sink() {
                 private String lastBattery = "", lastRails = "";
                 @Override public void battery(double watts) {
                     String text = Double.isNaN(watts)
@@ -309,8 +311,10 @@ public class MainActivity extends Activity
                 int mirrorError = NativeBridge.configureMirror(coldMirror == BootSpec.Mirror.ON);
                 if (mirrorError != 0) throw new IllegalStateException("Mirror switch configuration failed: " + mirrorError);
                 Log.i("S2Arm", "Mirror switch: " + coldMirror.value);
-                boolean inlineSme = getIntent() != null
-                    && getIntent().getBooleanExtra("s2arm.experimental_inline_sme_context", false);
+                // 缺省开（#573 / #736）：SME 核心（骁龙 8 Elite Gen 5 起）每个信号帧都带 TPIDR2 / ZA 记录，不认就接不住缺页；
+                //   这个开关只留给调试时关掉
+                boolean inlineSme = getIntent() == null
+                    || getIntent().getBooleanExtra("s2arm.experimental_inline_sme_context", true);
                 int error = NativeBridge.configureInlineSmeContext(inlineSme);
                 if (error != 0) throw new IllegalStateException("Signal context experiment configuration failed: " + error);
                 Log.i("S2Arm", "Inline SME signal context experiment: " + inlineSme);
@@ -598,6 +602,7 @@ public class MainActivity extends Activity
     private void stopGame(String why, boolean normal) {
         if (!gameMode || gameStopping) return;
         gameStopping = true;
+        if (frameRate != null) frameRate.setResumed(false);
         saveAtomicProbe.removeCallbacks(saveAtomicSample);
         if (gameAudioFocus != null) gameAudioFocus.pause();
         try { GameResume.clear(getCacheDir()); }
@@ -639,7 +644,7 @@ public class MainActivity extends Activity
         hostKeyboard.resume();
         legacyTextInput.resume();
         dguardNotice.resume();
-        frameRate.setResumed(true);
+        frameRate.setResumed(!gameStopping);
         current = this;
         applyGameWindow();
         library.scanImports();   // report the library; imports require an explicit staging target
@@ -855,21 +860,32 @@ public class MainActivity extends Activity
             //   s2a_console_mode_set → ChangeDockedModeState）；没在跑就只持久化、冷启生效——不静默。
             //   coldConsoleMode 不跟改：begin 仍拿冻结的冷启值，重进不踩「mode frozen」。
             BootSpec.ConsoleMode mode = BootSpec.ConsoleMode.forRuntime(gameMode, value);
-            prefs.edit().putString(PREF_CONSOLE, mode.value).apply();
-            if (host != 0 && gameSession != null && gameSession.attempted() && !gameStopping) {
-                int rc = NativeBridge.setConsoleMode(host, mode.nativeValue);
-                Log.i("S2Arm", rc == 0 ? "console mode switched at runtime: " + mode.value
-                    : "console mode " + mode.value + " saved; runtime switch refused (rc=" + rc
-                        + "), takes effect on cold start");
-            } else {
-                Log.i("S2Arm", "console mode " + mode.value
-                    + " saved; takes effect on cold start (no running session)");
-            }
+            applyConsoleMode(mode);
             return mode;
         }
         BootSpec.ConsoleMode mode = BootSpec.ConsoleMode.forLaunch(coldStart, gameMode, present, value);
         if (gameMode && present) prefs.edit().putString(PREF_CONSOLE, mode.value).apply();
         return mode;
+    }
+    /** Saves the player's console mode and pushes it to a running session. Returns true when the
+     *  running session took it; false means it is saved and applies on the next cold start. */
+    private boolean applyConsoleMode(BootSpec.ConsoleMode mode) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_CONSOLE, mode.value).apply();
+        if (host != 0 && gameSession != null && gameSession.attempted() && !gameStopping) {
+            int rc = NativeBridge.setConsoleMode(host, mode.nativeValue);
+            Log.i("S2Arm", rc == 0 ? "console mode switched at runtime: " + mode.value
+                : "console mode " + mode.value + " saved; runtime switch refused (rc=" + rc
+                    + "), takes effect on cold start");
+            return rc == 0;
+        }
+        Log.i("S2Arm", "console mode " + mode.value
+            + " saved; takes effect on cold start (no running session)");
+        return false;
+    }
+    /** The mode the player last chose (handheld when never chosen), for the touch menu. */
+    private BootSpec.ConsoleMode storedConsoleMode() {
+        String stored = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_CONSOLE, null);
+        return BootSpec.ConsoleMode.DOCKED.value.equals(stored) ? BootSpec.ConsoleMode.DOCKED : BootSpec.ConsoleMode.HANDHELD;
     }
     // Debug: `--ei s2arm.release_stall_ms <ms>` makes the render thread hold a released surface that long,
     // standing in for a stuck driver call: under 1000 ms surfaceDestroyed waits it out, over that the
@@ -1087,6 +1103,15 @@ public class MainActivity extends Activity
             boolean on = touchPad.gameTouchEnabled();
             labels.add(getString(on ? R.string.touch_passthrough_on : R.string.touch_passthrough_off));
             actions.add(() -> setTouchPassthrough(!on, true));
+        }
+        if (gameMode) {   // 运行模式：此前只有测试用的启动参数能切，玩家够不着
+            boolean docked = storedConsoleMode() == BootSpec.ConsoleMode.DOCKED;
+            labels.add(getString(docked ? R.string.console_mode_docked : R.string.console_mode_handheld));
+            actions.add(() -> {
+                boolean live = applyConsoleMode(docked ? BootSpec.ConsoleMode.HANDHELD : BootSpec.ConsoleMode.DOCKED);
+                android.widget.Toast.makeText(this, live ? R.string.console_mode_switched : R.string.console_mode_saved,
+                    android.widget.Toast.LENGTH_LONG).show();
+            });
         }
         new android.app.AlertDialog.Builder(this)
             .setTitle(R.string.touch_menu_title)

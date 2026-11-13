@@ -27,6 +27,7 @@ public sealed partial class EnvironmentWindow
     private string[] pendingImportPaths = [];
     private bool keysRejected;
     private ImportDialogState? importDialog;
+    private string importNotice = "";   // #797：添加成功但这款只有更新 / DLC、缺本体：弹窗不自动关，黄字说缺本体，玩家可以当场把本体拖进来
     private bool renderDeferred;   // 拖动途中到来的刷新，等松手或拖走再做
 
     private void RenderImportDialog(StackPanel body)
@@ -82,6 +83,9 @@ public sealed partial class EnvironmentWindow
             panel.Children.Add(new TextBlock { Text = T("welcome.keys.unusable"), FontSize = 13,
                 Foreground = Brush.Parse("#E55"), TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 12, 0, 0) });
+        if (importNotice.Length > 0 && !importBusy)
+            panel.Children.Add(new TextBlock { Text = importNotice, FontSize = 13, Foreground = Brush.Parse("#FFC857"), TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 12, 0, 0) });
         if (importError.Length > 0)
         {
             panel.Children.Add(new TextBlock { Text = importError, FontSize = 13,
@@ -90,13 +94,26 @@ public sealed partial class EnvironmentWindow
             var copyError = CopyReportButton(null, ["import", "keys", "setup"], () => importError);
             copyError.Margin = new Thickness(0, 10, 0, 0); copyError.HorizontalAlignment = HorizontalAlignment.Left;
             panel.Children.Add(copyError);
+            panel.Children.Add(ReportHintText());
+            if (LibraryDrivePicker() is { } drives) panel.Children.Add(drives);   // 游戏库盘格式不对：列出能放的盘，点了就建（v0.3.1）
+        }
+        // 游戏库没连上（也没在连）：给两条路——按原位置重试、换一个文件夹（换了会记住）
+        if (!libraryBusy && !importBusy && (connectedFolder is null || libraryId is null))
+        {
+            var fix = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(0, 10, 0, 0) };
+            var retry = Action("welcome.sheet.libraryRetry", () => EnsureLibrary(() => { }));
+            AutomationId(retry, "import.library.retry");
+            var change = Action("welcome.sheet.libraryChange", () => BeginPicker(ChangeLibraryAsync));
+            AutomationId(change, "import.library.change");
+            fix.Children.Add(retry); fix.Children.Add(change);
+            panel.Children.Add(fix);
         }
 
         var footer = new StackPanel { Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0), Spacing = 8 };
         if (importBusy)
         {
-            var cancel = Action("welcome.tool.cancel", () => importCancellation?.Cancel(), !false);
+            var cancel = Action("welcome.tool.cancel", () => CancelJob(JobKind.Import), !false);
             footer.Children.Add(cancel);
         }
         else
@@ -145,31 +162,45 @@ public sealed partial class EnvironmentWindow
             Foreground = Ink, HorizontalAlignment = HorizontalAlignment.Center });
         inner.Children.Add(new TextBlock { Text = C("or"), FontSize = 12.5, Foreground = Brush.Parse("#A8A6A1"),
             HorizontalAlignment = HorizontalAlignment.Center });
-        var browse = new Button
+        Button Pick(string text, bool primary, Func<Task> open)
         {
-            Content = S("browse"), Background = Accent, Foreground = Canvas,
-            Padding = new Thickness(20, 9), CornerRadius = new CornerRadius(20),
-            FontSize = 14, FontWeight = FontWeight.SemiBold,
-            HorizontalAlignment = HorizontalAlignment.Center
-        };
-        browse.Click += (_, _) => BeginPicker(() => BrowseImportAsync(kind));
-        inner.Children.Add(browse);
+            var b = new Button
+            {
+                Content = text, Background = primary ? Accent : Brush.Parse("#29292D"), Foreground = primary ? Canvas : Ink,
+                Padding = new Thickness(20, 9), CornerRadius = new CornerRadius(20),
+                FontSize = 14, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Center
+            };
+            b.Click += (_, _) => BeginPicker(open);
+            return b;
+        }
+        if (kind == ImportKind.Keys)
+            inner.Children.Add(Pick(S("browse"), true, () => BrowseImportAsync(kind)));
+        else
+        {
+            // #611：文件和文件夹各一个按钮、各弹各的窗口（Windows 的系统窗口不能同时选文件和文件夹）。
+            //   原先一个按钮先弹文件窗口、再无条件弹文件夹窗口，取消文件窗口也会接着弹文件夹窗口
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, HorizontalAlignment = HorizontalAlignment.Center };
+            row.Children.Add(Pick(T("library.import_files"), true, () => BrowseImportAsync(kind)));
+            row.Children.Add(Pick(T("library.import_folder"), false, () => BrowseImportAsync(kind, folder: true)));
+            inner.Children.Add(row);
+        }
         return inner;
     }
 
     private void CloseImportDialog()
     {
-        importDialog = null; importError = ""; keysRejected = false;
+        importDialog = null; importError = ""; importNotice = ""; keysRejected = false;
         pendingImportPaths = [];
         Render();
     }
 
     // ---- import job state ----
-    private bool importBusy;
     private string importJobName = "", importJobMessage = "", importError = "";
-    private CancellationTokenSource? importCancellation;
 
-    private async Task BrowseImportAsync(ImportKind kind)
+    /// 选择器认的游戏文件后缀：与后端 pack/jobs/library.py SOURCE_SUFFIXES 一致（#611：原先漏了 Switch 2 的 .nup，拖进来认得、选择器里看不到）
+    private static readonly string[] GameFilePatterns = ["*.nsp", "*.xci", "*.nsz", "*.xcz", "*.nup"];
+
+    private async Task BrowseImportAsync(ImportKind kind, bool folder = false)
     {
         if (kind == ImportKind.Keys)
         {
@@ -181,25 +212,32 @@ public sealed partial class EnvironmentWindow
             if (files.Count == 0) return;
             AcceptImport([LocalPath(files[0])], ImportKind.Keys);
         }
+        else if (folder)
+        {
+            var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+                { Title = T("library.import_folder"), AllowMultiple = true });
+            if (folders.Count == 0) return;   // 取消就是取消
+            AcceptImport(folders.Select(LocalPath).ToArray(), ImportKind.Games);
+        }
         else
         {
             var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
             {
                 Title = T("library.import_files"), AllowMultiple = true,
-                FileTypeFilter = [new FilePickerFileType(T("library.import_files")) { Patterns = ["*.nsp", "*.xci", "*.nsz", "*.xcz"] }]
+                FileTypeFilter = [new FilePickerFileType(T("library.import_files")) { Patterns = GameFilePatterns }]
             });
-            var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
-                { Title = T("library.import_folder") });
-            var paths = files.Select(LocalPath).Concat(folders.Select(LocalPath)).ToArray();
-            if (paths.Length == 0) return;
-            AcceptImport(paths, ImportKind.Games);
+            if (files.Count == 0) return;     // 取消就是取消，不再接着弹文件夹窗口
+            AcceptImport(files.Select(LocalPath).ToArray(), ImportKind.Games);
         }
     }
 
     private void AcceptImport(string[] paths, ImportKind kind)
     {
         if (importBusy) return;
-        if (connectedFolder is null || libraryId is null) { importError = T("welcome.sheet.dropBusy"); Render(); return; }
+        // 只有真的在建库 / 连库时才说「有任务在进行」；没连上就说没连上的真实原因（下面有「重试 / 换个位置」），v0.2.8 热修：
+        //   原先没连上一律报 dropBusy，缺省库建不起来的原因被盖掉，玩家一直卡在「还有任务在进行」
+        if (libraryBusy) { importError = T("welcome.sheet.dropBusy"); Render(); return; }
+        if (connectedFolder is null || libraryId is null) { importError = libraryFailure.Length > 0 ? libraryFailure : LibraryFailed(libraryFolder, ""); Render(); return; }
         if (kind == ImportKind.Keys)
             _ = RunImportKeysAsync(paths[0]);
         else
@@ -209,25 +247,24 @@ public sealed partial class EnvironmentWindow
     private async Task RunImportKeysAsync(string keyPath)
     {
         if (importBusy || connectedFolder is null || libraryId is null) return;
-        importBusy = true; importError = ""; importJobName = Path.GetFileName(keyPath); importJobMessage = "";
+        var front = BeginJob(JobKind.Import); importError = ""; importJobName = Path.GetFileName(keyPath); importJobMessage = "";
         keysRejected = false; Render();
-        using var cts = new CancellationTokenSource(); importCancellation = cts;
         try
         {
             var result = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId,
-                "keys", [keyPath], cts.Token);
+                "keys", [keyPath], front.Token, jobId: front.Next());
             DisplayJob(result);
             if (!result.Report.Succeeded) { importError = result.Report.Message; return; }
             // 放好密钥后重查 catalog，接着导入悬挂的游戏
             var listing = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId,
-                "catalog", null, cts.Token);
+                "catalog", null, front.Token, jobId: front.Next(), startup: TakeStartupCatalog());
             if (listing.Report.Succeeded)
             { catalog = LibraryCatalog.Parse(listing.Report.Result); ClearCovers(); }
             importDialog = null;
             if (pendingImportPaths.Length > 0)
             {
                 var pending = pendingImportPaths; pendingImportPaths = [];
-                importBusy = false; importCancellation = null;
+                EndJob(front);   // 接着导入悬挂的游戏是另一个导入作业
                 _ = RunImportGamesAsync(pending);
                 return;
             }
@@ -237,19 +274,18 @@ public sealed partial class EnvironmentWindow
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or System.ComponentModel.Win32Exception)
         { importError = error.Message; }
-        finally { importCancellation = null; importBusy = false; Render(); }
+        finally { EndJob(front); Render(); }
     }
 
     private async Task RunImportGamesAsync(string[] filePaths)
     {
         if (importBusy || connectedFolder is null || libraryId is null) return;
-        importBusy = true; importError = ""; importJobName = Path.GetFileName(filePaths[0]); importJobMessage = "";
+        var front = BeginJob(JobKind.Import); importError = ""; importNotice = ""; importJobName = Path.GetFileName(filePaths[0]); importJobMessage = "";
         keysRejected = false; Render();
-        using var cts = new CancellationTokenSource(); importCancellation = cts;
         try
         {
             var result = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId,
-                "import", filePaths, cts.Token, partialResults: true);
+                "import", filePaths, front.Token, partialResults: true, jobId: front.Next());
             DisplayJob(result);
             if (!result.Report.Succeeded)
             {
@@ -275,7 +311,7 @@ public sealed partial class EnvironmentWindow
             }
             // 成功：重查目录，更新欢迎页状态
             var listing = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId,
-                "catalog", null, cts.Token);
+                "catalog", null, front.Token, jobId: front.Next(), startup: TakeStartupCatalog());
             if (listing.Report.Succeeded)
             {
                 catalog = LibraryCatalog.Parse(listing.Report.Result); ClearCovers();
@@ -302,6 +338,13 @@ public sealed partial class EnvironmentWindow
                 importError = string.Join("\n", failed.Select(f => f.FileName + "：" + B(f.Reason)));
                 return;
             }
+            // #797：只放了更新 / DLC、库里也没有本体：不自动关，当场说缺本体（原先要到出包「检查游戏输入」才报）
+            var noBase = ImportOutcome.MissingBase(result.Report.Result);
+            if (noBase.Count > 0)
+            {
+                importNotice = string.Join("\n", noBase.Select(id => T("import.noBase").Replace("{0}", catalog?.Games.FirstOrDefault(g => string.Equals(g.Id, id, StringComparison.OrdinalIgnoreCase))?.Name ?? id)));
+                return;
+            }
             importDialog = null;   // 成功自动关
         }
         catch (OperationCanceledException) { importError = ""; }
@@ -309,7 +352,7 @@ public sealed partial class EnvironmentWindow
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or System.ComponentModel.Win32Exception)
         { importError = error.Message; }
-        finally { importCancellation = null; importBusy = false; Render(); }
+        finally { EndJob(front); Render(); }
     }
 
     private static string? GetDiagCode(LibraryJobOutput job) => DiagnosticCode(job.Report.Diagnostics);

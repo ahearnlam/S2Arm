@@ -1,0 +1,214 @@
+// 前端调用的其余入口（上沿 nvn_be_*，声明在 nvn_mtl.h / nvn_obj.h）。
+// 有真实语义而新层还没接的入口，一律经 nvn_unimpl("be", 名字) 记账后返回「没有 / 没做」，不返回假成功；
+// 只是 Metal 侧诊断读数的入口返回 0。接上一个就把对应的 nvn_unimpl 换成实现，并在单测里加用例。
+#include "rp_exec.h"
+#include "rp_state.h"
+#include "rp_res.h"
+#include "nvn_deswizzle.h"
+#include "nvn_unimpl.h"
+#include "nvn_plat.h"
+#include "nvn_backend.h"
+#include "nvn_mtl.h"
+#include "nvn_hmap.h"
+
+void rp_res_tex_gone(uint64_t serial);   // rp_res.c
+void rp_res_reset(void);
+void rp_buf_pool_gone(const void *mem);   // rp_buf.c
+void rp_buf_reset(void);
+void rp_shader_reset(void);            // 着色器来源（核心外）
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define UN(name) nvn_unimpl("be", name, __builtin_return_address(0))
+
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void mtl_init(void) {}
+
+// ---------- 内存池登记：按地址判断「这段在不在某个池里」----------
+enum { RP_NPOOL = 4096 };
+static struct { const uint8_t *mem; uint64_t size; } g_pool[RP_NPOOL];
+static int g_npool;
+void nvn_be_pool_add(const void *mem, uint64_t size) {
+    if (!mem || !size) return;
+    pthread_mutex_lock(&g_mu);
+    if (g_npool < RP_NPOOL) g_pool[g_npool++] = (__typeof__(g_pool[0])){mem, size};
+    else { pthread_mutex_unlock(&g_mu); nvn_unimpl("limit", "pool_table_full_4096", mem); return; }
+    pthread_mutex_unlock(&g_mu);
+}
+void nvn_be_pool_del(const void *mem) {
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) if (g_pool[i].mem == mem) { g_pool[i] = g_pool[--g_npool]; break; }
+    pthread_mutex_unlock(&g_mu);
+    rp_buf_pool_gone(mem);
+}
+int nvn_be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
+    int hit = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) { uint64_t b = (uint64_t)(uintptr_t)g_pool[i].mem;
+        if (addr >= b && addr - b <= g_pool[i].size && len <= g_pool[i].size - (addr - b)) { if (buf) *buf = (void *)g_pool[i].mem; if (off) *off = addr - b; hit = 1; break; } }
+    pthread_mutex_unlock(&g_mu);
+    return hit;
+}
+int rp_pool_find(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size) {
+    int hit = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) { uint64_t b = (uint64_t)(uintptr_t)g_pool[i].mem;
+        if (addr >= b && addr - b <= g_pool[i].size && len <= g_pool[i].size - (addr - b)) { if (mem) *mem = g_pool[i].mem; if (size) *size = g_pool[i].size; hit = 1; break; } }
+    pthread_mutex_unlock(&g_mu);
+    return hit;
+}
+int rp_pool_count(void) { pthread_mutex_lock(&g_mu); int n = g_npool; pthread_mutex_unlock(&g_mu); return n; }
+void nvn_be_pool_addressed(const void *mem, uint64_t size) { (void)mem; (void)size; }   // 原始全局内存表：翻译器的裸地址访问接上时用
+
+// ---------- 贴图：初始化只登记序号，建图在首次使用（nvn_mtl.m:2597 / :4113）----------
+static nvn_hmap g_tex_live; static int g_tex_live_inited;
+static _Atomic uint64_t g_tex_init_n, g_tex_rel_n;
+void nvn_be_tex_init(const tex_t *t) {
+    if (!t->serial) return;
+    atomic_fetch_add(&g_tex_init_n, 1);
+    pthread_mutex_lock(&g_mu);
+    if (!g_tex_live_inited) { nvn_hm_init(&g_tex_live, 8); g_tex_live_inited = 1; }
+    nvn_hm_put(&g_tex_live, &t->serial, (void *)1);
+    pthread_mutex_unlock(&g_mu);
+}
+void nvn_be_tex_release(tex_t *t) {
+    if (!t || !t->serial) return;
+    atomic_fetch_add(&g_tex_rel_n, 1);
+    pthread_mutex_lock(&g_mu);
+    if (g_tex_live_inited) nvn_hm_del(&g_tex_live, &t->serial);
+    pthread_mutex_unlock(&g_mu);
+    rp_res_tex_gone(t->serial);
+}
+int rp_tex_live_n(void) { pthread_mutex_lock(&g_mu); int n = g_tex_live_inited ? (int)g_tex_live.n : 0; pthread_mutex_unlock(&g_mu); return n; }
+void nvn_be_tex_counters(uint64_t *init, uint64_t *rel) { if (init) *init = atomic_load(&g_tex_init_n); if (rel) *rel = atomic_load(&g_tex_rel_n); }
+void nvn_be_tex_tick(uint64_t frame) { (void)frame; }
+int nvn_be_tex_from_gl(void *t, uint32_t gl_name) { (void)t; (void)gl_name; UN("tex_from_gl"); return 0; }
+void nvn_be_xv_window_tex(uint64_t serial) { (void)serial; }   // 跨提交有效性账本随通道规划接
+
+// ---------- 同步读贴图（ReadTexels）：内容在游戏内存里的这一条 ----------
+// 对齐 iOS（nvn_mtl.m 的 nvn_be_read_texels）：游戏内存里就是内容（随包 / WriteTexels 或刷新写过 / 脏页追踪发现被 CPU 写过）时，
+// 就地反交织，按调用方给的区域 / 行距 / 片距逐行拷进 dst；不碰 GPU、不建宿主贴图，任何线程都能调。
+// 内容归 GPU 的那一条（读回）还没接：照旧记 be read_texels、不动 dst，不返回假结果。
+int nvn_ft_written(const tex_t *t) __attribute__((weak));   // hle_nvn.c：脏页追踪（档案开关在它里面判），命中时它自己记 nvn_be_tex_cpu_written；没有它的构建当「没写过」
+static int tex_content_in_guest_memory(const tex_t *t) {
+    if (!t->mem) return 0;
+    // 已被 GPU 写过：游戏内存里的字节比 GPU 写的旧，读出来是错的，留给读回路径（iOS 没有这条）。排在 nvn_ft_written 之前：它命中会把归属翻回 CPU
+    if (nvn_be_tex_gpu_owned(t->serial)) return 0;
+    return t->has_layout || rp_tex_cpu_written(t->serial) || (nvn_ft_written && nvn_ft_written(t));
+}
+void nvn_be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
+    if (!t || !r || !dst) { nvn_unimpl("be", "read_texels_bad_args", __builtin_return_address(0)); return; }
+    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+    if (!bpb) { nvn_unimpl("fmt", "read_texels_unknown_format", t); return; }
+    // 存储不是块线性的（线性 / 稀疏 / 多重采样 / 缓冲贴图）：反交织管不了，等读回路径
+    if ((t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) { UN("read_texels"); return; }
+    // 区域按块折算（x / y 按块宽高除，宽高向上取整到块）。级、层、片、区域、行距、片距任一不成立都拒绝：不读存储之外的字节，
+    // 也不写互相覆盖的输出（iOS 不查）。这些检查都是纯的，排在可能改归属的 nvn_ft_written 之前
+    uint32_t levels = t->d.levels ? t->d.levels : 1, layers = t->L.layers ? t->L.layers : 1;
+    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D;
+    int one_d = t->d.target == NVN_TEXTURE_TARGET_1D || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY;   // 一维只有一行；一维数组的 height 是层数（nvn_tex.c shape）
+    if (level >= levels || level >= 32 || r->xoffset < 0 || r->yoffset < 0 || r->zoffset < 0 || r->width <= 0 || r->height <= 0 || r->depth < 0) { nvn_unimpl("be", "read_texels_bad_region", t); return; }
+    uint32_t lw = t->d.width >> level, lh = one_d ? 1 : t->d.height >> level, ld = is3d ? t->d.depth >> level : 1;
+    if (!lw) lw = 1;
+    if (!lh) lh = 1;
+    if (!ld) ld = 1;
+    // 下面的几何换算都用 64 位无符号算：宽高是调用方给的 int / uint32，加块宽减一不能回绕
+    uint64_t lp = ((uint64_t)lw + (uint64_t)bw - 1) / (uint64_t)bw * (uint64_t)bpb, lr = ((uint64_t)lh + (uint64_t)bh - 1) / (uint64_t)bh;   // 这一级一行块的字节数 / 块行数
+    uint64_t x0 = (uint64_t)(r->xoffset / bw) * (uint64_t)bpb, y0 = (uint64_t)(r->yoffset / bh);
+    uint64_t wb = ((uint64_t)r->width + (uint64_t)bw - 1) / (uint64_t)bw * (uint64_t)bpb, hb = ((uint64_t)r->height + (uint64_t)bh - 1) / (uint64_t)bh;
+    uint64_t nz = r->depth ? (uint64_t)r->depth : 1, zoff = (uint64_t)r->zoffset;
+    if (x0 + wb > lp || y0 + hb > lr || (is3d ? zoff + nz > ld : (uint64_t)layer0 + zoff + nz > layers)) { nvn_unimpl("be", "read_texels_bad_region", t); return; }
+    size_t ext = 0, ext_all = 0;   // 一片 / 全部输出占的字节范围：行距 / 片距得容得下一行 / 一片，且这个范围本身不回绕
+    if (row < wb || __builtin_mul_overflow(hb - 1, row, &ext) || __builtin_add_overflow(ext, wb, &ext) ||
+        (nz > 1 && (img < ext || __builtin_mul_overflow((size_t)(nz - 1), img, &ext_all) || __builtin_add_overflow(ext_all, ext, &ext_all)))) { nvn_unimpl("be", "read_texels_bad_stride", t); return; }
+    if (!tex_content_in_guest_memory(t)) { UN("read_texels"); return; }   // 内容归 GPU / 游戏内存里没有内容：等读回路径
+    uint64_t need = 0;   // 一级（三维：整个体积）线性化后的字节数
+    if (__builtin_mul_overflow((uint64_t)lp, (uint64_t)lr, &need) || (is3d && __builtin_mul_overflow(need, (uint64_t)ld, &need)) || need > SIZE_MAX) need = 0;
+    uint8_t *lin = need ? malloc((size_t)need) : NULL;
+    if (!lin) { nvn_unimpl("limit", "read_texels_alloc", t); return; }
+    for (uint64_t z = 0; z < nz; z++) {
+        if (!is3d || z == 0) {   // 二维 / 数组：一层一解；三维：一次解整级体积，各片都从这块里取
+            if (nvn_deswizzle(&t->d, level, is3d ? 0 : (unsigned)(layer0 + zoff + z), t->mem, lin, (size_t)lp)) { nvn_unimpl("tex", "deswizzle_failed", t); free(lin); return; }
+        }
+        const uint8_t *src = lin + (is3d ? (size_t)((zoff + z) * lp * lr) : 0);
+        for (uint64_t y = 0; y < hb; y++) memcpy(dst + (size_t)z * img + (size_t)y * row, src + (y0 + y) * lp + x0, (size_t)wb);
+    }
+    free(lin);
+}
+
+// ---------- 程序（描述符池登记、贴图内容归属在 rp_res.c）----------
+void nvn_be_prog_release(prog_t *p) { (void)p; }               // 还没有按程序的管线缓存：没有东西要释放
+void nvn_be_shader_prefetch(const uint8_t key[8]) { (void)key; }   // 预取是提速手段，不影响正确性；着色器链接上后再接
+int nvn_be_multi_draw_range(void) { return 0; }                // 0 = 前端逐条录间接计数多绘；OP_MULTI_DRAW 接上后改 1
+int nvn_be_buf_extent_consumer(void) { return 1; }             // Vulkan 上 size = 0 的存储绑定要按地址求活缓冲长度：让前端登记
+
+// ---------- 全局状态 ----------
+static int g_depth_zero, g_origin_ll = 1; static uint64_t g_frame;
+void nvn_be_set_depth_zero(int on) { g_depth_zero = on; }
+void nvn_be_set_origin_lower_left(int on) { g_origin_ll = on; }
+void nvn_be_set_frame(uint64_t f) { g_frame = f; }
+int rp_depth_zero(void) { return g_depth_zero; }
+int rp_origin_lower_left(void) { return g_origin_ll; }
+uint64_t rp_frame(void) { return g_frame; }
+
+// ---------- 事件 / 跨队列：GPU 侧等事件未接（OP_SIGNAL_EVENT+WAIT），所以没有停住的队列 ----------
+void nvn_be_event_written(volatile uint32_t *val) { (void)val; }
+void nvn_be_event_gpu_recorded(volatile uint32_t *val) { (void)val; }
+void nvn_be_xq_flush(void *q, const char *why) { (void)q; (void)why; }
+int nvn_be_xq_fence(void *q, void *s) { (void)q; (void)s; return 0; }
+int nvn_be_xq_owed(const void *s, void **q) { (void)s; (void)q; return 0; }
+int nvn_be_xq_owed_wait(const void *s, uint64_t ns) { (void)s; (void)ns; return 1; }
+void nvn_be_xq_wait_queue(void *q, void *owner) { (void)q; (void)owner; }
+
+// ---------- 等完成 ----------
+void nvn_be_finish(void) { uint64_t f = nvn_be_last_fence(); if (f) nvn_be_wait(f, 5000000000ull); }
+void nvn_be_drain(void) { nvn_be_finish(); }
+
+// ---------- 显示节拍：未接（上屏本身在 rp_present.c）----------
+int nvn_be_link_active(void) { return 0; }
+int nvn_be_link_wait_tick(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; return 0; }
+void nvn_be_ub_present(double iv_ms) { (void)iv_ms; }
+
+// ---------- 会话 ----------
+void nvn_be_begin_session(void) {}
+int nvn_be_request_stop(void) { return 0; }
+int nvn_be_drain_session(void) { nvn_be_finish(); return 0; }
+void rp_exec_reset(void);
+int nvn_be_shutdown_session(void) { rp_exec_reset(); rp_draw_reset(); rp_shader_reset(); rp_pass_reset(); rp_res_reset(); rp_buf_reset(); rp_state_reset(); return 0; }   // 上屏面由平台件摘（rp_present_set_surface）
+
+// ---------- Metal 侧诊断读数：新层没有对应账本，报 0 ----------
+double nvn_be_gpu_ms(uint64_t f) { (void)f; return 0; }
+int nvn_be_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) { (void)f; if (t0) *t0 = 0; if (t1) *t1 = 0; return 0; }
+void nvn_be_stats(uint64_t *passes, uint64_t *draws) { if (passes) *passes = 0; if (draws) *draws = 0; }
+void nvn_be_args_stats(uint64_t *enc, uint64_t *reuse) { if (enc) *enc = 0; if (reuse) *reuse = 0; }
+void nvn_be_use_stats(uint64_t *call, uint64_t *skip) { if (call) *call = 0; if (skip) *skip = 0; }
+uint64_t nvn_be_ds_omit(void) { return 0; }
+uint64_t nvn_be_drawable_ns_take(void) { return 0; }
+void nvn_be_bw(uint64_t *load, uint64_t *store, uint64_t *full) { if (load) *load = 0; if (store) *store = 0; if (full) *full = 0; }
+uint64_t nvn_be_udc_saved_bytes(void) { return 0; }
+void nvn_be_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { if (uploads) *uploads = 0; if (reuploads) *reuploads = 0; }
+uint64_t nvn_be_upload_ns_take(void) { return 0; }
+uint64_t nvn_be_upload_gpu_ns_take(void) { return 0; }
+void nvn_be_create_stats(uint64_t *lib, uint64_t *pso) { if (lib) *lib = 0; if (pso) *pso = 0; }
+void nvn_be_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip) { if (resolve) *resolve = 0; if (reuse) *reuse = 0; if (set) *set = 0; if (skip) *skip = 0; }
+void mtl_res_counts(uint32_t tick, const char *why) { (void)tick; (void)why; }
+void mtl_res_snapshot(mtl_res_count *out) { if (out) memset(out, 0, sizeof *out); }
+void bf_want_note(const char *key) { (void)key; }
+uint64_t nvn_be_upload_bytes(void) { return 0; }
+void nvn_be_create_ns(uint64_t *lib_ns, uint64_t *pso_ns) { if (lib_ns) *lib_ns = 0; if (pso_ns) *pso_ns = 0; }
+// 前端每 300 帧交来一次常驻内存读数（hle_nvn.c dump_frame；宿主构建里编进这一段的才会调到）：打一行，别的不做
+void nvn_be_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
+    char b[96]; snprintf(b, sizeof b, "第 %llu 帧：常驻内存 %llu MB", frame, rss_mb); nvn_plat_log(NVN_PLAT_LOG_INFO, "mem", b);
+}
+
+// ---------- 帧率目标、帧录放 ----------
+int dm_fps_setting(void) __attribute__((weak));   // 宿主：玩家的帧率设置；宿主没给这个入口时按 60
+int nvn_be_fps_target(void) { return dm_fps_setting && dm_fps_setting() == 30 ? 30 : 60; }
+// 帧录放（把一帧的命令流存盘再回放）只在 Metal 后端有（nvn_frame_rec.inc）：这里恒关
+int nvn_frec_on(void) { return 0; }
+void nvn_frec_submit(const uint64_t *h, int n) { (void)h; (void)n; }
+void nvn_frec_present(const tex_t *t, double period, const int crop[4]) { (void)t; (void)period; (void)crop; }

@@ -60,16 +60,17 @@ struct BatchExportView: View {
             ForEach($model.batchDraft) { $row in
                 HStack(spacing: 14) {
                     cover(row.id)
-                    Text(row.name).font(.manrope(15, .semibold)).lineLimit(1)
-                    Spacer(minLength: 12)
-                    if let problem = row.problem {
-                        Text(problem == "keys" ? t("keys") : loc.backend(problem)).font(.manrope(12.5)).foregroundStyle(LauncherPalette.building).lineLimit(2)
-                    } else {
-                        Toggle("iPhone", isOn: $row.iphone).toggleStyle(.checkbox).font(.manrope(13)).frame(width: 96, alignment: .leading)
-                            .accessibilityIdentifier("batch.iphone." + row.id)
-                        Toggle("Mac", isOn: $row.mac).toggleStyle(.checkbox).font(.manrope(13)).frame(width: 70, alignment: .leading)
-                            .accessibilityIdentifier("batch.mac." + row.id)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(row.name).font(.manrope(15, .semibold)).lineLimit(1)
+                        if let problem = row.problem {   // 只提示、不挡（v0.3.1）：照样能勾，出包时作业层核实
+                            Text(problem == "keys" ? t("keys") : loc.backend(problem)).font(.manrope(12.5)).foregroundStyle(LauncherPalette.building).lineLimit(2)
+                        }
                     }
+                    Spacer(minLength: 12)
+                    Toggle("iPhone", isOn: $row.iphone).toggleStyle(.checkbox).font(.manrope(13)).frame(width: 96, alignment: .leading)
+                        .accessibilityIdentifier("batch.iphone." + row.id)
+                    Toggle("Mac", isOn: $row.mac).toggleStyle(.checkbox).font(.manrope(13)).frame(width: 70, alignment: .leading)
+                        .accessibilityIdentifier("batch.mac." + row.id)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 10)
                 .background(LauncherPalette.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 12))
@@ -96,7 +97,7 @@ struct BatchExportView: View {
     private var locationRow: some View {
         var options: [(value: String, label: String)] = model.locations.map { l in
             let free = l.freeBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "?"
-            return (l.path, (l.volume.isEmpty ? (l.path as NSString).lastPathComponent : l.volume) + " · " + free)
+            return (l.path, S2ArmLauncherModel.locationName(path: l.path, volume: l.volume) + " · " + free)
         }
         if !model.batchLocation.isEmpty, !options.contains(where: { $0.value == model.batchLocation }) {
             options.append((model.batchLocation, (model.batchLocation as NSString).abbreviatingWithTildeInPath))
@@ -104,7 +105,7 @@ struct BatchExportView: View {
         options.append(("__other__", BackendText.launcherText("export.location.other", language: uiLanguage)))
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Image(systemName: "externaldrive").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
+                LauncherRowIcon("externaldrive")
                 Text(t("location")).font(.manrope(13)).foregroundStyle(.secondary)
                 Spacer(minLength: 12)
                 LauncherDropdown(options: options, selection: model.batchLocation, label: t("location"), style: .button) { value in
@@ -136,6 +137,13 @@ struct BatchExportView: View {
             Text(text).font(.manrope(15, .semibold))
             if model.batchPaused == "disk_full" {
                 Text(t("paused")).font(.manrope(13)).foregroundStyle(LauncherPalette.building).fixedSize(horizontal: false, vertical: true)
+            } else if !model.batchRunning, model.batchStoppedAt > 0 {   // 上次没出完（启动器退出 / 取消）：停在第几款，「继续」只出还没出的（剃刀 H13）
+                Text(t("stopped_at").replacingOccurrences(of: "{0}", with: "\(model.batchStoppedAt)")).font(.manrope(13)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error = model.batchError {
+                Text(t("stopped").replacingOccurrences(of: "{0}", with: error)).font(.manrope(13)).foregroundStyle(LauncherPalette.building)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -182,16 +190,16 @@ struct BatchExportView: View {
         HStack(spacing: 8) {
             if platforms.contains(where: { state($0) == "failed" }) {
                 if results.values.contains(where: { $0["code"] as? String == "disk_full" }) {
-                    Button(t("free")) { freeSpace(gid) }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                    Button(t("free")) { freeSpace(gid) }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy).busyHint(model)
                 }
-                Button(t("retry")) { model.retryBatch(gid) }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                Button(t("retry")) { model.retryBatch(gid) }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy).busyHint(model)
                     .accessibilityIdentifier("batch.retry." + gid)
             }
             if state("iphone") == "completed" {
-                Button(t("install")) { install(gid) }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                Button(t("install")) { install(gid) }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy).busyHint(model)
             }
             if state("mac") == "completed", let game = model.games.first(where: { $0.id == gid }) {
-                Button(t("play")) { model.play(game, uiLanguage: uiLanguage) }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                Button(t("play")) { model.play(game, uiLanguage: uiLanguage) }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy).busyHint(model)
             }
         }
     }
@@ -206,14 +214,14 @@ struct BatchExportView: View {
     private var actionBar: some View {
         HStack(spacing: 12) {
             if model.batchState == nil {
-                let count = model.batchDraft.filter { $0.problem == nil && !$0.platforms.isEmpty }.count
+                let count = model.batchDraft.filter { !$0.platforms.isEmpty }.count
                 Spacer()
                 Button { model.startBatch() } label: {
                     HStack(spacing: 8) { Image(systemName: "shippingbox.fill"); Text(t("start").replacingOccurrences(of: "{0}", with: "\(count)")) }
                         .font(.manrope(16, .bold)).foregroundStyle(.black).padding(.horizontal, 26).frame(height: 48)
                         .background(LauncherPalette.cream, in: Capsule()).contentShape(Capsule())
                 }
-                .buttonStyle(.plain).disabled(count == 0 || model.busy).opacity(count == 0 || model.busy ? 0.4 : 1)
+                .buttonStyle(.plain).disabled(count == 0 || model.busy).opacity(count == 0 || model.busy ? 0.4 : 1).busyHint(model)
                 .keyboardShortcut(.defaultAction).accessibilityIdentifier("batch.start")
             } else {
                 let s = model.batchSummary
@@ -223,10 +231,10 @@ struct BatchExportView: View {
                 } else {
                     // 暂停着（磁盘满）只给「重试」：它解除暂停、重出失败的那个平台；「继续」不解除暂停（审计 P1-164）
                     if (s["failed"] as? Int ?? 0) > 0 || model.batchPaused != nil {
-                        Button(t("retry_failed")) { model.retryBatch() }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                        Button(t("retry_failed")) { model.retryBatch() }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy).busyHint(model)
                     }
                     if model.batchPaused == nil, (s["cancelled"] as? Int ?? 0) > 0 || (s["pending"] as? Int ?? 0) > 0 {
-                        Button(t("resume")) { model.resumeBatch() }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                        Button(t("resume")) { model.resumeBatch() }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy).busyHint(model)
                             .accessibilityIdentifier("batch.resume")
                     }
                     Spacer()

@@ -239,9 +239,9 @@ class FakeW:
         self.calls.append(ns)
         if self.fail: raise self.Fail("plumesign 退 1", 1, self.fail)
         return self.bid
-    def push_pack(self, udid, bid, pack, devpush=None, full=False, say=None, docs=None, ctx=None, apply_after=False, progress=None, stage=None):
-        """新接口（WinPhone.push 调）→ (文件数, 字节数)；progress 记下来供核对（#266 / #308：推送进度回调）"""
-        self.progress = progress
+    def push_pack(self, udid, bid, pack, devpush=None, full=False, say=None, docs=None, ctx=None, apply_after=False, progress=None, stage=None, pack_root=None, accept_low_space=False):
+        """新接口（WinPhone.push 调）→ (文件数, 字节数)；progress 记下来供核对（#266 / #308：推送进度回调）；pack_root 记下来核资源包根单独给"""
+        self.progress = progress; self.pack_root = pack_root
         if progress: progress(0, 100, 0, 1); progress(100, 100, 1, 1)
         if getattr(self, "needs_player", None):
             e = self.Fail(self.needs_player, 0, "manual_unpack_required"); e.transferred = (787, 23_000_000_000); raise e
@@ -256,6 +256,7 @@ class WinInstall(unittest.TestCase):
         self.m = install
         self.t = Path(tempfile.mkdtemp()); self.addCleanup(lambda: __import__("shutil").rmtree(self.t, ignore_errors=True))
         p = patch.object(install, "phone_games", lambda c, ph: set()); p.start(); self.addCleanup(p.stop)   # 读手机游戏清单另有用例
+        p = patch.object(install, "pick_pack_root", lambda c, ph, g: f"Library/Application Support/S2Arm/games/{g}/资源包"); p.start(); self.addCleanup(p.stop)   # 选哪处另有用例（test_install）
         (self.t / "lib").mkdir(); (self.t / "logs").mkdir()
         self.gid = "0100000000000047"
         self.progress_events = []   # 作业计数事件 (done, total, unit)
@@ -267,10 +268,12 @@ class WinInstall(unittest.TestCase):
     def go(self, w, **r):
         """走新 install.install 的 Windows 分支（phone_for → WinPhone + assemble + put_game）"""
         import ipa as packer
-        self.c.r.update(r)
+        r = {"device": "U1", **r}   # 装机一律带玩家选的那台；device=None 测「没带设备号」
+        self.c.r.update({k: v for k, v in r.items() if v is not None})
+        if r["device"] is None: self.c.r.pop("device", None)
         gid = self.c.r["gameId"].upper()
         # assemble 替身：在游戏库临时目录出一个真 zip ipa（WinPhone.install 不解包，但 put_game 要把它放到默认位置根 S2Arm.ipa）
-        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None):
+        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None, agreed=()):
             self.assembled = self.t / "lib" / ".container-t" / "S2Arm.ipa"; self.assembled.parent.mkdir(exist_ok=True)
             with __import__("zipfile").ZipFile(self.assembled, "w") as z:
                 z.writestr("Payload/S2Arm.app/Info.plist", __import__("plistlib").dumps({"CFBundleIdentifier": "dev.s2arm.games", "CFBundleExecutable": "S2Arm"}))
@@ -293,6 +296,7 @@ class WinInstall(unittest.TestCase):
         rec = layout.load_device(self.c, "U1")
         self.assertEqual((rec["bundleId"], rec["games"], rec["shellId"]), ("s2arm.T.0100", {self.gid: dict(pack="cafe01")}, "SID1"))
         self.assertTrue((self.t / "lib" / "S2Arm.ipa").is_file())
+        self.assertEqual(w.pack_root, f"Library/Application Support/S2Arm/games/{self.gid.upper()}/资源包")   # 资源包根单独交给推包（pick_pack_root 选的那处）
         with patch.object(self.m, "win_install_mod", return_value=w), as_windows(self.m):
             self.assertEqual(self.m.WinPhone(self.c).bid, "s2arm.T.0100")
 
@@ -311,8 +315,9 @@ class WinInstall(unittest.TestCase):
         self.assertIsNone(w.calls[-1].bundle)
 
     def test_overwrite_backup_only_skips_when_phone_says_not_installed(self):
-        # #333：覆盖装前备份存档。只有手机明确答「没有这个 App」（ApplicationLookupFailed）才跳过；锁屏 / 断开等取不到 → 停装 device_locked，
-        #   绝不当成没装过直接覆盖。这台没记录包名时按这次要装的包名查（可能有 Mac 装的同包名 App 和存档）
+        # #333：覆盖装前备份存档。只有手机明确答「没有这个 App」（ApplicationLookupFailed / S2A_APP_MISSING）才跳过；锁屏 / 断开等取不到 →
+        #   不悄悄当成没装过直接覆盖，停在确认 save_backup_failed（装机原则 11-11）；玩家确认（acceptNoBackup）后照装。
+        #   这台没记录包名时按这次要装的包名查（可能有 Mac 装的同包名 App 和存档）
         w = FakeW([("U1", "USB", 3)]); w.team = "ABCDE12345"
         asked = []
         def client(result):
@@ -326,27 +331,37 @@ class WinInstall(unittest.TestCase):
                 return Cl()
             return make
         with patch.object(self.m, "win_install_mod", return_value=w), as_windows(self.m):
-            ph = self.m.WinPhone(self.c)
+            self.c.r["device"] = "U1"; ph = self.m.WinPhone(self.c)
             self.assertIsNone(ph.bid)
             with patch.object(self.m, "devpush_client", client("取不到 io.s2arm.games.abcde12345 的容器（App 没装或不是开发签名）：unknown error `ApplicationLookupFailed` returned from device")):
                 self.assertIsNone(ph.backup(self.gid))
             self.assertEqual(asked[-1], "io.s2arm.games.abcde12345")
-            with patch.object(self.m, "devpush_client", client("取不到 io.s2arm.games.abcde12345 的容器（App 没装或不是开发签名）：connection reset")), \
+            with patch.object(self.m, "devpush_client", client("S2A_APP_MISSING：手机上没装 io.s2arm.games.abcde12345（installation_proxy 查过）")):
+                self.assertIsNone(ph.backup(self.gid))
+            with patch.object(self.m, "devpush_client", client("取不到 io.s2arm.games.abcde12345 的容器（App 没装或不是开发签名）：device socket io failed")), \
                  self.assertRaises(self.m.Failure) as e:
                 ph.backup(self.gid)
-            self.assertEqual(e.exception.code, "device_locked")
+            self.assertEqual(e.exception.code, "save_backup_failed"); self.assertIn("可能丢档", str(e.exception))
+            self.c.r["acceptNoBackup"] = True
+            with patch.object(self.m, "devpush_client", client("取不到 io.s2arm.games.abcde12345 的容器（App 没装或不是开发签名）：device socket io failed")):
+                self.assertIsNone(ph.backup(self.gid))   # 玩家确认后：不备份照装
+            del self.c.r["acceptNoBackup"]
             with patch.object(self.m, "devpush_client", client(True)):
                 self.assertTrue((ph.backup(self.gid) / "s.dat").is_file())
 
-    def test_no_record_and_no_team_stops_instead_of_overwriting(self):
-        # 审计 P2-253：这台没记过包名、又读不到团队号 → 查不了手机上有没有存档 → 停装，不交给 plumesign 自己定包名直接覆盖；记过包名的照常按记录备份
+    def test_no_record_and_no_team_asks_instead_of_overwriting(self):
+        # 审计 P2-253：这台没记过包名、又读不到团队号 → 查不了手机上有没有存档 → 停在确认 save_backup_failed，不悄悄交给 plumesign 直接覆盖；
+        #   玩家确认（acceptNoBackup）后照装（装机原则 11-11）
         w = FakeW([("U1", "USB", 3)]); w.team = None
         with patch.object(self.m, "win_install_mod", return_value=w), as_windows(self.m):
-            ph = self.m.WinPhone(self.c)
+            self.c.r["device"] = "U1"; ph = self.m.WinPhone(self.c)
             self.assertIsNone(ph.bid)
             with patch.object(self.m, "devpush_client", side_effect=AssertionError("不该去手机上查")), self.assertRaises(self.m.Failure) as e:
                 ph.backup(self.gid)
-            self.assertEqual(e.exception.code, "signing_failed"); self.assertIn("没装", str(e.exception))
+            self.assertEqual(e.exception.code, "save_backup_failed"); self.assertIn("团队号", e.exception.internal)
+            self.c.r["acceptNoBackup"] = True
+            with patch.object(self.m, "devpush_client", side_effect=AssertionError("不该去手机上查")):
+                self.assertIsNone(ph.backup(self.gid))
 
     def test_cant_open_app_is_warning_not_failure(self):   # #192：Windows 同 Mac，传输数从异常带回（替身 787 个文件）
         w = FakeW([("U1", "USB", 3)]); w.needs_player = "资源包已传完，还差最后一步：打开 App"
@@ -357,10 +372,20 @@ class WinInstall(unittest.TestCase):
         self.assertEqual(res["unpackPending"], "资源包已传完，还差最后一步：打开 App")   # 结果带还差的一步（11-09 #336）
 
     def test_device_choice_errors(self):
-        for devs, want in (([("U1", "USB", 3), ("U2", "USB", 4)], None), ([], None), ([("U1", "USB", 3)], "U9")):
+        """装到哪台由玩家选、作业照办（维护者 11-11）：没带设备号 → device_required（哪怕只连着一台也不自己挑）；
+        带了但那台不在 → device_not_connected，说的是那台（编号末尾），不换装旁边连着的另一台"""
+        for devs in ([("U1", "USB", 3), ("U2", "USB", 4)], [("U1", "USB", 3)], []):
+            with self.subTest(devs=devs), self.assertRaises(core.Failure) as e:
+                self.go(FakeW(devs), device=None)
+            self.assertEqual(e.exception.code, "device_required")
+        for devs, want in (([], "U1"), ([("U2", "USB", 3)], "U1"), ([("U2", "Network", 3)], "U1")):
             with self.subTest(devs=devs, want=want), self.assertRaises(core.Failure) as e:
-                self.go(FakeW(devs), **({"device": want} if want else {}))
+                self.go(FakeW(devs), device=want)
             self.assertEqual(e.exception.code, "device_not_connected")
+            self.assertIn("U1"[-6:], str(e.exception)); self.assertIn("不在线", str(e.exception))
+        w = FakeW([("U2", "USB", 3), ("U1", "Network", 9)])   # 选的那台走 Wi-Fi、另一台插着线：装选的那台
+        self.go(w, device="U1")
+        self.assertEqual(w.calls[0].udid, "U1")
         with self.assertRaises(core.Failure) as e:
             self.go(FakeW(ConnectionRefusedError()))
         self.assertEqual(e.exception.code, "device_pairing_required")
@@ -397,7 +422,7 @@ class WinInstall(unittest.TestCase):
             with zipfile.ZipFile(buf, "w") as z: z.writestr("Payload/S2Arm.app/Info.plist", plistlib.dumps({"CFBundleIdentifier": "s2arm.t.0100.ABCDE12345"}))
             out.write_bytes(buf.getvalue())
             return subprocess.CompletedProcess(cmd, 0, "Installation progress: 100%\nInstallation complete!\n", "")
-        def fake_push(udid, bid, pack, devpush=None, full=False, say=None, docs=None, ctx=None, apply_after=False, progress=None, stage=None):
+        def fake_push(udid, bid, pack, devpush=None, full=False, say=None, docs=None, ctx=None, apply_after=False, progress=None, stage=None, pack_root=None, accept_low_space=False):
             seen["push"] = (udid, bid, Path(pack).name, devpush, full)
             progress(4 << 30, 8 << 30, 4, 8)   # Windows 推送进度回调 → 作业字节计数（#266 / #308）
             return (0, 0)
@@ -582,7 +607,7 @@ class EngineSnapshotCoversWinenv(unittest.TestCase):
             import bundle_engine as be
         def shipped(rel):
             return be.include_source(Path(rel)) and any(rel == top or rel.startswith(top + "/") for top in be.INPUTS)
-        reads = [we.RUNTIME, we.PREFLIGHT, we.METAL_LOCK, we.LIBRARY, "pack/jobs/errors.py", "pack/orch/oneclick_win.py"]
+        reads = [we.RUNTIME, we.PREFLIGHT, we.METAL_LOCK, we.SPACE_RULE, "pack/jobs/errors.py", "pack/orch/oneclick_win.py"]
         self.assertEqual([r for r in reads if not shipped(r)], [])
 
     def test_missing_pins_is_reinstall_not_contract_error(self):

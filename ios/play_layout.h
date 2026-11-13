@@ -17,3 +17,22 @@ BOOL S2APlayPortrait(S2APlayOrientation orientation, BOOL split);
 S2APlayLayout S2APlayLayoutMake(CGRect bounds, CGRect safe, S2APlaySplitMode mode, BOOL partiallyOpen, CGRect division);
 CGRect S2APlayControlsRect(S2APlayLayout layout, CGRect bounds);
 CGSize S2APlayTargetSize(CGSize area);
+// 只发布实际应用到窗口的模式；偏好尚未应用时不提前改变运行时策略。
+void S2APlayPublishSplit(BOOL split);
+int s2a_ios_split_active(void);
+CGRect s2a_ios_game_area(void);
+
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+// 仅主线程。画面 / 手柄 / 编辑器读取同一套区域；CGRectZero 表示游戏视口尚未布局。
+S2APlayLayout s2a_ios_play_layout(void);
+CGRect s2a_ios_game_area(void);
+int s2a_ios_screen_known(void);
+int s2a_ios_screen_w(void);
+int s2a_ios_screen_h(void);
+UIInterfaceOrientationMask s2a_ios_play_orientations(void);
+CGRect S2APlayDivision(UIView *view);
+// 游戏壳和无商业资源的输入工作台共用铰链、方向和区域生命周期。
+@interface S2APlayViewController : UIViewController
+@end
+#endif

@@ -315,6 +315,14 @@ static int fr_dump_state(const char *path) {
              && fr_w(f, tr, hd.ntreg * sizeof *tr) && fr_w(f, sr, hd.nsreg * sizeof *sr) && fr_w(f, g_xv_present, hd.nxv * 8);
     // 末尾一节：池的 GPU 地址表（hle_nvn.c GPU 地址空间）。游戏内存里存的 GPU 地址（Deferred 缓冲范围、自存的存储缓冲地址）回放时靠它换回 CPU；旧文件没有这节，回放当空表
     if (ok) { uint64_t *gt = malloc(3 * 8 * 65536); uint32_t ng = gt ? (uint32_t)nvn_gva_snapshot(gt, 65536) : 0; ok = gt && fr_w(f, &ng, 4) && fr_w(f, gt, (size_t)ng * 24); free(gt); }
+    // 再一节：游戏手里有 GPU 地址的池范围（nvn_mtl.m g_addr，原始全局内存池表只收这些池）。缺了它回放的池表是 0 段，着色器从池表读回 0：
+    //   用两次读之差减 1 作循环次数的计算着色器下溢成上亿次循环，一帧 GPU 忙几秒后挂死安全停。旧文件没有这节，回放当空表
+    if (ok) { pthread_mutex_lock(&g_mu); uint32_t na = (uint32_t)g_naddr; ok = fr_w(f, &na, 4) && fr_w(f, g_addr, (size_t)na * sizeof *g_addr); pthread_mutex_unlock(&g_mu); }
+    // 接着一节：录的这一刻为池表驻留着的池（pool_ent.gm）。池表里没驻留的池是「冷项」，着色器读它得 0、只置访问位，下一次提交才驻留；
+    //   回放从全冷开始的话第一遍就读回 0，同样下溢。按录时的驻留状态放回，回放第一遍看到的池表与录时一致
+    if (ok) { pthread_mutex_lock(&g_mu); uint32_t nm = 0; for (int i = 0; i < g_npool; i++) nm += g_pools[i].gm && !g_pools[i].reg;
+        ok = fr_w(f, &nm, 4); for (int i = 0; ok && i < g_npool; i++) if (g_pools[i].gm && !g_pools[i].reg) { uintptr_t r[2] = {g_pools[i].lo, g_pools[i].hi}; ok = fr_w(f, r, sizeof r); }
+        pthread_mutex_unlock(&g_mu); }
     free(pools); free(live); free(cpu); free(tr); free(sr);
     return fclose(f) == 0 && ok;
 }
@@ -325,7 +333,9 @@ static void fr_capture(const char *name, const tex_t *pt, double period, const i
     if (s2a_vk_front_used && s2a_vk_front_used()) { MLOG("【红】 帧录 %s：本款走 Vulkan 前端（hle_vk.m 自己编码 Metal，不经 NVN 回放层），这一版录不到", name); return; }
     if (!s2a_window_get) { MLOG("【红】 帧录 %s：宿主没有地址窗口接口", name); return; }
     s2a_window_get(&wb, &ws);
-    { pthread_mutex_lock(&g_mu); int sparse = 0; for (int i = 0; i < g_npool; i++) sparse |= g_pools[i].host != g_pools[i].base;   // the pool's host bytes are elsewhere (a far-alias shadow, or one view of it: pool_host) pthread_mutex_unlock(&g_mu);
+    // the pool's host bytes are elsewhere (a far-alias shadow, or one view of it: pool_host).
+    //   11-11：#450（71a0524e）把这行的注释写在了解锁前面，解锁被注释掉、g_mu 一直占着，随后 mtl_finish_gpu → nvn_be_wait 再锁 g_mu 自锁死，任何录帧都卡在出图（t_nvn_frec_tex ⑥）
+    { pthread_mutex_lock(&g_mu); int sparse = 0; for (int i = 0; i < g_npool; i++) sparse |= g_pools[i].host != g_pools[i].base; pthread_mutex_unlock(&g_mu);
       if (sparse) MLOG("【红】 帧录 %s：有内存池在远端别名区（影子另址），回放按游戏地址读不到它们的内容", name); }
     mtl_finish_gpu();   // GPU 做完这一帧之前的提交：GPU 私有贴图的内容、事件值都落定
     uint64_t mb = 0, nreg = 0, gb = 0; int skipped = 0;
@@ -448,6 +458,15 @@ static int fr_restore_state(const char *path, int *ntex) {
     for (uint32_t i = 0; ok && i < hd.nxv; i++) { uint64_t s; ok = fr_r(f, &s, 8); if (ok) nvn_be_xv_window_tex(s); }
     uint32_t ng = 0;   // 末尾的 GPU 地址表（见 fr_dump_state）；旧文件读不到就是 0 段
     if (ok && fr_r(f, &ng, 4) && ng) { uint64_t *gt = malloc((size_t)ng * 24); if (gt && fr_r(f, gt, (size_t)ng * 24)) nvn_gva_restore(gt, (int)ng); else ok = 0; free(gt); }
+    uint32_t na = 0;   // 有 GPU 地址的池范围（见 fr_dump_state）；旧文件读不到就是 0 段
+    if (ok && fr_r(f, &na, 4)) for (uint32_t i = 0; ok && i < na; i++) { uintptr_t r[2]; ok = fr_r(f, r, sizeof r); if (ok) nvn_be_pool_addressed((const void *)r[0], r[1] - r[0]); }
+    uint32_t nm = 0, nmr = 0;   // 录时为池表驻留着的池（见 fr_dump_state）；旧文件读不到就是 0 个
+    if (ok && fr_r(f, &nm, 4) && nm) { pthread_mutex_lock(&g_mu);
+        for (uint32_t i = 0; ok && i < nm; i++) { uintptr_t r[2]; ok = fr_r(f, r, sizeof r); int k = ok ? pool_find(r[0], 1) : -1; if (k < 0 || g_pools[k].reg || g_pools[k].gm) continue;
+            pool_ent *p = &g_pools[k]; if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; } p->gm = 1; p->gseen = mtl_present_count(); nmr++; }
+        if (nmr) { res_commit(); g_gmem_rgen++; }
+        pthread_mutex_unlock(&g_mu);
+        MLOG("回放：录时为原始内存池表驻留着的池 %u 个，放回 %u 个", nm, nmr); }
     *ntex = (int)hd.ntreg;
     fclose(f);
     return ok;
@@ -537,8 +556,9 @@ int nvn_frame_replay(const char *dir) {
         uint64_t tk = nvn_be_present(pt, period, crop[2] || crop[3] ? crop : NULL);
         nvn_be_present_wait(tk); mtl_finish_gpu();
         uint64_t nd = dr1 - dr0;
-        MLOG("回放第 %d / %d 遍：%llu 遍渲染、%llu 笔绘制，提交线程 %.2f ms、%llu 条指令%s", it + 1, N, (unsigned long long)(ps1 - ps0), (unsigned long long)nd, (w1 - w0) / 1e6,
-             (unsigned long long)(c1[0] - c0[0]), nd ? [NSString stringWithFormat:@"，每笔 %.1fk 条指令", (double)(c1[0] - c0[0]) / nd / 1000].UTF8String : "");
+        // 周期数（本线程自己跑的 CPU 周期，不含被抢占、不随别的进程起伏）：tools/frame_bench.sh 拿它比编译参数，墙钟 ms 在多会话共用的机器上波动超 3%
+        MLOG("回放第 %d / %d 遍：%llu 遍渲染、%llu 笔绘制，提交线程 %.2f ms、%llu 条指令、%llu 个周期%s", it + 1, N, (unsigned long long)(ps1 - ps0), (unsigned long long)nd, (w1 - w0) / 1e6,
+             (unsigned long long)(c1[0] - c0[0]), (unsigned long long)(c1[1] - c0[1]), nd ? [NSString stringWithFormat:@"，每笔 %.1fk 条指令", (double)(c1[0] - c0[0]) / nd / 1000].UTF8String : "");
         if (it == 0) { int put = 0, miss = 0; snprintf(p, sizeof p, "%s/gpu.bin", dir); fr_restore_gpu(p, &put, &miss); MLOG("回放：GPU 私有贴图写回 %d 张（尺寸 / 格式对不上没写 %d 张，靠重画）", put, miss); }
     }
     for (int i = 0; i < 500 && !__atomic_load_n(&grabbed, __ATOMIC_ACQUIRE); i++) usleep(10000);

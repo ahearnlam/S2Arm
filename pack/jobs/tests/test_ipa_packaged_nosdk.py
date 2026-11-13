@@ -9,7 +9,7 @@ import unittest
 import unittest.mock as um
 
 import test_jobs
-from test_jobs import ROOT, oneclick_done, shared_extract
+from test_jobs import ROOT, img_step, oneclick_done, shared_extract
 from core import Failure
 import ipa
 import target as tg
@@ -18,11 +18,12 @@ import target as tg
 class PackagedNoSdk(unittest.TestCase):
     # 借 test_jobs 的夹具方法（不继承：继承会把那边全部用例再跑一遍）
     setUp, tearDown = test_jobs.JobsTests.setUp, test_jobs.JobsTests.tearDown
-    catalogue, package, game = test_jobs.JobsTests.catalogue, test_jobs.JobsTests.package, test_jobs.JobsTests.game
+    catalogue, package, game, player_keys = test_jobs.JobsTests.catalogue, test_jobs.JobsTests.package, test_jobs.JobsTests.game, test_jobs.JobsTests.player_keys
 
     def prepare(self):
         base = self.package("base")
         self.catalogue([self.game(packages=[base])])
+        self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         res = self.root / "res"; (res / "Fonts").mkdir(parents=True); (res / "Fonts/a.bfttf").write_bytes(b"x")
         (res / "Shell/root").mkdir(parents=True); (res / "Shell/manifest.json").write_text("{}")
         self.c.r.update(resources=str(res), gameId="0100000000000000", engineBundle=str(ROOT))
@@ -32,6 +33,7 @@ class PackagedNoSdk(unittest.TestCase):
     def run_build(self, sdk=AssertionError("发版应用不许查外部 SDK")):
         seen = {}
         def run(args, log=None, env=None, cwd=None, on_line=None):
+            if img_step(args, cwd, env): return   # 出包收尾转单一 IMG（ipa.to_img 经 c.run）：真跑
             if not any("oneclick" in str(a) for a in args):   # 出包收尾组库根 S2Arm.ipa（refresh_library_ipa）：这条不测它，组装失败按设计只警告
                 raise Failure("这条测试不组装容器")
             seen.update(args=[str(a) for a in args], env=env)

@@ -1,6 +1,7 @@
 #import "app_settings.h"
 #import "s2a_l10n.h"
 #import "settings.h"
+#import "play_layout.h"
 // 弱链接[lab]：s2a_fps_cap_reason（runtime/src/fps.c：60 帧降档原因 0 无 / 1 热 / 2 低电量 / 3 A/B 测原帧率段；输入工作台不链原生核，取不到就不写降档副标题）
 int s2a_fps_cap_reason(void) __attribute__((weak_import));
 #import "vpad.h"
@@ -9,7 +10,7 @@ int s2a_fps_cap_reason(void) __attribute__((weak_import));
 #include "s2a_direct_prompt.h"   // 「切换游戏」文案（与 launchers/shared/experience.v1.json prompts 逐字一致；按 App 语言只显示一种，S2APICK）
 #include <math.h>
 
-void s2a_diag_export(void);
+void s2a_diag_upload(void);
 // 弱链接[lab]：s2a_console_mode_set（runtime/src/os.c 接口 v2.15 提供；输入工作台不链原生核，取不到就不切）
 void s2a_console_mode_set(int docked) __attribute__((weak_import));
 BOOL s2a_diag_is_exporting(void);
@@ -64,11 +65,13 @@ static UILabel *textLabel(UIFontTextStyle style) {
 }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     NSInteger g = self.groups[section].integerValue;
+    if (g == 6) return S2AL(@"play.group");
     if (g == 5) return S2APICK(S2A_DPROMPT_SWITCH_GAME_TITLE);
     return @[S2AL(@"cpatch.group.gfx"), S2AL(@"settings.group.controls"), S2AL(@"settings.group.diag"), S2AL(@"settings.group.dev"), S2AL(@"settings.group.saves")][g];
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (self.groups[section].integerValue) {
+        case 6: return S2AL(@"play.footer");
         case 0: return S2AL(@"settings.footer.graphics");
         case 1: return S2AL(@"settings.footer.controls");
         case 2: return S2AL(@"settings.footer.diag");
@@ -98,9 +101,9 @@ static UILabel *textLabel(UIFontTextStyle style) {
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _runtime = g_runtime;
-    _entryGraphics = s2a_ios_graphics_snapshot(NSUserDefaults.standardUserDefaults);
+    _entryGraphics = s2a_ios_graphics_snapshot(s2a_ios_settings_defaults());
     _patchGroups = s2a_cpatch_bundled_groups();
-    _entryPatches = S2ACPatchEnabled(_patchGroups, NSUserDefaults.standardUserDefaults);
+    _entryPatches = S2ACPatchEnabled(_patchGroups, s2a_ios_settings_defaults());
     self.title = S2AL(@"common.settings"); return self;
 }
 - (void)viewDidLoad {
@@ -148,8 +151,12 @@ static UILabel *textLabel(UIFontTextStyle style) {
     BOOL compact = self.view.bounds.size.width < 650 || UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
     NSArray *secondary = _runtime.manageSaves ? @[@1, @4, @2, @3] : @[@1, @2, @3];
     if (_runtime.switchGame) secondary = [@[@5] arrayByAddingObjectsFromArray:secondary];   // 多款容器：「切换游戏」放第二栏最上（找回游戏库的玩家先看到）
-    NSArray *groups = compact ? [@[@0] arrayByAddingObjectsFromArray:secondary] : @[@0];
-    if (![_left.groups isEqual:groups]) { _left.groups = groups; _right.groups = secondary; _right.view.hidden = compact; [self refresh]; }
+    NSArray *groups = compact ? [@[@6, @0] arrayByAddingObjectsFromArray:secondary] : @[@6, @0];
+    if (![_left.groups isEqual:groups]) {
+        _left.groups = groups; _right.groups = secondary; _right.view.hidden = compact;
+        // 转屏切换分组后必须直接失效旧行；refresh 先取 visibleCells 会让 UITableView 用旧 section 查询新数组，越界退出。
+        [_left.tableView reloadData]; [_right.tableView reloadData];
+    }
 }
 - (void)refresh {
     if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self refresh]; }); return; }
@@ -195,7 +202,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 - (UITableViewCell *)sliderCell:(NSDictionary *)option {
     UITableViewCell *cell = [self baseCell:@""]; cell.selectionStyle = UITableViewCellSelectionStyleNone;
     NSArray *values = option[@"values"], *labels = option[@"labels"];
-    NSInteger selected = [values indexOfObject:s2a_ios_graphics_snapshot(NSUserDefaults.standardUserDefaults)[option[@"key"]]];
+    NSInteger selected = [values indexOfObject:s2a_ios_graphics_snapshot(s2a_ios_settings_defaults())[option[@"key"]]];
     UILabel *title = textLabel(UIFontTextStyleBody); title.text = option[@"title"];
     UILabel *value = textLabel(UIFontTextStyleBody); value.text = labels[selected]; value.textColor = self.view.tintColor;
     [value setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
@@ -207,7 +214,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
     [slider addAction:[UIAction actionWithHandler:^(UIAction *action) {
         UISlider *control = (UISlider *)action.sender; NSInteger index = lroundf(control.value); control.value = index;
         value.text = labels[index]; control.accessibilityValue = labels[index];
-        [NSUserDefaults.standardUserDefaults setObject:values[index] forKey:option[@"key"]];
+        [s2a_ios_settings_defaults() setObject:values[index] forKey:option[@"key"]];
     }] forControlEvents:UIControlEventValueChanged];
     [slider.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
     UIStackView *ticks = [UIStackView new]; ticks.distribution = UIStackViewDistributionEqualSpacing;
@@ -221,7 +228,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 - (UITableViewCell *)toggleCell:(NSInteger)index {
     NSString *key = toggleKeys()[index]; UITableViewCell *cell = [self baseCell:toggleTitles()[index]];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    UISwitch *control = [UISwitch new]; id saved = [NSUserDefaults.standardUserDefaults objectForKey:key];
+    UISwitch *control = [UISwitch new]; id saved = [s2a_ios_settings_defaults() objectForKey:key];
     control.on = saved ? [saved boolValue] : (index == 1 || index == 2 || index == 6 || index == 7);
     control.accessibilityLabel = toggleTitles()[index]; control.accessibilityIdentifier = [@"settings." stringByAppendingString:key];
     // 主机模式（#352，维护者 11-09：手机缺省掌机，玩家可自己开）：标题下一行写明代价——更耗电换画质，手机上不建议开
@@ -234,7 +241,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         sub.selectionStyle = UITableViewCellSelectionStyleNone; cell = sub;
     }
     // 本款原生 60 帧（运行时判定后记在 S2AFpsNative60，app.m s2a_ios_fps_native60）：开关改不动帧率，显示原因、置灰（11-02 维护者 丝之歌关了照样 60 帧、以为没生效）
-    if ([key isEqualToString:@"S2AFps60"] && [NSUserDefaults.standardUserDefaults boolForKey:@"S2AFpsNative60"]) {
+    if ([key isEqualToString:@"S2AFps60"] && [s2a_ios_settings_defaults() boolForKey:@"S2AFpsNative60"]) {
         control.on = YES; control.enabled = NO; cell.detailTextLabel.text = S2AL(@"settings.fps.native"); control.accessibilityValue = S2AL(@"settings.fps.native");
         cell.accessoryView = control; return cell; }
     // 包里 60 帧是关的（强信号：逻辑速度红 / 崩溃 / 卡死 / 帧率达不到；11-02 起全引擎默认开，只有强信号才关）：开关显示玩家手动开没开（S2AFps60Manual，缺省关、不跟 S2AFps60 的缺省开），打开时先提示（11-02 维护者 / 维护者 定的文案）；下次启动生效（settings.m）
@@ -243,7 +250,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         control.on = NO; control.enabled = NO; cell.detailTextLabel.text = S2AL(@"settings.widen.blocked"); control.accessibilityValue = cell.detailTextLabel.text;
         cell.accessoryView = control; return cell; }
     if ([key isEqualToString:@"S2AFps60"] && s2a_ios_caps_value("fps60") == 0) {
-        NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+        NSUserDefaults *d = s2a_ios_settings_defaults();
         control.on = [d boolForKey:@"S2AFps60Manual"]; cell.detailTextLabel.text = S2AL(@"settings.fps.knownIssue");
         __weak S2ASettingsController *weakSelf = self;
         [control addAction:[UIAction actionWithHandler:^(UIAction *action) {
@@ -261,16 +268,28 @@ static UILabel *textLabel(UIFontTextStyle style) {
     [control addAction:[UIAction actionWithHandler:^(UIAction *action) {
         BOOL enabled = ((UISwitch *)action.sender).on;
         if ([key isEqualToString:@"S2A.touchHud"]) s2a_vpad_set_touch_hud(enabled);
-        else [NSUserDefaults.standardUserDefaults setBool:enabled forKey:key];
+        else [s2a_ios_settings_defaults() setBool:enabled forKey:key];
+        // 60 帧：开关这一下是玩家明确的选择，记进 S2AFps60Manual（settings.m 只认它算「开」；老版本缺省存着的 S2AFps60=YES 不算）；同一层存储（按款 / 所有游戏）
+        if ([key isEqualToString:@"S2AFps60"]) [s2a_ios_settings_defaults() setBool:enabled forKey:@"S2AFps60Manual"];
     }] forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = control; return cell;
 }
 - (NSInteger)rowsForGroup:(NSInteger)group {
+    if (group == 6) return 2;
     if (group == 4 || group == 5) return 1;
     return group == 0 ? 7 + (_patchGroups.count > 0) : [@[@0, @4, @4, @2][group] integerValue];   // 诊断组第 4 行：诊断局
 }
 - (UITableViewCell *)cellForGroup:(NSInteger)group row:(NSInteger)row {
     __weak S2ASettingsController *weakSelf = self;
+    if (group == 6) {
+        BOOL split=row==0;
+        NSString *key=split?S2APlaySplitKey:S2APlayOrientationKey;
+        NSArray *values=split?@[@"auto",@"on",@"off"]:@[@"auto",@"landscape",@"portrait"];
+        NSInteger selected=split?(NSInteger)S2APlayReadSplit(NSUserDefaults.standardUserDefaults):(NSInteger)S2APlayReadOrientation(NSUserDefaults.standardUserDefaults);
+        return [self dropdown:split?S2AL(@"play.split"):S2AL(@"play.orientation") labels:split?@[S2AL(@"play.auto"),S2AL(@"play.on"),S2AL(@"play.off")]:@[S2AL(@"play.auto"),S2AL(@"play.landscape"),S2AL(@"play.portrait")] selected:selected enabled:^BOOL(NSInteger i){ return YES; } choose:^(NSInteger i){
+            [NSUserDefaults.standardUserDefaults setObject:values[i] forKey:key]; [weakSelf refresh];
+        } identifier:[@"settings." stringByAppendingString:key]];
+    }
     if (group == 5) {   // 多款容器切换游戏：点了弹确认（runtime.switchGame），同「导出诊断包」一样是一行动作
         UITableViewCell *cell = [self baseCell:S2APICK(S2A_DPROMPT_SWITCH_GAME_ACTION)];
         cell.textLabel.textColor = self.view.tintColor; cell.textLabel.numberOfLines = 0;
@@ -293,9 +312,9 @@ static UILabel *textLabel(UIFontTextStyle style) {
         NSDictionary *option = s2a_ios_graphics_options()[row];
         if (row != 2) return [self sliderCell:option];
         NSArray *values = option[@"values"];
-        NSInteger selected = [values indexOfObject:s2a_ios_graphics_snapshot(NSUserDefaults.standardUserDefaults)[option[@"key"]]];
+        NSInteger selected = [values indexOfObject:s2a_ios_graphics_snapshot(s2a_ios_settings_defaults())[option[@"key"]]];
         return [self dropdown:option[@"title"] labels:option[@"labels"] selected:selected enabled:^BOOL(NSInteger index) { return YES; } choose:^(NSInteger index) {
-            [NSUserDefaults.standardUserDefaults setObject:values[index] forKey:option[@"key"]]; [weakSelf refresh];
+            [s2a_ios_settings_defaults() setObject:values[index] forKey:option[@"key"]]; [weakSelf refresh];
         } identifier:@"settings.filter"];
     }
     if (group == 1 && row == 0) {
@@ -304,7 +323,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         cell.userInteractionEnabled = s2a_vpad_has_layouts(); if (!cell.userInteractionEnabled) cell.textLabel.textColor = UIColor.secondaryLabelColor;
         return cell;
     }
-    if (group == 2 && row == 0) { UITableViewCell *cell = [self baseCell:S2AL(@"diag.export")]; cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.export"; return cell; }
+    if (group == 2 && row == 0) { UITableViewCell *cell = [self baseCell:S2AL(@"diag.upload")]; cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.export"; return cell; }
     if (group == 2 && row == 2) return [self toggleCell:8];
     if (group == 2 && row == 3) return [self toggleCell:10];
     return [self toggleCell:group == 1 ? row - 1 : group == 2 ? 3 : row + 4];
@@ -322,7 +341,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
             layouts.navigationItem.rightBarButtonItem = self.navigationItem.rightBarButtonItem;
             [self.navigationController pushViewController:layouts animated:YES];
         }
-    } else if (group == 2 && row == 0) s2a_diag_export();
+    } else if (group == 2 && row == 0) s2a_diag_upload();
     else if (group == 4 && row == 0) _runtime.manageSaves(self.navigationController.topViewController);
     else if (group == 5 && row == 0 && _runtime.switchGame) _runtime.switchGame(self.navigationController.topViewController);
 }
@@ -334,13 +353,13 @@ static UILabel *textLabel(UIFontTextStyle style) {
     // 掌机 / 主机改成运行中直接切（缺口扫描族 2，接口 v2.15）：服务层调 ChangeDockedModeState，按游戏的通知开关发模式消息、点亮分辨率事件；
     //   不再算进「要重启才生效」的画面设置
     BOOL graphicsRestart = NO;
-    NSInteger docked = s2a_ios_settings_docked_change(_entryGraphics, s2a_ios_graphics_snapshot(NSUserDefaults.standardUserDefaults), &graphicsRestart);
+    NSInteger docked = s2a_ios_settings_docked_change(_entryGraphics, s2a_ios_graphics_snapshot(s2a_ios_settings_defaults()), &graphicsRestart);
     if (docked >= 0) {
         if (s2a_console_mode_set) s2a_console_mode_set((int)docked);
-        _entryGraphics = [s2a_ios_graphics_snapshot(NSUserDefaults.standardUserDefaults) copy];
+        _entryGraphics = [s2a_ios_graphics_snapshot(s2a_ios_settings_defaults()) copy];
     }
     BOOL changed = graphicsRestart ||
-        ![_entryPatches isEqual:S2ACPatchEnabled(_patchGroups, NSUserDefaults.standardUserDefaults)];
+        ![_entryPatches isEqual:S2ACPatchEnabled(_patchGroups, s2a_ios_settings_defaults())];
     if (!changed) { [self close]; return; }
     BOOL canRestart = _runtime.restart && _runtime.canRestart && _runtime.canRestart();
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"settings.restart.title")
@@ -385,7 +404,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 @interface S2ASettingsNavigation : UINavigationController
 @end
 @implementation S2ASettingsNavigation
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return s2a_ios_play_orientations(); }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 @end

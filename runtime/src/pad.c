@@ -74,7 +74,8 @@ void s2a_pad_update(s2a_pad_source source, int connected, uint32_t buttons, cons
     }
     if (!connected) memset(p, 0, sizeof *p);
     else {
-        buttons &= 0xffffu; // NS2 Home/Capture/C/GL/GR 不可误当成 Ryujinx 的摇杆方向位。
+        // NS2 Home/Capture/C/GL/GR（16..20）不可误当成 Ryujinx 的摇杆方向位；SL / SR（Ryujinx 24..27，单只 Joy-Con 原始方向时 Mac 前端给，#520 A）放行
+        buttons &= S2A_PAD_KEYS;
         p->latch |= buttons & ~p->buttons;
         p->buttons = buttons; p->connected = 1;
         memcpy(p->axes, axes, sizeof p->axes);
@@ -182,6 +183,21 @@ PAD_EXPORT void s2a_pad_get_latency(s2a_pad_latency *out, int reset) {
     if (reset) memset(&latency, 0, sizeof latency);
     pthread_mutex_unlock(&pad_mu);
 }
+// HID 键盘区原始键态（R5，见 s2a_pad.h）：宿主前端全量替换、服务层每次 HID 提交读一次。
+//   与手柄共用一把锁、一个通知序号：变化才换新并唤醒（notify(0) 不动延迟统计的时间戳），没映射进手柄按键的键也不等心跳
+static uint64_t kb_keys[4]; static uint32_t kb_mods;
+void s2a_kb_update(const uint64_t keys[4], uint32_t modifiers) {
+    lock();
+    if (memcmp(kb_keys, keys, sizeof kb_keys) || kb_mods != modifiers) {
+        memcpy(kb_keys, keys, sizeof kb_keys); kb_mods = modifiers; notify(0);
+    }
+    pthread_mutex_unlock(&pad_mu);
+}
+PAD_EXPORT void s2a_kb_read(uint64_t keys_out[4], uint32_t *modifiers) {
+    lock();
+    memcpy(keys_out, kb_keys, sizeof kb_keys); *modifiers = kb_mods;
+    pthread_mutex_unlock(&pad_mu);
+}
 // 手柄分类只认系统给的类别（productCategory 由苹果驱动按设备类型填，不是设备自报的名字）与手柄类型（宿主判 GCXboxGamepad / GCDualShockGamepad /
 //   GCDualSenseGamepad）；不看 vendorName（审计 P2-213：第三方手柄名字里带「Pro Controller」被认成任天堂）
 static int contains_nocase(const char *s, const char *word) {   // word 为小写 ASCII
@@ -229,4 +245,31 @@ void s2a_pad_stick(float x, float y, int32_t axes[2]) {
     float scale = (fminf(radius, 1) - .08f) / (.92f * radius);
     axes[0] = (int32_t)lroundf(x * scale * 32767);
     axes[1] = (int32_t)lroundf(y * scale * 32767);
+}
+// 本地多手柄槽位计划（Mac macos/front_mac.m 与 iOS ios/controller.m 共用；纯逻辑，不持有对象：单测直接喂身份指针，不碰 GameController）。
+//   prev 是上一轮的槽位身份（max 项，NULL = 空槽），live 是本次在线的手柄（顺序 = 连接顺序）。
+//   slot_of[j] 写第 j 只该占的槽（-1 = 超过 max 只，不参与）；返回占用到的最高槽位 + 1（至少 1：槽 0 总留给键盘 / 鼠标）。
+//   断开的手柄下一轮不在 live 里 → 槽空出来；重连时按「最小空槽」占回去（中间没插别的就回到原槽）。
+int s2a_slot_plan(const void *const *prev, const void *const *live, int count, int max, int *slot_of) {
+    for (int j = 0; j < count; j++) {
+        slot_of[j] = -1;
+        for (int i = 0; i < max; i++) if (prev[i] && prev[i] == live[j]) { slot_of[j] = i; break; }   // 还在原槽
+    }
+    for (int j = 0; j < count; j++) {
+        if (slot_of[j] >= 0) continue;
+        for (int i = 0; i < max; i++) {
+            int taken = 0;
+            for (int k = 0; k < count; k++) if (slot_of[k] == i) { taken = 1; break; }   // 本轮已被别人占
+            if (taken) continue;
+            if (prev[i]) {
+                int still_alive = 0;
+                for (int k = 0; k < count; k++) if (live[k] == prev[i]) { still_alive = 1; break; }
+                if (still_alive) continue;   // 原占用者还在，别抢它的槽
+            }
+            slot_of[j] = i; break;
+        }
+    }
+    int top = 1;
+    for (int j = 0; j < count; j++) if (slot_of[j] + 1 > top) top = slot_of[j] + 1;
+    return top;
 }

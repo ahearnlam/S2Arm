@@ -3,6 +3,8 @@
 
 签名解析在这些合成 ZIP 用例中替身为证书摘要；真实签名由 adb install 校验。
 """
+import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -37,9 +39,10 @@ class _FakeProc:
 class FakeAdb:
     serial = 'test-device'
 
-    def __init__(self, wrong_hash=False, refused=False, stale_start=False):
+    def __init__(self, wrong_hash=False, refused=False, stale_start=False, slow_import=False):
         self.calls = []
         self.wrong_hash, self.refused, self.stale_start = wrong_hash, refused, stale_start
+        self.slow_import = slow_import   # 导入一直没做完：logcat 里没有成功行
         self.started = False
         self.receipt = None   # (contentRoot, artifactSha256)：App 导入成功时在 logcat 打的回执（正式包读不了 current.json）
 
@@ -72,6 +75,8 @@ class FakeAdb:
             accepted = f'Game startup accepted: {TITLE} session 1'
             if self.refused:
                 return f'Game import of import/{self.name} refused: missing resource'
+            if self.slow_import:
+                return ''
             imported = f'Game build artifact updated (same files): test [{TITLE}] from import/{self.name}'
             if self.receipt:
                 imported += f'\nGame import receipt: {TITLE} contentRoot={self.receipt[0]} artifactSha256={self.receipt[1]} from import/{self.name}'
@@ -223,6 +228,29 @@ class DeployTest(unittest.TestCase):
             adb = FakeAdb(); self.deploy(adb, push_timeout=50)
             self.assertEqual(pt.call_args[0][3], 50)
 
+    def test_import_wait_scales_with_resource_size(self):
+        # 期望手算，同推送：17 GB → 17e9 / 30e6 × 2 = 1133.3 → 1134 秒；小包取 --timeout（180）；--timeout 更大时照用
+        for size, timeout, want in ((17_000_000_000, 180, 1134), (1_000_000, 180, 180), (1_000_000, 3600, 3600)):
+            with self.subTest(size=size, timeout=timeout), patch.object(deploy_game, 'tree_bytes', return_value=size), \
+                    patch.object(deploy_game, 'tree_files', return_value=1):
+                self.assertEqual(deploy_game.import_wait_for(self.pack, timeout), want)
+
+    def test_import_timeout_leaves_running_import_alone(self):
+        # 等回执超时：不强停应用、不删 import/ 下正在导入的目录（只清推送用的临时目录），报错里说清楚
+        adb = FakeAdb(slow_import=True)
+        with patch.object(deploy_game, 'import_wait_for', return_value=1), \
+                patch.object(deploy_game.time, 'monotonic', side_effect=[0] * 8 + [5] * 50), \
+                patch.object(deploy_game.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, '等待导入超时.*没有强停应用.*没有删正在导入的目录'):
+                self.deploy(adb)
+        started = max(i for i, x in enumerate(adb.calls) if x[:3] == ('am', 'start', '-W') and 'IMPORT_STAGING' in ' '.join(map(str, x)))
+        after = adb.calls[started + 1:]
+        self.assertFalse(any(x[:2] == ('am', 'force-stop') for x in after))
+        cleans = [x for x in after if x[:2] == ('rm', '-rf')]
+        self.assertEqual(len(cleans), 1)
+        self.assertEqual(len(cleans[0]), 3)
+        self.assertIn('/.deploy-', cleans[0][2])
+
     def test_failed_or_interrupted_push_cleans_own_paths(self):
         for failure in (RuntimeError('push failed'), InterruptedError('cancelled')):
             with self.subTest(failure=failure):
@@ -325,6 +353,126 @@ class DeployTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             game_apk.resources(self.pack, self.apk, self.pack, refresh_existing=True)
         self.assertEqual((self.pack / 'modules/main.patched.bin').read_bytes(), b'code')
+
+    # 出包的资源包向上一版取共用文件（game_apk.py --resources --reuse-from）：
+    # ext4 没有 reflink，每个 release 原先各存一整份 RomFS（17 GiB）；只读文件在两版之间共用同一个 inode。
+
+    def seal_romfs(self):
+        """RomFS 共享存储里的文件是 0444（pack/roots.sh 去写位）；合成包里的 romfs/data 同样封存。"""
+        (self.pack / 'romfs/data').chmod(0o444)
+
+    def test_reuse_links_unchanged_read_only_files_from_the_previous_package(self):
+        self.seal_romfs()
+        first, second = self.root / 'first', self.root / 'second'
+        game_apk.resources(self.pack, self.apk, first)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            game_apk.resources(self.pack, self.apk, second, reuse_from=first)
+        shared, linked = first / 'romfs/data', second / 'romfs/data'
+        self.assertEqual((shared.stat().st_ino, shared.stat().st_nlink), (linked.stat().st_ino, 2))
+        self.assertEqual(linked.read_bytes(), b'synthetic resource')
+        for name in ('exefs/main.npdm', 'ctl/control.nacp'):   # 可写的小文件各自独立
+            self.assertNotEqual((first / name).stat().st_ino, (second / name).stat().st_ino, name)
+            self.assertEqual((second / name).stat().st_nlink, 1, name)
+        for name in ('index.tsv', 'manifest.json', 'game-build-artifact.json'):   # 复用不改任何一个字节
+            self.assertEqual((first / name).read_bytes(), (second / name).read_bytes(), name)
+        self.assertIn('reused 1 of 3 files', printed.getvalue())   # 共用了几个要报出来，不静默
+
+    def test_reuse_copies_when_the_previous_file_changed_after_it_was_indexed(self):
+        self.seal_romfs()
+        first, second = self.root / 'first', self.root / 'second'
+        game_apk.resources(self.pack, self.apk, first)
+        old = first / 'romfs/data'
+        old.chmod(0o644)
+        old.write_bytes(b'tampered resource!')   # 同大小、仍只读，上一版 index 里的哈希没变
+        old.chmod(0o444)
+        game_apk.resources(self.pack, self.apk, second, reuse_from=first)
+        new = second / 'romfs/data'
+        self.assertEqual(new.read_bytes(), b'synthetic resource')   # 新包仍按自己的 index 校验
+        self.assertNotEqual(old.stat().st_ino, new.stat().st_ino)
+        self.assertEqual(old.read_bytes(), b'tampered resource!')   # 上一版原样不动
+        self.assertEqual(old.stat().st_nlink, 1)
+
+    def set_pack_file(self, name, data):
+        """改输入包里的一个文件并重写它的 index / manifest：新一版游戏出包时的样子。"""
+        self.files[name] = data
+        path = self.pack / name
+        path.chmod(0o644)
+        path.write_bytes(data)
+        index = ''.join(f'{n}\t{len(d)}\t{hashlib.sha256(d).hexdigest()}\n' for n, d in sorted(self.files.items())).encode()
+        (self.pack / 'index.tsv').write_bytes(index)
+        (self.pack / 'manifest.json').write_text(json.dumps(dict(version=2, index_sha256=hashlib.sha256(index).hexdigest())))
+
+    def test_reuse_skips_a_file_whose_content_changed_in_the_new_package(self):
+        self.seal_romfs()
+        first, second = self.root / 'first', self.root / 'second'
+        game_apk.resources(self.pack, self.apk, first)
+        self.set_pack_file('romfs/data', b'updated resource!!')   # 同大小；新一版游戏改了这个文件
+        self.seal_romfs()
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            game_apk.resources(self.pack, self.apk, second, reuse_from=first)
+        old, new = first / 'romfs/data', second / 'romfs/data'
+        self.assertEqual(new.read_bytes(), b'updated resource!!')
+        self.assertEqual(old.read_bytes(), b'synthetic resource')
+        self.assertNotEqual(old.stat().st_ino, new.stat().st_ino)
+        self.assertEqual((old.stat().st_nlink, new.stat().st_nlink), (1, 1))
+        self.assertIn('reused 0 of 3 files', printed.getvalue())
+
+    def test_reuse_never_shares_a_writable_file(self):
+        first, second = self.root / 'first', self.root / 'second'
+        game_apk.resources(self.pack, self.apk, first)   # romfs/data 是 0644
+        game_apk.resources(self.pack, self.apk, second, reuse_from=first)
+        a, b = first / 'romfs/data', second / 'romfs/data'
+        self.assertNotEqual(a.stat().st_ino, b.stat().st_ino)
+        self.assertEqual((a.stat().st_nlink, b.stat().st_nlink), (1, 1))
+
+    def test_reuse_falls_back_to_a_copy_when_the_link_is_refused(self):
+        self.seal_romfs()
+        first = self.root / 'first'
+        game_apk.resources(self.pack, self.apk, first)
+        for code in (errno.EXDEV, errno.EPERM, errno.EMLINK):   # 跨盘 / 文件系统或内核不许 / 链接数到顶
+            with self.subTest(errno=errno.errorcode[code]):
+                out = self.root / f'second-{code}'
+                with patch.object(game_apk.os, 'link', side_effect=OSError(code, 'link refused')):
+                    game_apk.resources(self.pack, self.apk, out, reuse_from=first)
+                self.assertEqual((out / 'romfs/data').read_bytes(), b'synthetic resource')
+                self.assertEqual((out / 'romfs/data').stat().st_nlink, 1)
+
+    def test_reuse_from_an_unusable_package_is_ignored_with_a_note(self):
+        self.seal_romfs()
+        broken = self.root / 'broken'
+        broken.mkdir()
+        (broken / 'manifest.json').write_text('not json')
+        for label, previous in (('missing', self.root / 'nope'), ('broken', broken)):
+            with self.subTest(label):
+                out, printed = self.root / f'out-{label}', io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    game_apk.resources(self.pack, self.apk, out, reuse_from=previous)
+                self.assertIn('not reusing', printed.getvalue())
+                self.assertEqual((out / 'romfs/data').read_bytes(), b'synthetic resource')
+                self.assertEqual((out / 'romfs/data').stat().st_nlink, 1)
+
+    def test_reuse_from_the_package_being_replaced_is_ignored(self):
+        self.seal_romfs()
+        out, printed = self.root / 'out', io.StringIO()
+        game_apk.resources(self.pack, self.apk, out)
+        with contextlib.redirect_stdout(printed):
+            game_apk.resources(self.pack, self.apk, out, reuse_from=out)   # 原地替换：上一版随 rmtree 一起没了
+        self.assertIn('not reusing', printed.getvalue())
+        self.assertEqual((out / 'romfs/data').read_bytes(), b'synthetic resource')
+
+    def test_command_line_takes_reuse_from_before_the_positional_arguments(self):
+        self.seal_romfs()
+        first, second = self.root / 'first', self.root / 'second'
+        game_apk.resources(self.pack, self.apk, first)
+        argv = ['game_apk.py', '--resources', '--reuse-from', str(first), str(self.pack), str(self.apk), str(second)]
+        with patch.object(sys, 'argv', argv), contextlib.redirect_stdout(io.StringIO()):
+            game_apk.main()
+        self.assertEqual((first / 'romfs/data').stat().st_ino, (second / 'romfs/data').stat().st_ino)
+        missing = ['game_apk.py', '--resources', str(self.pack), str(self.apk), str(self.root / 'third'), '--reuse-from']
+        with patch.object(sys, 'argv', missing), self.assertRaises(SystemExit):   # 缺目录：报用法，不当位置参数吞掉
+            game_apk.main()
 
 
 if __name__ == '__main__':

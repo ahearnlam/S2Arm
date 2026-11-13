@@ -6,6 +6,7 @@
 // 弱链接[host]：nvn_pso_harvest（直连层 graphics/nvn 提供；链接行按这行放行未定义，runtime/build.mk 自动收）
 // 弱链接[host,ios,nvntest,touchtest]：s2a_autoplay_on（自动玩家（C#）提供；链接行按这行放行未定义，runtime/build.mk 自动收）
 // 弱链接[host,ios,nvntest,touchtest]：s2a_autoplay_wait_s（自动玩家累计等模型秒数；同上）
+#include "s2a_selfcheck_page.h"   // 自检「仍要启动」按钮文案
 #include "native.h"
 #include "dev_facilities.h"
 #include "guest_main.h"
@@ -47,7 +48,8 @@ extern void S2A_Init(void) __attribute__((weak_import));
 extern int S2A_InitSession(void) __attribute__((weak_import));
 extern int s2a_autoplay_on(void) __attribute__((weak_import));
 extern double s2a_autoplay_wait_s(void) __attribute__((weak_import));   // 自动玩家累计等视觉模型的秒数：局时顺延用（S2A_RUN_EXTEND_MAX）   // 测试层通用自动玩家（S2A_CS=1 时链进来）：开不开见 tests/autoplay/ap_default.h
-__attribute__((weak)) void s2a_front_run(void (*start_host)(void)) { (void)start_host; }   // 前端占主线程时覆盖；iOS 预热传延后启动宿主的续体，其余传 NULL
+__attribute__((weak)) void s2a_front_run(void (*start_host)(void)) { (void)start_host; }
+__attribute__((weak)) int s2a_front_is_running(void) { return 0; }   // iOS 壳 app.m 覆盖：界面已在主线程跑着（s2a_front_run 会立即返回）   // 前端占主线程时覆盖；iOS 预热传延后启动宿主的续体，其余传 NULL
 #include "s2a_lan_discovery.h"
 // Hosts without a discovery implementation leave LAN unavailable explicitly.
 __attribute__((weak)) const s2a_lan_discovery_v1 *s2a_ldn_lan_provider(void) { return NULL; }
@@ -137,6 +139,7 @@ static void load_session_modules(void *unused) {
     (void)unused;
     switch_program_modules();
 #if defined(__APPLE__)
+    { void s2a_test_ballast_commit(void); s2a_test_ballast_commit(); }   // 测试压舱（S2A_TEST_BALLAST_MB，vawin.c）：布局排完、装模块前才真占
     { int s2a_guest_file_retry(void); s2a_guest_file_retry(); }   // 起局时空间不够没接上文件后备的，解包完、装模块前再试一次（vawin.c，#483）
 #endif
     load_modules(g_module_dir, (const char **)g_module_names, g_module_count);
@@ -180,7 +183,7 @@ static int start_guest_thread(void) {
 
 // 初启失败的唯一出口。契约（审计 #1534 P1-4，见 runtime/include/s2a_init_fail.h）：初启失败 = 本进程终局——先发布终局（会话 EXITING、门表终局 park），
 //   不回收半建资源、不在同一进程再起第二局（托管层 / 图形装配 / session.c 三层都按此设计，生命周期代码不为失败改）。
-//   之后只分「怎么告诉人」：iOS 人手局停在提示页（按错误码的玩家话术 +「复制诊断」+ 划掉重开；内部摘要只进诊断），Mac 与自动化局照旧失败退出码 1。
+//   之后只分「怎么告诉人」：iOS 人手局停在提示页（按错误码的玩家话术 +「上传给开发者」+ 划掉重开；内部摘要只进诊断），Mac 与自动化局照旧失败退出码 1。
 //   code = S2A_INIT_FAIL_E_*（调用点一处一个，码表在 s2a_init_fail.h）
 static void failed_session(int code) {
     const char *why = s2a_init_fail_summary(code), *cid = s2a_init_fail_code_id(code);
@@ -192,7 +195,7 @@ static void failed_session(int code) {
         snprintf(lp, sizeof lp, "%s/host.log", s2a_launch_ctx_get()->log_dir);   // main 开头已核上下文可用
         s2a_init_fail_diag_file(diag, sizeof diag, code, s2a_main_build_id(), DMSH_CHAIN, lp);
         s2a_init_fail_screen(body, sizeof body, code);
-        LOG("初启失败诊断（「复制诊断」放进剪贴板的同一份）：\n%s", diag);
+        LOG("初启失败诊断（随「上传给开发者」的诊断包带走）：\n%s", diag);
         s2a_logcon_flush();
         void s2a_ios_init_failed(const char *body, const char *diag); s2a_ios_init_failed(body, diag);
         s2a_front_run(NULL);   // iOS 一律延后启动，UIKit 已在主线程：立即返回；宿主线程停在这里直到玩家划掉
@@ -285,7 +288,11 @@ static int host_run(int argc, char **argv) {
       if (!s2a_selfcheck()) {
 #if TARGET_OS_IPHONE
           const char *t, *b; s2a_selfcheck_page(&t, &b);   // 细节（地址上限、内存上限）已在 host.log「【红】自检不过」，随诊断包带走
-          s2a_ios_show_notice("exclamationmark.triangle.fill", t, b, 0, 0, 1); s2a_front_run(NULL); for (;;) pause();   // 画面上给提示，不起游戏
+          int s2a_selfcheck_can_continue(void); int s2a_ios_ask_continue(const char *, const char *, const char *, const char *);
+          // 只差内存上限：提示页多一个「仍要启动」，玩家点了就照常起局（v0.3.1 装机原则）；物理上起不来的照旧只给提示、不起游戏
+          if (s2a_selfcheck_can_continue() && s2a_ios_ask_continue("exclamationmark.triangle.fill", t, b, S2A_SELFCHECK_GO))
+              LOG("自检：只差内存上限，玩家点了「仍要启动」，照常起局（大游戏可能被系统结束）");
+          else { s2a_ios_show_notice("exclamationmark.triangle.fill", t, b, 0, 0, 1); s2a_front_run(NULL); for (;;) pause(); }   // 画面上给提示，不起游戏
 #endif
       } }
 #if TARGET_OS_IPHONE
@@ -296,7 +303,8 @@ static int host_run(int argc, char **argv) {
     //   早于图形模式落定与服务层初始化（审计 P1-106：原先要等下次打开才生效）
     //   查不查、查哪个文档根由 s2a_import_docs_pick 按启动上下文定（多款容器 = 本款 Documents/games/<游戏号>；11-07 原先按「S2A_GAME_DATA 没设」判，容器选游戏总会设它 → 漏查）
     { int s2a_import_gate(void); int s2a_ios_reload_graphics_settings(void);
-      if (s2a_import_gate() && s2a_ios_reload_graphics_settings()) die("【红】资源导入后重读画面设置 / 随包补丁失败（见上一行【红】）"); }
+      // v0.3.1（认不出的直接做）：重读失败最多是这局画面设置 / 随包补丁按缺省走（下次打开照常读），不该让 App 直接退出——记一笔照常起局
+      if (s2a_import_gate() && s2a_ios_reload_graphics_settings()) LOG("【黄】资源导入后重读画面设置 / 随包补丁失败（见上一行），这局按缺省画面设置起，下次打开照常读"); }
     // 模块目录先定下（启动上下文 main 开头已冻结）：放行之后谁先调 s2a_gfx_mode() 谁就落定图形模式与程序号（gfxmode.c decide 读 <模块目录>/main.npdm）。
     //   原先 iOS 要到装模块（loader.c load_modules）才设目录，放行与装载之间若有人先问——上次没正常收尾时开局弹诊断提示，关掉后 App 重新激活，
     //   恢复回调 s2a_direct_suspend 问图形模式——程序号读成 0 并锁死整局：wire/<程序号> 的现编缓存、跑局知识落到 wire/0000000000000000，
@@ -381,7 +389,7 @@ static int host_run(int argc, char **argv) {
     else if (S2A_Init) die("【红】C# 服务层只导出了 S2A_Init、没有 S2A_InitSession：初始化失败报不出来，不起游戏（宿主与服务层版本不配套，重新出包）");
     else LOG("S2A_Init：没链 C#（原生层单独构建），进 C# 的系统调用一律报红");
     // 只有直连（11-07 拆通用模式）：包里没有本宿主口径的直连库（没导完、旧版本出的包、设备跑不了直连）就停在这里报「游戏文件缺失」，
-    //   iOS 提示页带「复制诊断」反馈入口；原先这里静默退成通用模式（11-02 / 11-05 普查两款这样起局，一款崩、一款卡死，直连问题藏在后面）
+    //   iOS 提示页带「上传给开发者」反馈入口；原先这里静默退成通用模式（11-02 / 11-05 普查两款这样起局，一款崩、一款卡死，直连问题藏在后面）
     if (s2a_gfx_mode() != S2A_GFX_DIRECT) failed_session(S2A_INIT_FAIL_E_DIRECT_LIB);
     s2a_boot_mark("S2A_Init 返回（C# 运行时 + 服务登记）");
     s2a_window_probe("C# 初始化后");

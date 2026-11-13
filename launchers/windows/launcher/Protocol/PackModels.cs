@@ -94,6 +94,9 @@ public sealed class MilestoneTrack
     public IReadOnlyDictionary<string, double> Started => started;
     /// <summary>Real done / total of the current step (progress events); null without a real count.</summary>
     public double? Fraction { get; private set; }
+    /// <summary>整单进度（作业层每条事件的 overall，0–1，只增不减、成功才到 1；pack/jobs/overall.py）。大百分比与分段条只显示它，
+    /// 不再按当前计数器自己拼（11-11 维护者：「百分比反复到 91% 又跳回 40%」）。没有的作业为 null，照旧</summary>
+    public double? Overall { get; private set; }
     public string Message { get; private set; } = "";
 
     public void Ingest(JsonElement e, double now)
@@ -111,6 +114,8 @@ public sealed class MilestoneTrack
             Current = id; Fraction = null;
             started.TryAdd(id, now);
         }
+        if (e.TryGetProperty("overall", out var o) && o.ValueKind == JsonValueKind.Number)
+            Overall = Math.Max(Overall ?? 0, Math.Min(1, o.GetDouble()));
         if (type is "stage" or "message" or "cache") Fraction = null;   // 新的一句说明 = 上一个百分比不再代表当前在做的事（社区贡献者补丁 #8）
         if (type == "progress" && e.TryGetProperty("totalUnits", out var total) && total.ValueKind == JsonValueKind.Number && total.GetDouble() > 0 &&
             e.TryGetProperty("doneUnits", out var done) && done.ValueKind == JsonValueKind.Number)
@@ -173,20 +178,16 @@ public sealed record InstallReadiness(IReadOnlyList<InstallItem> Items, bool Rea
             var items = new List<InstallItem>();
             foreach (var i in result.GetProperty("items").EnumerateArray())
             {
+                // 剃刀 W7：不认识的动作、不安全的链接只忽略这一项（这一项不给按钮 / 链接），不再整份清单作废——
+                //   原先后端加一个新动作，前端就当「这次没查到手机状态」，玩家只能盲装
                 Uri? url = null;
-                if (i.TryGetProperty("url", out var u) && u.ValueKind != JsonValueKind.Null)
-                {
-                    if (u.ValueKind != JsonValueKind.String || !Uri.TryCreate(u.GetString(), UriKind.Absolute, out url) ||
-                        url.Scheme != Uri.UriSchemeHttps || url.Host.Length == 0 || url.UserInfo.Length != 0)
-                        throw new LibraryProtocolException("Invalid official download URL.");
-                }
+                if (i.TryGetProperty("url", out var u) && u.ValueKind == JsonValueKind.String &&
+                    Uri.TryCreate(u.GetString(), UriKind.Absolute, out var parsed) &&
+                    parsed.Scheme == Uri.UriSchemeHttps && parsed.Host.Length != 0 && parsed.UserInfo.Length == 0)
+                    url = parsed;
                 string? action = null;
-                if (i.TryGetProperty("action", out var a) && a.ValueKind != JsonValueKind.Null)
-                {
-                    if (a.ValueKind != JsonValueKind.String || !InstallItem.Actions.Contains(a.GetString()!))
-                        throw new LibraryProtocolException("Unknown checklist action.");
+                if (i.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.String && InstallItem.Actions.Contains(a.GetString()!))
                     action = a.GetString();
-                }
                 items.Add(new(LibraryJobResult.Text(i, "id"), i.GetProperty("ok").GetBoolean(),
                     i.TryGetProperty("waiting", out var w) && w.GetBoolean(), LibraryJobResult.Text(i, "title"),
                     LibraryJobResult.Text(i, "detail", true), i.TryGetProperty("who", out var who) ? who.GetString() ?? "" : "", url, action));

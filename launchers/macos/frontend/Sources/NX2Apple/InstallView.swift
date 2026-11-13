@@ -37,12 +37,8 @@ struct InstallView: View {
             }
             if model.installDone == gameID { doneContent } else if let job = installJob {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(loc.backend(job.stage.isEmpty ? job.message : job.stage)).font(.manrope(16, .bold)).lineLimit(1)
-                    InlineProgress(session: job)
-                    // 钥匙串授权只在申请描述文件 / 签名这两步（pack/jobs/install.py sign_and_install 第 3、4 步）会弹；推资源包时还挂着它会让玩家以为在等授权（#266）
-                    if job.kind == .install, [3, 4].contains(job.progress.index ?? 0) {
-                        Text(text("install.keychain")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
+                    // 手机作业三态统一（PhoneJobPanel）：钥匙串提示只在后端标了 keychainPrompt 的阶段挂（#266），在组件里
+                    ScrollView { PhoneJobPanel(model: model, session: job).frame(maxWidth: .infinity, alignment: .leading) }
                     // 装机在后台照跑：关掉弹层回游戏库，顶部胶囊「正在装到 iPhone · 查看进度」能回来（#308，Mac 与 Windows 同一套）
                     HStack { Spacer(); Button(text("install.background")) { dismiss() }.buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("install.background") }
                 }
@@ -50,17 +46,20 @@ struct InstallView: View {
             } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    if let failed = model.inlineFailure, failed.kind == .install {
-                        Text(loc.backend(failed.message)).font(.manrope(13)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
-                        CopyReportButton(model: model, gameID: gameID, operations: ["install", "installRemove", "installRestore"], fallback: failed.message)
+                    // 上一次手机作业没成：同一个结局组件（原因 + 下一步 + 复制错误摘要 + 详细过程），下面照旧是清单，改好了直接再点
+                    if let failed = model.inlineFailure, [.install, .installRemove, .installRestore].contains(failed.kind),
+                       let last = model.lastPhoneSession, last.kind == failed.kind {
+                        PhoneJobPanel(model: model, session: last)
                     }
+                    // 装到哪台：和出包页同一行；选过的那台不在线时如实说、让玩家改选（清单只看这台、每次现查）
+                    TargetDeviceRow(model: model).onChange(of: model.installDeviceID) { _ in model.checkInstall(gameID) }
                     if let r = model.installReadiness {
                         CardGroup(loc.t("s2arm.install.checklist"), footnote: footnote(r)) {
                             ForEach(r.items) { item in
                                 CardRow(loc.backend(item.title), detail: loc.backend(item.detail), dot: dot(item)) {
                                     if !item.ok, item.id == "package", let game {
                                         Button(loc.t("s2arm.action.ipa")) { dismiss(); model.exportFor = game.id }
-                                            .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                                            .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy).busyHint(model)
                                     }
                                     if !item.ok, item.id == "appleId" {
                                         // 团队号手填 / 引导项目收进环境检查「装到 iPhone 的方式」（v0.3.0）：这里只给一个去设置
@@ -86,7 +85,7 @@ struct InstallView: View {
                         // 只换宿主后（手机上的 S2Arm 换了新版运行层）新版不好用：装回上一版
                         Button(text("install.restore")) { showRestoreConfirm = true }
                             .buttonStyle(LauncherSecondaryButtonStyle())
-                            .disabled(model.busy)
+                            .disabled(model.busy).busyHint(model)
                             .confirmationDialog(text("install.restore_title"), isPresented: $showRestoreConfirm, titleVisibility: .visible) {
                                 Button(text("install.restore_confirm")) { model.restorePhone(game) }
                                 Button(loc.t("launch.done"), role: .cancel) {}
@@ -97,7 +96,7 @@ struct InstallView: View {
                     if let game {
                         Button(text("install.remove")) { showRemoveConfirm = true }
                             .buttonStyle(LauncherSecondaryButtonStyle())
-                            .disabled(model.busy)
+                            .disabled(model.busy).busyHint(model)
                             .confirmationDialog(text("install.remove_title"), isPresented: $showRemoveConfirm, titleVisibility: .visible) {
                                 Button(text("install.remove_confirm"), role: .destructive) { model.removeFromPhone(game) }
                                 Button(loc.t("launch.done"), role: .cancel) {}
@@ -108,12 +107,7 @@ struct InstallView: View {
                 }
                 .padding(.horizontal, 30).padding(.bottom, 24)
             }
-            .alert(text("install.drop_title"), isPresented: Binding(get: { model.dropConfirm != nil }, set: { if !$0 { model.dropConfirm = nil } }), presenting: model.dropConfirm) { d in
-                Button(text("install.drop_confirm"), role: .destructive) { model.confirmDrop(d) }
-                Button(loc.t("launch.done"), role: .cancel) {}
-            } message: { d in
-                Text(loc.backend(d.message))
-            }
+            // 认得出的风险（会挤掉别处装的游戏 / 存档没能备份……）在结局页里问（PhoneJobPanel），不弹框
             }
             Divider().opacity(0.3)
             if model.installDone == gameID {
@@ -139,18 +133,25 @@ struct InstallView: View {
                         .background(LauncherPalette.cream, in: Capsule())
                 }
                 .buttonStyle(.plain).keyboardShortcut(.defaultAction)
-                .disabled(!model.installAllowed(gameID) || model.busy)
-                .opacity(model.installAllowed(gameID) && !model.busy ? 1 : 0.45)
+                // 不按清单置灰（维护者 11-11：玩家主动点装机不许前端挡）：清单可能是旧的（在外面登录好、插好线回来仍灰），
+                // 真做不下去的（没出 iPhone 版、没连设备、签名失败）作业层开头自己判、回真实原因；只在有作业在跑时置灰
+                .disabled(model.busy)
+                .opacity(model.busy ? 0.45 : 1)
+                .busyHint(model)
             }
             .padding(.horizontal, 30).padding(.vertical, 16)
             }
         }
         .task {
-            // 开着就每几秒问一次（旧启动器装机页同此）；关掉页面 Task 自动取消
+            // 开着、且启动器在前台时每几秒问一次（玩家插手机 / 点信任后界面自己变过来）；切到别的程序就不问（剃刀 M5：原先后台也一直起作业），
+            //   切回来立刻问一次（下面 didBecomeActive）；关掉页面 Task 自动取消
             while !Task.isCancelled {
-                if installJob == nil, model.installDone != gameID { model.checkInstall(gameID) }
+                if NSApp.isActive, installJob == nil, model.installDone != gameID { model.checkInstall(gameID) }
                 try? await Task.sleep(nanoseconds: Self.pollSeconds * 1_000_000_000)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            if installJob == nil, model.installDone != gameID { model.checkInstall(gameID) }
         }
         .onAppear { if model.phoneResult?.gameID == gameID { model.phoneResult = nil } }   // 回来看过结果，顶部胶囊收起
         .frame(width: 600, height: 520)
@@ -163,10 +164,34 @@ struct InstallView: View {
     private var installJob: JobSession? { (model.session?.kind == .install || model.session?.kind == .installRemove || model.session?.kind == .installRestore) ? model.session : nil }
     private func text(_ id: String) -> String { BackendText.launcherText(id, language: loc.lang == .zh ? "zh-Hans" : "en") }
 
-    private var doneContent: some View {
+    @ViewBuilder private var doneContent: some View {
+        if let last = model.lastPhoneSession, last.phase == .finished(.completed), last.gameID == gameID {
+            ScrollView {
+                PhoneJobPanel(model: model, session: last, notes: doneNotes).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 30).frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else { legacyDone }
+    }
+
+    /// 装好以后的附加提示：只传到手机、要打开 S2Arm 才装完 / 第一次打开前信任开发者 / 免费 Apple ID 7 天到期
+    private var doneNotes: [String] {
+        guard model.lastPhoneSession?.kind == .install, (model.phoneOutcome?.exportFolder ?? "").isEmpty else { return [] }   // 导出的说明在成功页自己那几行
+        var n: [String] = []
+        if model.installOpenToFinish { n.append(text("install.done.open")) }
+        n.append(text("install.done.trust"))
+        if game?.iphoneFree == true { n.append(text("install.done.free")) }
+        return n
+    }
+
+    private var legacyDone: some View {
         VStack(spacing: 16) {
             SuccessSeal()
-            Text(text("install.done.title")).font(.manrope(30, .heavy)).tracking(-0.8)
+            // 写实际装上的那台（装机结果的 deviceKind / deviceName），不写死 iPhone
+            Text(text("install.done.title").replacingOccurrences(of: "{0}", with: model.installedTo.isEmpty ? "iPhone / iPad" : model.installedTo))
+                .font(.manrope(30, .heavy)).tracking(-0.8).multilineTextAlignment(.center).accessibilityIdentifier("install.done.title")
+            if model.installOpenToFinish {
+                Text(text("install.done.open")).font(.manrope(15, .semibold)).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            }
             Text(text("install.done.trust")).font(.manrope(14)).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             if game?.iphoneFree == true {
                 Text(text("install.done.free")).font(.manrope(13)).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)

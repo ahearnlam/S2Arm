@@ -41,7 +41,7 @@ MECHANISM = ('pack/stage_keyfiles.sh', 'tools/stage_deps.py',
 ROOT_HELPERS = ('pack/resource_input_key.py', 'tools/direct_shards.py', 'tools/clonedir.py')
 ORCH = ('pack/orch/__init__.py', 'pack/orch/roots.py', 'pack/orch/stages.py', 'pack/orch/refresh.py')
 REWRITE_OUTPUTS = tuple(('*.code_patch.tsv *.patched.bin *.fixups.tsv *.gates.tsv '
-    '*.sites.tsv *.gaps.tsv *.npdm *.widen.tsv widen_sites.tsv cpatch.tsv cpatch_rows.tsv '
+    'degrade.rewrite.tsv *.sites.tsv *.gaps.tsv *.npdm *.widen.tsv widen_sites.tsv cpatch.tsv cpatch_rows.tsv '
     'cpatch_plan.log cpatch_excluded.tsv widen_enable*.tsv widen_verified.tsv fps.tsv '
     'nro_modules.tsv nro_to_nso.log widen_full*.tsv addr_need.tsv addr_need.log nro_exports.tsv '
     'nro_exports.log gpu_drivers.tsv widen_scan.log fps_generic.log *.rewrite.log '
@@ -49,6 +49,11 @@ REWRITE_OUTPUTS = tuple(('*.code_patch.tsv *.patched.bin *.fixups.tsv *.gates.ts
 
 
 LAYOUT_ZSTD = '1.5.7'   # 布局阶段要的 zstd 命令行钉版（Mac Homebrew 同版）；pack/orch/oneclick_win.py --check 起单前按它核
+
+def _title_id(directory):
+    """目录里 unpack.tsv 记的程序号（大写）；读不出 → ''"""
+    return next((line.split('\t', 1)[1].strip().upper() for line in read(Path(directory) / 'unpack.tsv').splitlines() if line.startswith('title_id\t')), '')
+
 
 class StageError(RuntimeError):
     def __init__(self, message, code=1):
@@ -427,7 +432,7 @@ class Stages:
         text(w / 'direct_profile.json', json.dumps(data, ensure_ascii=False, sort_keys=True) + '\n')
         deps.python('pack/direct_profile_stage.py', w, '--selected')
 
-    def _rewrite(self, tx, deps, plan, executable):
+    def _rewrite(self, tx, deps, plan, executable, game):
         w, env = tx.path, dict(deps.env)
         for pattern in REWRITE_OUTPUTS:
             for path in w.glob(pattern):
@@ -458,10 +463,14 @@ class Stages:
         if jobs < 1:
             raise StageError('无法确定正数并发度')
 
-        def rewrite_all(allow_gap=False):
+        # 退出码 3 = 有缺口、产物照出：降级继续（缺口点保持原指令，汇总进 degrade.rewrite.tsv），与 pack/stage_rewrite.sh 同口径（#893：原先这里只认 0，
+        #   Windows 上有缺口的款整包失败，Mac 同一款照出）。退出码 3 却没出产物 = 改写空间超过上限，物理上做不了，照旧停
+        def rewrite_all():
             def one(p):
                 _, code = run([executable, p, w, p.name, w / 'widen_sites.tsv'],
-                              env=env, log=w / f'{p.name}.rewrite.log', allowed=(0, 3) if allow_gap else (0,))
+                              env=env, log=w / f'{p.name}.rewrite.log', allowed=(0, 3))
+                if code == 3 and not (w / f'{p.name}.patched.bin').is_file():
+                    raise StageError(f'改写 {p.name}：这款有程序代码需要的改写空间超过了能放下的上限，出不了包（{p.name}.rewrite.log）', 3)
                 return p.name if code == 3 else ''
             with ThreadPoolExecutor(max_workers=jobs) as pool:
                 return [name for name in pool.map(one, modules) if name]
@@ -469,20 +478,18 @@ class Stages:
         rewrite_all()
         if plan['community']:
             text(w / 'cpatch_excluded.tsv', '')
-            gaps = []
             for _ in range(6):
                 deps.python('pack/cpatch.py', 'plan', w, plan['selection'].removeprefix('none'), *plan['dirs'], log=w / 'cpatch_plan.log')
                 if not (w / 'cpatch_rows.tsv').is_file() or not (w / 'cpatch_rows.tsv').stat().st_size:
                     break
                 env['S2A_CPATCH_TSV'] = str(w / 'cpatch_rows.tsv')
-                gaps = rewrite_all(True)
+                rewrite_all()
                 _, rc = deps.python('pack/cpatch.py', 'prune', w, log=w / 'cpatch_prune.log', allowed=(0, 10))
                 if rc != 10:
-                    if gaps:
-                        raise StageError('社区补丁以外的改写缺口：' + ','.join(gaps), 3)
-                    break
-            else:
-                raise StageError('社区补丁六轮仍有缺口', 3)
+                    break   # 剩下的是补丁以外的缺口：降级继续（同 stage_rewrite.sh）
+        said, _ = deps.python('pack/rewrite_degrade.py', w, game)
+        if said.strip():
+            print(said.strip(), file=sys.stderr)
         copy_file(w / 'exefs/main.npdm', w / 'main.npdm')
         copy_file(plan['addr'], w / 'addr_need.tsv')
         copy_file(plan['addr_log'], w / 'addr_need.log')
@@ -544,7 +551,7 @@ class Stages:
             tx = self.roots.begin(game, self.roots.tag(game, tag), env=deps.env)
             try:
                 if stage == 'rewrite':
-                    self._rewrite(tx, deps, plan, executable)
+                    self._rewrite(tx, deps, plan, executable, game)
                 elif stage == 'romfsidx':
                     self._romfsidx(tx, deps)
                 else:
@@ -731,10 +738,16 @@ class Stages:
         current = self._light_current(game)
         if not (current / 'romfs').is_dir():
             return self._result('uilayout', start, current, None, skipped=True)
+        # 原版：seed.txt 记的解包目录 romfs——它在、而且是这一款的（unpack.tsv 程序号对得上）才用（旧格式版本就地改过 RomFS 时靠它还原，见下面 restore）；
+        #   否则用现行产物根的 romfs：本阶段只写覆盖层，Windows 别的阶段也不改 romfs，它一直联到播种时那份不可变的身份。
+        #   解包目录不可靠：从原件解时 romfs 被挪进共享存储、原处链接在播种那一版修剪后悬空；玩家实报还指到过别的款的解包目录，
+        #   原先照用，拿别的款的布局文件生成覆盖叠到这一款上（v0.3.0 Windows）
         source = next((line[4:] for line in read(current / 'seed.txt').splitlines() if line.startswith('src=')), '')
-        original = Path(source) / 'romfs'
-        if not source or not original.is_dir():
-            raise StageError('布局找不到seed.txt记的原版romfs')
+        original = Path(source) / 'romfs' if source else None
+        theirs, ours = _title_id(Path(source)) if source else '', _title_id(current)
+        if original is None or not original.is_dir() or (theirs and ours and theirs != ours):
+            print(f'【黄】布局原版改用现行产物根的 RomFS（seed.txt 记的解包目录{"是另一款 " + theirs + " 的" if theirs and ours and theirs != ours else "不在或已失效"}）', file=sys.stderr)
+            original = current / 'romfs'
         plain_entries(original)
         generator = REPO / 'graphics/widen/scan/ui_lyt.py'
         # Current repository import closure, including both on-demand C codecs.

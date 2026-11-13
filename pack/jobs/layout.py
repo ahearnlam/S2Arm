@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import re
+import sys
 import shutil
 import time
 from pathlib import Path
@@ -41,6 +42,10 @@ def folder_name(english, gid, taken=()):
         name = (name[:NAME_MAX - 7].strip(" .") + " [" + gid[-4:] + "]")
         if name.lower() in used:
             name = gid
+            # #765：游戏号本身也被占时原先就回游戏号，接着 mkdir 撞 File exists；加序号找一个空名（游戏号 + 「 (2)」「 (3)」…）
+            n = 2
+            while name.lower() in used:
+                name = f"{gid} ({n})"; n += 1
     return name
 
 
@@ -66,20 +71,41 @@ def _index_path(c):
 
 def load_index(c):
     idx = getattr(c, "_layout_idx", None)
-    if idx is None:
+    fresh = idx is None
+    if fresh:
         idx = read(_index_path(c), {}) or {}
         idx.setdefault("schema", 1); idx.setdefault("locations", []); idx.setdefault("games", {})
         c._layout_idx = idx
     want = default_id(c)   # 默认位置总在表里、排第一；它的号以库里的标识文件为准（迁移写标识后，旧的 "default" 引用跟着改）
     old = next((l for l in idx["locations"] if l.get("path") == str(c.library)), None)
-    if old is None or old.get("id") != want:
+    changed = old is None or old.get("id") != want
+    if changed:
         if old is not None:
             idx["locations"].remove(old)
             for e in idx["games"].values():
                 if e.get("location") == old.get("id"):
                     e["location"] = want
-        idx["locations"].insert(0, dict(id=want, path=str(c.library)))
+        idx["locations"].insert(0, dict(id=want, path=str(c.library), library=True))
+    elif not old.get("library"):
+        old["library"] = True
+    if fresh or changed:
+        _drop_other_libraries(c, idx, want)
     return idx
+
+
+def _drop_other_libraries(c, idx, want):
+    """索引在私有目录、换过游戏库的都共用这一份：别的游戏库的根不是本库的存放位置，从表里去掉（存储总览不再列、找游戏不去那里找）。
+    认法（都不含当前库）：① 和本库同号的另一行——整库搬家时位置标识跟着搬，旧路径那行留下来同号；② 记过是游戏库根（library）的行；
+    ③ 那里有游戏库标识 .s2arm-library.json（v0.3.6 以前的旧表没记 library）。②③ 的位置号下的游戏记录一并去掉：那是别的库的款，
+    留着会让本库导入同一款时认到别的库的文件夹、往那边写（存储总览「存放位置」一直列着换库前的 C 盘路径）。①的游戏记录本来就指向本库，不动"""
+    here = str(c.library)
+    stale = [l for l in idx["locations"][1:] if l.get("path") != here and
+             (l.get("id") == want or l.get("library") or (Path(l.get("path", "")) / ".s2arm-library.json").is_file())]
+    if not stale:
+        return
+    gone = {l.get("id") for l in stale} - {want}
+    idx["locations"] = [l for l in idx["locations"] if l not in stale]
+    idx["games"] = {g: e for g, e in idx["games"].items() if e.get("location") not in gone}
 
 
 def default_id(c):
@@ -183,6 +209,10 @@ def indexed_dir(c, gid):
     if not entry or not entry.get("folder") or root is None or not root.is_dir():
         return None
     d = games_root(c, root) / entry["folder"]
+    other = str(read(d / GAME_JSON, {}).get("id", "") or gid).upper()   # game.json 删没了（删到一半）照认；写着别款的号就不是这款的
+    if other != gid.upper():
+        print(f"[s2a] {gid.upper()}：索引记的文件夹 {d.name} 是另一款 {other} 的，不当这款的删", file=sys.stderr)
+        return None
     return d if d.is_dir() else None
 
 
@@ -224,10 +254,25 @@ def game_dir(c, gid, english=None, location=None):
         register_location(c, root)
     g = games_root(c, root)
     g.mkdir(parents=True, exist_ok=True)
-    taken = [p.name for p in g.iterdir()]
-    d = g / folder_name(english, gid, taken)   # 返回原样路径（不解析软链）：调用方按位置根前缀比对（library._rm）
-    contained(root, d)
-    d.mkdir()
+    # #765（[Errno 17] File exists: games/<游戏号>，每次添加都失败）：首选名那里已有东西时，反防御处理——
+    #   是这款的空壳文件夹（没有 game.json，或 game.json 就是这款：上次添加到一半留下的）→ 沿用；是文件 / 断链 → 挪开（改名 .s2a-moved-<时刻>，不删）再建；
+    #   是别款的文件夹 → 按已占用的名字另取（folder_name 加号后 4 位 / 序号）
+    want = g / folder_name(english, gid)
+    if want.is_symlink() or (want.exists() and not want.is_dir()):   # 先挪开：断链可能指到库外，contained 会按解析后的路径判越界
+        os.replace(want, want.with_name(want.name + f".s2a-moved-{time.strftime('%Y%m%d-%H%M%S')}"))
+    contained(root, want)
+    if want.is_dir() and str(read(want / GAME_JSON, {}).get("id", "") or gid).upper() == gid:
+        d = want
+    else:
+        d = g / folder_name(english, gid, [p.name for p in g.iterdir()])   # 返回原样路径（不解析软链）：调用方按位置根前缀比对（library._rm）
+        contained(root, d)
+        try:
+            d.mkdir()
+        except FileExistsError:   # 列目录到建之间这个名字被占了：是这款（或没有 game.json 的空壳）就沿用，否则重新列一遍另取
+            if not (d.is_dir() and not d.is_symlink() and str(read(d / GAME_JSON, {}).get("id", "") or gid).upper() == gid):
+                d = g / folder_name(english, gid, [p.name for p in g.iterdir()])
+                contained(root, d)
+                d.mkdir()
     atomic(d / GAME_JSON, dict(schema=1, id=gid))
     _remember(c, gid, d)
     return d
@@ -419,7 +464,8 @@ def save_device(c, ident, rec):
 def install_record(c, gid):
     """这款最近一次装机签名的记录 {at, free, device}（游戏库页「还有几天到期 / 续签」）：各台手机记录里带这款的取最新一次；没装过 → None"""
     gid = gid.upper()
-    recs = [r.get("signed") for _, r in devices(c) if gid in (r.get("games") or {}) and isinstance(r.get("signed"), dict)]
+    # deviceKey：那台设备的记录键（UDID）。续签 / 重装装回当初那台，不替玩家换一台（维护者 11-11：续签时 iPad 被装上）
+    recs = [dict(r["signed"], deviceKey=k) for k, r in devices(c) if gid in (r.get("games") or {}) and isinstance(r.get("signed"), dict)]
     return max(recs, key=lambda r: r.get("at") or 0) if recs else None
 
 
@@ -689,13 +735,11 @@ def _legacy_ids(c, spec):
 
 
 def ensure(c):
-    """作业开始前：库还是旧布局就拿执行锁迁移；之后把库建好前退回私有目录写的日志 / 任务记录收进默认位置（每个作业都看一眼，没有就只读一次索引表）"""
+    """作业开始前：库还是旧布局就拿执行锁迁移；之后（非探测作业）起后台商店查询。日志 / 任务记录的迁回在建任务时（follow_task）"""
     _ensure_layout(c)
-    if (c.library / ".s2arm-library.json").is_file():
-        adopt_private_logs(c)
-        if c.operation != "launch":      # 起局时玩家在等：连后台也不起
-            from library import store_meta_background
-            store_meta_background(c)     # 缺横图 / 英文名、7 天内没查过的款：后台查，查到英文名在那里接着改名
+    if (c.library / ".s2arm-library.json").is_file() and c.operation not in ("installCheck", "targetDevice", "locations", "launch"):   # 每几秒一次的只读探测不起；起局时玩家在等，连后台也不起
+        from library import store_meta_background
+        store_meta_background(c)     # 缺横图 / 英文名、7 天内没查过的款：后台查，查到英文名在那里接着改名
 
 
 def _ensure_layout(c):
@@ -711,7 +755,7 @@ def _ensure_layout(c):
 # 目标：玩家指定的库是入口，私有目录（Mac ~/Library/Application Support/S2Arm，Windows %LOCALAPPDATA%\S2Arm\WindowsLauncher）只留设置、密钥和控制口文件。
 #   工具缓存：原 work_root（库在私有目录里时 = 私有目录，否则 = 库/.s2arm-work）下的 cache/、run/ → <默认位置>/tool-cache/{cache,run}（core.Context.work_root）。
 #     都能重建：同一卷改名（逐个子项，目标已有的不盖），跨卷直接删、不拷。
-#   日志、任务记录：<私有目录>/logs、jobs → <默认位置>/logs/（任务记录 logs/jobs/，core.logs_root），见 adopt_private_logs。
+#   日志、任务记录：v0.3.0 起固定在 <私有目录>/logs（剃刀 H6），不再搬进默认位置；旧的在建任务时收回（adopt_library_logs）。
 #   引擎副本在 embedded.install 里搬（它在 ensure 之前跑）。
 # 每步都是逐项改名 / 删，中途被杀下次接着做；布局标记最后才写 4。
 
@@ -722,7 +766,6 @@ def _upgrade_4(c):
             _absorb_rebuildable(c, old / name, new / name)
     with contextlib.suppress(OSError):
         (c.library / ".s2arm-work").rmdir()
-    adopt_private_logs(c)
 
 
 def _absorb_rebuildable(c, src, dst):
@@ -770,42 +813,34 @@ def _moved(src, dst):
 
 
 def follow_task(c):
-    """Context 建任务时调（任务记录在默认位置时）：索引表第一项核成这个默认位置（core.default_home 只拿私有目录时靠它找日志）；
-    这个任务号上次的记录还在私有目录（库建好前跑的、resume 续跑）就先搬过来，attemptNo 等接得上"""
-    if c.logs.parent == c.private:
-        return
-    try:
-        disk = (read(_index_path(c), {}) or {}).get("locations") or []
-    except (OSError, ValueError):
-        disk = []
-    if not disk or not isinstance(disk[0], dict) or disk[0].get("path") != str(c.library):
-        save_index(c)
-    if c.jobpath.exists():
-        return
-    for old in (c.private / "logs" / "jobs", c.private / "jobs"):
-        if (old / c.jobpath.name).is_file():
-            for suffix in (".json", ".events.jsonl", ".request.json"):
-                try:
-                    _moved(old / (c.task + suffix), c.jobpath.parent / (c.task + suffix))
-                except OSError:
-                    pass
-            return
+    """Context 建任务时调：索引表第一项核成这个默认位置（core.default_home 只拿私有目录时靠它找工具缓存 / 引擎副本）；
+    旧位置还有日志 / 任务记录（v0.3.0 之前库建好后写在 <库>/logs）就迁回私有目录（adopt_library_logs），续跑的同一任务号 attemptNo 接得上"""
+    if (c.library / ".s2arm-library.json").is_file():
+        try:
+            disk = (read(_index_path(c), {}) or {}).get("locations") or []
+        except (OSError, ValueError):
+            disk = []
+        if not disk or not isinstance(disk[0], dict) or disk[0].get("path") != str(c.library):
+            save_index(c)
+    adopt_library_logs(c)
 
 
-def adopt_private_logs(c):
-    """<私有目录>/logs、jobs（P3 之前的位置，以及库建好前 core.logs_root 退回私有目录写下的）收进默认位置的 logs/。
-    先按保留规则清一遍（core.prune_jobs）再搬，跨卷时少拷；还没写终态、进程还在的任务（日志名以任务号开头）不动，等它结束后的下一个作业再收。
-    顺手核索引表第一项是这个默认位置（core.default_home 只拿私有目录时靠它找日志）"""
+def adopt_library_logs(c):
+    """日志与任务记录固定在 <私有目录>/logs（core.logs_root，剃刀 H6）。旧位置——v0.3.0 之前库建好后写的 <默认位置>/logs，以及 P3 之前的
+    <私有目录>/jobs——收回来：先按保留规则清一遍（core.prune_jobs）再搬，跨卷时少拷；还没写终态、进程还在的任务（日志名以任务号开头）不动，
+    等它结束后的下一个作业再收（读的一方 core._job_dirs 照样找得到）。没有旧目录时只是两次 is_dir"""
     from core import TERMINAL_STATES, pid_alive, prune_jobs
     target = c.logs
-    if target.parent == c.private:
-        return
-    sources = [(c.private / "jobs", target / "jobs"), (c.private / "logs" / "jobs", target / "jobs"), (c.private / "logs", target)]
+    old = c.library / "logs"
+    sources = [(c.private / "jobs", target / "jobs")]
+    if (c.library / ".s2arm-library.json").is_file():   # 只收游戏库自己的旧日志：setup 时玩家选的文件夹还不是库，里面的 logs 是玩家自己的东西
+        sources += [(old / "jobs", target / "jobs"), (old, target)]
+    sources = [(s, d) for s, d in sources if s != d and s != target / "jobs"]
     if not any(s.is_dir() for s, _ in sources):
         return
     running = set()
-    for src, _ in sources[:2]:
-        if not src.is_dir():
+    for src, _ in sources:
+        if src.name != "jobs" or not src.is_dir():
             continue
         prune_jobs(c.private, jobs=src)
         for p in src.glob("*.json"):
@@ -820,14 +855,13 @@ def adopt_private_logs(c):
     for src, dst in sources:
         if not src.is_dir() or src.is_symlink():
             continue
-        # 每个作业起跑都收一次（ensure）：别的作业可能同时在收，判完 is_dir 到列目录之间目录已被它收空删掉（启动器同时起两个 catalog：
-        #   WorkerIntegrationTests 偶发「任务所需的文件或目录不存在」，main 全套两次红在这里）——被对方收走的就算收完了
+        # 每个作业建任务时都收一次：别的作业可能同时在收，判完 is_dir 到列目录之间目录已被它收空删掉——被对方收走的就算收完了
         try:
             children = sorted(src.iterdir())
         except FileNotFoundError:
             continue
         for child in children:
-            if src == c.private / "logs" and child.name == "jobs":
+            if src == old and child.name == "jobs":
                 continue
             if any(child.name.startswith(t) for t in running):
                 continue
@@ -835,7 +869,7 @@ def adopt_private_logs(c):
                 _moved(child, dst / child.name)
             except OSError:
                 continue   # 这一项这次搬不动，留着下次再试；读的一方（core._job_dirs）照样找得到
-    for d in (c.private / "logs" / "jobs", c.private / "logs", c.private / "jobs"):
+    for d in (old / "jobs", old, c.private / "jobs"):
         with contextlib.suppress(OSError):
             d.rmdir()
 

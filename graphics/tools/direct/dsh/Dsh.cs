@@ -200,6 +200,7 @@ namespace S2A.Dsh
                 code = Sl(code, 0, (int)ilen);
                 string cp = Path.Combine(W, Key + ".bin"); XIo.WriteAllBytes(cp, code);
                 var j = new JsonObject { ["key"] = Key, ["stage"] = stage, ["code"] = cp, ["arch"] = "sm86", ["tex"] = new JsonObject(), ["img"] = new JsonObject(), ["attr"] = new JsonObject(), ["fout"] = new JsonObject(), ["c1"] = Convert.ToHexStringLower(c1) };
+                if (stage == "cs") j["tensor_mma_count"] = DshTensor.Count(code);
                 // 计算阶段的驱动常量在 c[0] 里按程序排（推送常量字数 +0xa9，uniform / storage / 纹理项数 +0xb1..+0xb3，分离纹理 / 分离采样器项数 +0xb4 / +0xb5（图像在它们之后，上游参考实现（MIT）67f1d0055），大小 +0xba），翻译器按它映射（InstEmitAmpere.cs AMapC0）
                 if (stage == "cs") j["nvn2_cs"] = new JsonArray(ctl[0xb1], ctl[0xb2], ctl[0xb3], BitConverter.ToUInt16(ctl, 0xba), ctl[0xa9] * 4, ctl[0xb4], ctl[0xb5]);
                 if (stage == "ds") j["tess_mode"] = (long)Nvn2.TessMode(ctl);
@@ -234,7 +235,8 @@ namespace S2A.Dsh
                 var code = Sl(area, 0x80, (int)ilen);
                 // 不支持的明确报红（接口约定 9）：自有共享内存会压在阶段内存上、控制段不给它的大小；阶段内存超 Metal 线程组内存；线程数为 0
                 if (MeshStage.OwnShared(code)) throw new DshError("mesh stage failed", stage + ": 指令里有自己的共享内存访问（LDS / STS / ATOMS），会压在阶段内存上");
-                if (size > MeshStage.METAL_MAX_SHARED) throw new DshError("mesh stage failed", $"{stage}: 阶段内存 {size} 字节超 Metal 线程组内存 {MeshStage.METAL_MAX_SHARED}");
+                // 载荷超 16 KB 的网格（MeshStage.Relay）：阶段内存整段在设备中转缓冲里，不受线程组内存限
+                if (size > MeshStage.METAL_MAX_SHARED && !(stage == "ms" && MeshStage.Relay(mi))) throw new DshError("mesh stage failed", $"{stage}: 阶段内存 {size} 字节超 Metal 线程组内存 {MeshStage.METAL_MAX_SHARED}");
                 if (mi.Threads == 0 || mi.Threads > 1024) throw new DshError("mesh stage failed", $"{stage}: 控制段 +0x58 每组线程数 {mi.Threads}");
                 string cp = Path.Combine(W, Key + ".bin"); XIo.WriteAllBytes(cp, code);
                 var j = new JsonObject { ["key"] = Key, ["stage"] = "cs", ["code"] = cp, ["arch"] = "sm86", ["tex"] = new JsonObject(), ["img"] = new JsonObject(), ["attr"] = new JsonObject(), ["fout"] = new JsonObject(), ["c1"] = Convert.ToHexStringLower(c1) };
@@ -402,6 +404,13 @@ namespace S2A.Dsh
                     }
                 }
                 src = Precise(src);
+                int tensorMma = stage == "cs" ? j["tensor_mma_count"]?.GetValue<int>() ?? 0 : 0;
+                if (tensorMma > 0)
+                {
+                    long threads = j["local"] is JsonArray tl && tl.Count == 3 ? tl.Aggregate(1L, (n, v) => n * v.GetValue<long>()) : 0;
+                    if (threads <= 0 || threads > 1024 || threads % 32 != 0) tensorMma = -1;
+                }
+                if (tensorMma > 0) src = DshTensor.Lower(src);
                 uint spill = 0;   // 共享内存超过 32 KB 的计算核：最大的数组挪到设备缓冲（同 dmsh_build.py spill_fix，在 fs_lb 之前）
                 if (stage == "cs") (src, spill) = NxgalSpvCross.SpillFix(src, SPILL_SLOT);
                 if (stage == "ps") src = FsUvx(src);   // 宽屏 16:9 采样换算，在整数输出入口复制 main0 之前（同 dmsh_build.py）
@@ -445,6 +454,7 @@ namespace S2A.Dsh
                 if (lay != null) { refl["entry_layer"] = "main0_l"; refl["entry_layer_z"] = "main0_lz"; refl["layer_from"] = lay; }
                 if (fu != null) { refl["entry_u"] = "main0_u"; refl["u_mask"] = (long)uMask; }
                 refl["threadgroup_size"] = j["local"]?.DeepClone();
+                if (stage == "cs") { refl["tensor_mma_abi"] = tensorMma >= 0 ? 1L : 0L; refl["tensor_mma_count"] = (long)tensorMma; }
                 if (spill != 0) { refl["spill"] = (long)spill; refl["spill_slot"] = (long)SPILL_SLOT; }
                 refl["c1"] = Convert.ToHexStringLower(c1); refl["notes"] = notes; refl["drv_reads"] = dr; refl["drv_unfillable"] = Unfillable(dr);
                 var binds = Reflect(stage, src, res);
@@ -489,6 +499,12 @@ namespace S2A.Dsh
                     ["entry"] = "main0", ["msl_entry_kind"] = kind == "ts" ? "object" : "mesh" };
                 if (kind == "ms") refl["entry_z"] = "main0_z";
                 refl["mesh_threads"] = (long)mi.Threads; refl["mesh_payload"] = (long)mi.Payload;
+                if (MeshStage.Relay(mi))   // 载荷走设备中转（MeshStage.Relay）：宿主按这几个数分配、绑中转缓冲（nvn_geometry.inc mtk_encode）
+                {
+                    var (pw, sw) = MeshStage.RelayWords(mi);
+                    refl["mesh_relay"] = (long)MeshStage.RELAY_SLOT; refl["mesh_relay_payload_words"] = (long)pw;
+                    if (kind == "ms") refl["mesh_relay_slice_words"] = (long)sw;   // 每个任务组的片数 = 任务线程数（mesh_threads），宿主写进中转头
+                }
                 if (kind == "ms") { refl["mesh_task"] = mi.Task; refl["max_vertices"] = (long)mi.MaxV; refl["max_primitives"] = (long)mi.MaxP; }
                 refl["threadgroup_size"] = j["local"]?.DeepClone();
                 refl["c1"] = Convert.ToHexStringLower(c1); refl["notes"] = notes; refl["drv_reads"] = dr; refl["drv_unfillable"] = Unfillable(dr, kind);
@@ -930,6 +946,9 @@ namespace S2A.Dsh
         const int RED_SLOT = 26;   // 它的 Metal 缓冲槽（片元与计算同号，nvn_mtl.m RED_SLOT）
         const string LB = "s2a_lb";   // 偏置表：参数块成员，每个采样器成员一个 float，按该成员的 [[id]] 取（= dmsh_red.py LB）
         const long LB_MAXID = 191;   // = dmsh_red.py LB_MAXID（NVN_REFL_MAXARG - 1）
+        // #529 定点深度比较：同一张 s2a_lb 表的后半段 [LB_DC + 成员 id] = 1 → 该采样器成员这次配的贴图客体是定点深度（D16 / D24 / D24S8，宿主 nvn_mtl.m lb_fill 按客体格式写），
+        //   sample_compare 的参考值先 saturate 到 [0,1] 再比（NVN 定点深度格式的比较语义；Metal 用 Depth32Float 承载它们、不会自己限制）；浮点深度（D32F 系）写 0、参考值原样
+        internal const long LB_DC = LB_MAXID + 1;
         internal const string RED_BEGIN = "// s2a:samp-emu 4 (S2A.Dsh FsRd)\n";   // 变体格式版本 4（11-03 加折行贴图 s2a_fx：超 Metal 2D 上限的高线性贴图）；3（11-01 表项改 S2ASe、加任意边界色 / 全过滤组合归约），宿主 nvn_mtl.m SE_VERSION 认它：旧版 2 的兜底文件重出
         static readonly Regex s_redCall = R(@"spvDescriptorSet0\.(\w+)\.sample\(");
         static readonly Regex s_lbCall = R(@"spvDescriptorSet0\.(\w+)\.(?:sample|sample_compare)\(");   // FsLb：比较采样同样加偏置（缺口族 31）
@@ -988,7 +1007,8 @@ namespace S2A.Dsh
         }
         /// <summary>= fs_lb：片元 / 计算着色器 main0 里经单个采样器成员的每次采样加该采样器的偏置 b = spvDescriptorSet0.s2a_lb[成员 id]：level(l) → level((l) + b)、bias(x) → bias((x) + b)、
         /// gradient → 两个导数 × precise::exp2(b)、没写 LOD → 片元插 bias(b) / 计算插 level(b)（计算只带 min_lod_clamp(m) 的 → level(max(b, m))）；参数块末尾加 constant float* s2a_lb。没有可改的采样原样返回。
-        /// 深度比较采样 sample_compare 同样改（缺口族 31：本机不吃采样器偏置时比较采样的偏置原来丢掉），LOD 参数排在参考值之后</summary>
+        /// 深度比较采样 sample_compare 同样改（缺口族 31：本机不吃采样器偏置时比较采样的偏置原来丢掉），LOD 参数排在参考值之后；
+        /// 它的参考值另按表后半段 s2a_lb[LB_DC + 成员 id] 决定要不要 saturate 到 [0,1]（#529 定点深度比较语义）</summary>
         internal static string FsLb(string src)
         {
             var ms = Members(src); var ent = s_redEntry.Match(src);
@@ -1016,6 +1036,7 @@ namespace S2A.Dsh
                 if (lods.Any(x => !Balanced(x.M.Groups[2].Value))) continue;
                 var lod = lods.Where(x => x.M.Groups[1].Value != "min_lod_clamp").ToList();
                 var na = new List<string>(args);
+                if (cmp) na[k - 1] = "(spvDescriptorSet0." + LB + "[" + (LB_DC + smp[sm.Groups[1].Value]) + "] != 0.0 ? saturate(" + na[k - 1] + ") : (" + na[k - 1] + "))";   // #529
                 if (lod.Count > 0)
                 {
                     var (j, lm) = lod[0]; string nm = lm.Groups[1].Value, inner = lm.Groups[2].Value;
