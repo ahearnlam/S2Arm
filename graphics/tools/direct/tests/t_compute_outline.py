@@ -94,5 +94,5 @@ if not bad:
         if result.stderr:
             print(result.stderr, file=sys.stderr)
         check("prefix-macro guard preserves local name lookup on GPU", result.returncode == 0)
-print(f"t_compute_outline: {n} checks, {bad} failures")
+print(f"{'✗' if bad else '✓'} t_compute_outline: {n} checks, {bad} failures")
 sys.exit(1 if bad else 0)
