@@ -2811,7 +2811,29 @@ static void t_registered_view_pin(void) {
     res_fresh();
 }
 
+static void t_invalidated_attachment_pin(void) {
+    res_fresh();
+    tex_t t = mk_tex(82001, 0, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
+    nvn_be_tex_init(&t);
+    rp_view_pin_begin();
+    nvn_gpu_view v = rp_view_for(&t, NULL, &g_fake_cmd);
+    CHECK(v != NULL); int id = v ? v->rid : 0;
+    rp_view_pin_begin();
+    nvn_be_tex_release(&t);
+    CHECK(!was_view_released(id));
+    rp_view_pin_end();
+    CHECK(!was_view_released(id));
+    rp_view_pin_end();
+    CHECK(was_view_released(id));
+    v = rp_view_for(&t, NULL, &g_fake_cmd);
+    CHECK(v != NULL); id = v ? v->rid : 0;
+    nvn_be_tex_release(&t);
+    CHECK(was_view_released(id));
+    res_fresh();
+}
+
 int main(int argc, char **argv) {
+    t_invalidated_attachment_pin();
     t_registered_view_pin();
     t_state_persists();
     t_unimpl_names();
