@@ -778,15 +778,15 @@ namespace S2A.Dsh
         internal const int POOL_MIN = 33;    // 至少这么长的数组是池：翻译器（Program.cs）把回退数组按池长出（纹理 2^20、采样器 2^12），贴图缓冲 / 图像与统一缓冲句柄数组仍是 32 项
         internal const int POOL_HEAD = 16;   // = nvn_refl.h DMSH_POOL_HEAD：池表头 = 上界 n（uint）、4 字节空、已读位图的 GPU 地址（ulong）；元素 0 从这里起，每项 8 字节资源号
         internal const string POOL_MARK = "template<typename P> static inline __attribute__((always_inline)) uint dm_pool_mark(constant P* p, uint i)\n{\n"
-            + "    device atomic_uint* w = reinterpret_cast<device atomic_uint*>(p->seen) + (i >> 5);\n    uint b = 1u << (i & 31u);\n"
-            + "    if (!(atomic_load_explicit(w, memory_order_relaxed) & b)) atomic_fetch_or_explicit(w, b, memory_order_relaxed);\n    return i;\n}\n\n";
+            + "    device uint* w = reinterpret_cast<device uint*>(p->seen) + (i >> 5);\n    uint b = 1u << (i & 31u);\n"
+            + "    if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);\n    return i;\n}\n\n";
         static readonly Regex s_poolArr = new(@"^(\s*)array<(.+), (\d+)> (\w+) \[\[\s*id\(", RegexOptions.Multiline | RegexOptions.CultureInvariant);
         static readonly Regex s_poolMember = new(@"^(\s*)(.+?)\s+(\w+)\s*\[\[\s*id\((\d+)\)\s*((?:,[^\]]*)?)\]\];", RegexOptions.Multiline | RegexOptions.CultureInvariant);
         static readonly Regex s_poolOwnSide = new(@"\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\batomic_\w+_explicit\b|^\s*device\s", RegexOptions.Multiline | RegexOptions.CultureInvariant);
         /// <summary>Ryujinx 给追不到槽的句柄的回退数组（&lt;阶段&gt;_&lt;t|s&gt;_cb0_40000000，按句柄的纹理 / 采样器号下标，长度 = 整段编号，Program.cs）→ 指向宿主按元素类型建的池表
         /// （nvn_mtl.m pool_gpu）：struct spvPool_&lt;名&gt; { uint n; ulong seen; array&lt;元素, 1&gt; e; }，读成 (&amp;e[0])[min(下标, n)]，n = 宿主填到的最大编号。
         /// 贴图池的读还在 seen 处的位图里置这个编号的位（dm_pool_mark）：着色器读哪些编号只有 GPU 知道，宿主据此只建被读过的贴图，而不是池里全部（11-06 时之笛登记约 3.3 万、读约 300）。
-        /// 先读字再原子或：一个位只置一次，几乎每次读只多一次读。结构体只声明 1 个元素：Metal 的参数编码器会逐个走声明的数组元素（2^20 个时每个编码器 57 ms、66 MB，上游实测），
+        /// 先用普通读测位、没置才原子或：一个位只置一次，几乎每次读只多一次读。测位不用原子读（照 nxnative 04811a63，MIT）：原子读即使 relaxed 也走 GPU 共享缓存，一遍里的像素只读少数几个编号、挤在同一个位图字上排队（M6 上 1536x864 一遍每像素 16 次置位 2.60 → 0.34 ms，iPad Pro M5 上 0400486024DEC000 的颜色遍约 13.0 → 9.2 ms）；读到旧的 0 只多做一次不改值的或，位在一次提交内只会 0 → 1。结构体只声明 1 个元素：Metal 的参数编码器会逐个走声明的数组元素（2^20 个时每个编码器 57 ms、66 MB，上游实测），
         /// 元素是 8 字节资源号、经指针读到其余。参数号随后按成员次序重排（指针占 1 个、其余数组占其长度），同宿主排参数块的方式。
         /// 贴图池的置位是写内存，Metal 会把这支片元改成着色后再测深度（失去隐藏面剔除，且与预深度遍差一个 ulp 时 EQUAL 沿轮廓失败，上游实测）：置位是宿主自己加的，
         /// 不该改测试时机，所以改成早测——除非着色器自己丢弃 / 写深度 / 写样本掩码或模板 / 写内存（那时早测会错，保持晚测，只多付着色）。
@@ -854,6 +854,31 @@ namespace S2A.Dsh
         static readonly Regex s_gatherArr = new(@"\bconstant spvUnsafeArray<int2, 4> (\w+) = spvUnsafeArray<int2, 4>\(\{ (.*?) \}\);", RegexOptions.CultureInvariant);
         static readonly Regex s_int2 = new(@"int2\([^()]*\)", RegexOptions.CultureInvariant);
 
+        // 四个偏移恰好是 2x2 方块（b、b+(1,0)、b+(0,1)、b+(1,1)，次序不限）：改成在 b 处一次 gather 再换序（照 nxnative 0c8a3ac0，MIT）。每个偏移取的是自己足迹的
+        // (i0, j0) 角，整数偏移下这四个角正好是 b 处足迹的四个纹素，各自按包裹方式取，两种写法同值。Metal 的次序：x (i0, j1)、y (i1, j1)、z (i1, j0)、w (i0, j0)。
+        // agl 的 NDSR 放大网络用这种方块拼输入块（0400486024DEC000 的 32 支带偏移 gather 的着色器里 27 支，每支 3–15 处）；nxnative 读数：M4 Pro 最大一次分派 845 → 779 us
+        static readonly Regex s_int2Lit = new(@"\Aint2\(\s*(-?\d+)\s*(?:,\s*(-?\d+)\s*)?\)\z", RegexOptions.CultureInvariant);
+        internal static (string Corner, string Swz)? GatherQuad(List<string> off)
+        {
+            var xy = new List<(int X, int Y)>();
+            foreach (var o in off)
+            {
+                var m = s_int2Lit.Match(o); if (!m.Success) return null;
+                int x = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                xy.Add((x, m.Groups[2].Success ? int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) : x));
+            }
+            int bx = xy.Min(p => p.X), by = xy.Min(p => p.Y);
+            var swz = new StringBuilder(); var seen = new HashSet<(int, int)>();
+            foreach (var (x, y) in xy)
+            {
+                (int, int) r = (x - bx, y - by);
+                char c = r switch { (0, 0) => 'w', (1, 0) => 'z', (0, 1) => 'x', (1, 1) => 'y', _ => '?' };
+                if (c == '?' || !seen.Add(r)) return null;
+                swz.Append(c);
+            }
+            return ($"int2({bx}, {by})", swz.ToString());
+        }
+
         internal static string GatherOffsets(string msl)
         {
             var calls = s_gatherCall.Matches(msl).Where(m => string.CompareOrdinal(msl, m.Index + m.Length, "const ", 0, 6) != 0).ToList();   // 去掉包装自己的定义（参数以 const 开头）
@@ -883,11 +908,14 @@ namespace S2A.Dsh
                 if (args.Count <= rest0 || !arrays.TryGetValue(args[2], out var offs))
                     throw new DshError("gather offsets rewrite failed", Sl("offsets not a constant int2 array: " + msl[m.Index..j], 0, 160));
                 string rest = string.Join(", ", args.Skip(rest0)), tail = cmp ? "" : ", " + args[3], fn = cmp ? "gather_compare" : "gather";
-                sb.Append(msl, pos, m.Index - pos).Append("s2a_gather4(").Append(string.Join(", ", offs.Select(o => $"{args[0]}.{fn}({args[1]}, {rest}, {o}{tail}).w"))).Append(')');
+                var quad = GatherQuad(offs);
+                if (quad != null) sb.Append(msl, pos, m.Index - pos).Append($"({args[0]}.{fn}({args[1]}, {rest}, {quad.Value.Corner}{tail}).{quad.Value.Swz})");
+                else sb.Append(msl, pos, m.Index - pos).Append("s2a_gather4(").Append(string.Join(", ", offs.Select(o => $"{args[0]}.{fn}({args[1]}, {rest}, {o}{tail}).w"))).Append(')');
                 pos = j;
             }
             sb.Append(msl, pos, msl.Length - pos);
             string s = sb.ToString();
+            if (!s.Contains("s2a_gather4(", StringComparison.Ordinal)) return s;
             int at = s.IndexOf("using namespace metal;", StringComparison.Ordinal);
             if (at < 0) throw new DshError("gather offsets rewrite failed", "no using namespace metal;");
             at = s.IndexOf('\n', at) + 1;
