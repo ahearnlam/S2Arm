@@ -259,9 +259,14 @@ static int hook_dir_from_self(char *out, size_t cap) {
 
 // 选了驱动才调用：返回 libadrenotools 打开的系统 loader handle；没选 / 失败返回 NULL。
 static void *custom_driver_open(const char *state_dir) {
+    const char *ext_now = s2a_android_gpu_driver_external_dir ? s2a_android_gpu_driver_external_dir() : NULL;
+    fprintf(stderr, "[vk-direct] 驱动选择检查：external=%s\n", ext_now && ext_now[0] ? ext_now : "(空)");
     char selection[PATH_MAX];
     const char *how = "";
-    if (driver_selection(selection, sizeof selection, &how)) return NULL;
+    if (driver_selection(selection, sizeof selection, &how)) {
+        fprintf(stderr, "[vk-direct] 驱动选择：未设置\n");
+        return NULL;
+    }
     const char *files = driver_dir_or_null(s2a_android_gpu_driver_files_dir ? s2a_android_gpu_driver_files_dir() : NULL);
     char dir[PATH_MAX];
     if (selection[0] == '/') {

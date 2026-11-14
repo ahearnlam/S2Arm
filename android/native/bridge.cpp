@@ -951,6 +951,8 @@ Java_org_s2arm_android_NativeBridge_configureGpuDriver(JNIEnv *env, jclass, jstr
     if (!external.empty() && external[0] != '/') return EINVAL;
     g_gpu_driver_files_dir = files;
     g_gpu_driver_external_dir = external;
+    fprintf(stderr, "[vk-direct] 驱动目录配置：files=%s external=%s\n",
+            files.c_str(), external.empty() ? "(空)" : external.c_str());
     return 0;
 }
 
