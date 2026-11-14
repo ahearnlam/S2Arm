@@ -82,7 +82,7 @@ namespace S2A.Services.Tests
 
             // ④ 互操作形状（只读）：从 AudioObject 系统对象读默认输出设备号，再读设备当前缓冲帧数
             //   （>0 即结构布局 / 调用约定正确；设备给多少算多少，不改它）
-            if (OperatingSystem.IsMacOS())
+            if (OperatingSystem.IsMacOS())   // 平台例外：只读探针读 Mac 默认输出设备的 HAL 属性，iOS 没有 HAL 设备属性
             {
                 AudioObjectPropertyAddress defaultOut = new()
                 {
