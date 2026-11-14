@@ -32,6 +32,8 @@ public sealed partial class EnvironmentWindow
         CapturePaths();
         if (page == "library") libraryFolder = libraryFolderBox.Text ?? "";
         messagesOpen = false;   // 顶栏导航离开「消息」页
+        sgradeOpen = false;     // 也离开「S 级优化升级」页
+        cheatsFor = null;       // 和「金手指」页
         page = destination;
         if (destination != "library") welcomeHome = false;   // 品牌名带去的欢迎页只管这一次回首页，去了别的页就回到平常
         // 环境检查页每次打开读一次装到 iPhone 的方式和开发者证书（InstallModePage.cs / DevCertPage.cs）
@@ -100,7 +102,20 @@ public sealed partial class EnvironmentWindow
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
     }
 
+    /// <summary>封面 + 已打上 S 级优化的左上角金色 S（同 Mac LauncherView+Library SGradeBadge：只有 S、没有框和底色，叠三层更实、加投影）</summary>
     private Control GameCover(LibraryGame game, int size)
+    {
+        var cover = GameCoverImage(game, size);
+        if (!game.SGrade) return cover;
+        var s = Math.Max(20, size / 3.2);
+        var badge = new Panel { Width = s, Height = s, Margin = new Thickness(3), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+            Effect = new DropShadowEffect { Color = Color.FromArgb(115, 0, 0, 0), BlurRadius = s * 0.24, OffsetX = 0, OffsetY = s * 0.04 } };
+        for (var k = 0; k < 3; k++) badge.Children.Add(new Image { Source = SGoldImage(), Stretch = Stretch.Uniform });
+        Avalonia.Automation.AutomationProperties.SetAutomationId(badge, "card.sgrade");
+        return new Panel { Width = size, Height = size, Children = { cover, badge } };
+    }
+
+    private Control GameCoverImage(LibraryGame game, int size)
     {
         // Only a backend-provided local cover in this library is considered; never load a remote URL.
         try
@@ -238,6 +253,8 @@ public sealed partial class EnvironmentWindow
         if (catalog is null || libraryBusy || librarySummary is "library.failed" or "library.invalid_result" or "library.interrupted")
             body.Children.Add(Card(status));
 
+        if (catalog is not null && games.Length > 0)   // 「S 级优化升级」入口（同 Mac 游戏库标题行，v0.4.0）
+            body.Children.Add(new StackPanel { HorizontalAlignment = HorizontalAlignment.Right, Children = { SGradeUpgradeEntry() } });
         foreach (var game in games)
         {
             var line = new Grid { ColumnDefinitions = new ColumnDefinitions("72,*,Auto"), ColumnSpacing = 18 };
@@ -367,6 +384,7 @@ public sealed partial class EnvironmentWindow
             menu.Items.Add(item);
         }
         Add(T("nav.build"), "export", () => { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; OpenBuild(); }, idle && game.Reachable);
+        Add(T("cheats.page.menu"), "cheats", () => OpenCheats(game), idle);   // 金手指：看 / 导入（CheatsPage.cs，同 Mac 启动设置里的金手指）
         menu.Items.Add(new Separator());
         Add(T("library.menu.revealWindows"), "reveal", () => RevealGame(game), (game.Location?.Path ?? "").Length > 0 && game.LocationState != "offline");
         Add(T("library.menu.move"), "move", () => BeginPicker(() => MoveGameAsync(game)), idle && game.Reachable && game.LocationState != "none");

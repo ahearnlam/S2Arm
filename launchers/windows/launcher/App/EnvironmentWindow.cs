@@ -336,6 +336,18 @@ public sealed partial class EnvironmentWindow : Window
             ShowPage("messages", body);
             return;
         }
+        if (page == "library" && cheatsFor is not null)   // 「金手指」页（CheatsPage.cs）：从游戏库这款的菜单进、「返回」回游戏库
+        {
+            RenderCheats(body);
+            ShowPage("cheats", body);
+            return;
+        }
+        if (page == "library" && sgradeOpen)   // 「S 级优化升级」页（SGradeUpgradePage.cs）：从游戏库进、确认 / 关闭回游戏库
+        {
+            RenderSGradeUpgrade(body);
+            ShowPage("sgrade", body);
+            return;
+        }
         if (page == "library" && (ShowsWelcome || welcomeHome))
         {
             RenderWelcome(body);
