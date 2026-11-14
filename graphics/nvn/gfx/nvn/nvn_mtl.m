@@ -8281,8 +8281,10 @@ static id<MTLFunction> vp_fn(NvShader *vs, uint32_t miss) {   // the padded vari
 // Make the variant and load it: S2A.Dsh writes it from the guest code / control (code 0: none to make it from). → the shader's entry point in it, nil with why
 static id<MTLFunction> vp_build(NvShader *vs, const uint8_t md[8], uint64_t code, const void *ctl, uint32_t mask, char *why, size_t n) {
     char path[1200]; int rc;
-    if (!code && vs->mesh_kind == 2) rc = dm_shader_vpad_cached_mesh(md, mask, path, sizeof path);
-    else if (!code) { snprintf(why, n, "the game no longer holds its control section to translate it"); return nil; }
+    if (!code) {   // the game reused its control section: this device's translation, or the SetShaders / Bind snapshot (dsh_src_hold)
+        rc = dm_shader_vpad_cached(md, vs->mesh_kind == 2 ? 5 : 0, mask, path, sizeof path);
+        if (rc == 1) { snprintf(why, n, "the game no longer holds its control section, and no snapshot or translation of it is on this device"); return nil; }
+    }
     else rc = dm_shader_vpad(md, code, ctl, mask, path, sizeof path);
     if (rc) { snprintf(why, n, "%s", rc == 3 ? "its translation already writes those outputs (or has no main0_out to add them to)" : "the device could not make it"); return nil; }
     NSString *src = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
