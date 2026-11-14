@@ -408,16 +408,46 @@ int s2a_guest_map_fixed(uint64_t a, uint64_t len) {
     gextra_undo(off, len);
     return -1;
 }
-// [a, a + n) 在文件后备的窗口里：打洞（还文件块，再读是 0）并按原偏移重新映射成不可访问，返回 1；不在 / 没开文件后备返回 0（调用方照旧换匿名占位）
+// 文件后备窗口里挖回匿名的一段（#964 a）：物理映射区（MapPhysicalMemory 的别名区）是游戏 NVN 内存池所在，GPU 每帧写的零拷贝缓冲都在这里——
+//   11-13 Duo 正式游戏实测窗口脏页约 1.3 GB，最脏的 4 段里两段在别名区（各 130–185 MB）。放在文件里，物理内存小的机器（iPad 7.5 GB）脏页超回写阈值后
+//   这些每帧都被改写的页会被反复刷盘（那台 iPad 文件后备局每 10 秒写 2–3 GB）。别名区保持匿名：热页不进文件，只有游戏堆走文件后备。
+//   代价是这段的常驻页计进进程实占（Duo 正式游戏约 1.0–1.7 GB），iPad 档单进程上限 8 GB 装得下。下面两个口子按它分段：在这段里一律当「不在文件里」
+//   （svc_mem.c 的懒清零与还页就走匿名那套）。S2A_GUEST_FILE_CARVE=0 不挖（对照用）
+static uint64_t g_anon_lo, g_anon_hi;
+static int in_anon(uint64_t a, uint64_t n) { return g_anon_hi > g_anon_lo && a < g_anon_hi && a + n > g_anon_lo; }
+// 布局定下别名区后调（svc_mem.c，那时这段还没放开过）：与窗口的交集按宿主页向内取整，逐块确认仍是不可访问的保留（没有内容）才换成匿名占位
+void s2a_guest_file_carve(uint64_t a, uint64_t n) {
+    if (g_gfd < 0 || !n) return;
+    const char *e = getenv("S2A_GUEST_FILE_CARVE");
+    if (e && *e == '0') { LOG("客体内存文件后备：物理映射区照旧进文件（S2A_GUEST_FILE_CARVE=0，对照用）"); return; }
+    const uint64_t pg = 0x4000;
+    uint64_t lo = a > g_base ? a : g_base, hi = a + n < g_base + g_size ? a + n : g_base + g_size;
+    lo = (lo + pg - 1) & ~(pg - 1); hi &= ~(pg - 1);
+    if (lo >= hi) return;
+    for (vm_address_t r = (vm_address_t)lo; r < hi; ) {
+        vm_address_t ra = r; vm_size_t sz = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &ra, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || ra >= hi) break;
+        if (bi.protection != VM_PROT_NONE) { LOG("【黄】客体内存文件后备：物理映射区 %#llx 起已有放开过的映射（权限 %d），不挖，整段照旧进文件", (unsigned long long)ra, bi.protection); return; }
+        r = ra + sz;
+    }
+    if (mmap((void *)(uintptr_t)lo, hi - lo, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0) != (void *)(uintptr_t)lo) {
+        LOG("【红】客体内存文件后备：物理映射区换匿名占位失败（errno=%d），这段照旧进文件", errno);
+        if (mmap((void *)(uintptr_t)lo, hi - lo, PROT_NONE, MAP_FIXED | MAP_SHARED, g_gfd, (off_t)(lo - g_base)) != (void *)(uintptr_t)lo) die("物理映射区换回文件映射也失败 errno=%d", errno);
+        return;
+    }
+    g_anon_lo = lo; g_anon_hi = hi;
+    LOG("客体内存文件后备：物理映射区 %#llx +%llu MB 保持匿名内存（GPU 每帧写的内存池在这里，不进文件、不被反复刷盘；游戏堆照旧走文件）", (unsigned long long)lo, (unsigned long long)((hi - lo) >> 20));
+}
+// [a, a + n) 在文件后备的窗口里：打洞（还文件块，再读是 0）并按原偏移重新映射成不可访问，返回 1；不在 / 没开文件后备 / 落在挖回匿名的那段返回 0（调用方照旧换匿名占位）
 int s2a_guest_zero(uint64_t a, uint64_t n) {
-    if (g_gfd < 0 || a < g_base || a + n > g_base + g_size || !n) return 0;
+    if (g_gfd < 0 || a < g_base || a + n > g_base + g_size || !n || in_anon(a, n)) return 0;
     fpunchhole_t ph; memset(&ph, 0, sizeof ph); ph.fp_offset = (off_t)(a - g_base); ph.fp_length = (off_t)n;
     if (fcntl(g_gfd, F_PUNCHHOLE, &ph)) { static int once; if (!once++) LOG("【红】客体内存文件后备：打洞失败（errno=%d，%#llx +%#llx），这段改回匿名占位", errno, (unsigned long long)a, (unsigned long long)n); return 0; }
     if (mmap((void *)(uintptr_t)a, n, PROT_NONE, MAP_FIXED | MAP_SHARED, g_gfd, (off_t)(a - g_base)) != (void *)(uintptr_t)a) return 0;
     return 1;
 }
 // [a, a + n) 全在文件后备的窗口里返回 1（没开 / 不在 / n 为 0 返回 0）。svc_mem.c 的懒清零（#258）按它判走不走
-int s2a_guest_in_file(uint64_t a, uint64_t n) { return g_gfd >= 0 && n && a >= g_base && a + n <= g_base + g_size; }
+int s2a_guest_in_file(uint64_t a, uint64_t n) { return g_gfd >= 0 && n && a >= g_base && a + n <= g_base + g_size && !in_anon(a, n); }
 int s2a_window_ok(void) { return g_ok; }
 void s2a_window_get(uint64_t *base, uint64_t *size) { *base = g_base; *size = g_size; }
 int s2a_window_session_reset(void) {
