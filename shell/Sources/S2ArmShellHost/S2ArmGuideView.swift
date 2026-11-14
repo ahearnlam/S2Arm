@@ -17,7 +17,7 @@ struct S2ArmGuideView: View {
             // 手机横屏（高度不到 520 点）：左图右文；其余（iPad、竖屏）：上图下文
             let compact = geo.size.height < 520
             let width = min(compact ? 760 : 720, geo.size.width - 32)
-            let height = compact ? min(geo.size.height - 24, 360) : min(geo.size.height - 24, 560)
+            let height = compact ? min(geo.size.height - 24, 360) : min(geo.size.height - 24, 240 + 180 + 61)   // 上图下文：图 240 + 三行说明约 180 + 底栏；Duo 展开屏原先固定 560，下半截空（11-14）；大字号放不下时说明区自己滚
             ZStack {
                 Color.black.opacity(0.72).ignoresSafeArea().accessibilityHidden(true)
                 VStack(spacing: 0) {
