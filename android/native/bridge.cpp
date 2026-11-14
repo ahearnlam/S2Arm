@@ -953,6 +953,9 @@ Java_org_s2arm_android_NativeBridge_configureGpuDriver(JNIEnv *env, jclass, jstr
     g_gpu_driver_external_dir = external;
     fprintf(stderr, "[vk-direct] 驱动目录配置：files=%s external=%s\n",
             files.c_str(), external.empty() ? "(空)" : external.c_str());
+    // 隔离探针（direct_session.c）：有选择时只打开驱动并枚举设备，不改渲染路径。
+    extern "C" int s2a_android_vk_probe_driver(void) __attribute__((weak));
+    if (s2a_android_vk_probe_driver) s2a_android_vk_probe_driver();
     return 0;
 }
 

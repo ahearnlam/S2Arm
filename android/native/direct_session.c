@@ -258,7 +258,12 @@ static int hook_dir_from_self(char *out, size_t cap) {
 }
 
 // 选了驱动才调用：返回 libadrenotools 打开的系统 loader handle；没选 / 失败返回 NULL。
+// 每个进程只试一次（探针先试，正式路径复用同一 handle，避免开第二个命名空间）。
+static void *g_custom_loader;
+static int g_custom_attempted;
 static void *custom_driver_open(const char *state_dir) {
+    if (g_custom_attempted) return g_custom_loader;
+    g_custom_attempted = 1;
     const char *ext_now = s2a_android_gpu_driver_external_dir ? s2a_android_gpu_driver_external_dir() : NULL;
     fprintf(stderr, "[vk-direct] 驱动选择检查：external=%s\n", ext_now && ext_now[0] ? ext_now : "(空)");
     char selection[PATH_MAX];
@@ -333,7 +338,83 @@ static void *custom_driver_open(const char *state_dir) {
         return NULL;
     }
     fprintf(stderr, "[vk-direct] 自定义驱动已加载：%s%s（来源 %s；hooks 在 %s）\n", driver_dir, library, how, hooks);
+    g_custom_loader = handle;
     return handle;
+}
+
+// 隔离探针：只通过 adrenotools 打开驱动、建一个实例、枚举物理设备并打印驱动身份。
+// 不改渲染路径；只用来回答“这个驱动包在 S2Arm 里能不能被 adrenotools 加载”。
+int s2a_android_vk_probe_driver(void) {
+    void *loader = custom_driver_open(NULL);
+    if (!loader) return -1;
+    PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)dlsym(loader, "vkGetInstanceProcAddr");
+    if (!gipa) {
+        fprintf(stderr, "[vk-direct] 驱动探针：loader 没有 vkGetInstanceProcAddr\n");
+        return -1;
+    }
+    PFN_vkCreateInstance create = (PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance");
+    if (!create) {
+        fprintf(stderr, "[vk-direct] 驱动探针：loader 没有 vkCreateInstance\n");
+        return -1;
+    }
+    VkApplicationInfo app = {0};
+    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app.pApplicationName = "S2Arm driver probe";
+    app.applicationVersion = 1;
+    app.pEngineName = "S2Arm";
+    app.engineVersion = 1;
+    app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo info = {0};
+    info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    info.pApplicationInfo = &app;
+    VkInstance instance = VK_NULL_HANDLE;
+    VkResult result = create(&info, NULL, &instance);
+    if (result != VK_SUCCESS) {
+        fprintf(stderr, "[vk-direct] 驱动探针：vkCreateInstance 失败 VkResult=%d\n", result);
+        return -1;
+    }
+    PFN_vkEnumeratePhysicalDevices enumerate =
+        (PFN_vkEnumeratePhysicalDevices)gipa(instance, "vkEnumeratePhysicalDevices");
+    uint32_t count = 0;
+    if (enumerate) enumerate(instance, &count, NULL);
+    if (!enumerate || count == 0) {
+        fprintf(stderr, "[vk-direct] 驱动探针：0 个物理设备\n");
+        PFN_vkDestroyInstance destroy = (PFN_vkDestroyInstance)gipa(instance, "vkDestroyInstance");
+        if (destroy) destroy(instance, NULL);
+        return -1;
+    }
+    VkPhysicalDevice *devices = calloc(count, sizeof *devices);
+    if (devices) enumerate(instance, &count, devices);
+    PFN_vkGetPhysicalDeviceProperties get_props =
+        (PFN_vkGetPhysicalDeviceProperties)gipa(instance, "vkGetPhysicalDeviceProperties");
+    PFN_vkGetPhysicalDeviceProperties2 get_props2 =
+        (PFN_vkGetPhysicalDeviceProperties2)gipa(instance, "vkGetPhysicalDeviceProperties2");
+    for (uint32_t i = 0; devices && i < count; i++) {
+        VkPhysicalDeviceProperties props;
+        memset(&props, 0, sizeof props);
+        if (get_props) get_props(devices[i], &props);
+        char driver[256] = "?", driver_info[256] = "";
+        if (get_props2) {
+            VkPhysicalDeviceDriverProperties dp;
+            memset(&dp, 0, sizeof dp);
+            dp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+            VkPhysicalDeviceProperties2 props2;
+            memset(&props2, 0, sizeof props2);
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &dp;
+            get_props2(devices[i], &props2);
+            snprintf(driver, sizeof driver, "%s", dp.driverName);
+            snprintf(driver_info, sizeof driver_info, "%s", dp.driverInfo);
+        }
+        fprintf(stderr, "[vk-direct] 驱动探针：设备 %u/%u：%s | driver=%s（%s）| api=%u.%u.%u vendor=0x%04x device=0x%04x\n",
+                i + 1, count, props.deviceName, driver, driver_info,
+                VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
+                VK_VERSION_PATCH(props.apiVersion), props.vendorID, props.deviceID);
+    }
+    free(devices);
+    PFN_vkDestroyInstance destroy = (PFN_vkDestroyInstance)gipa(instance, "vkDestroyInstance");
+    if (destroy) destroy(instance, NULL);
+    return 0;
 }
 
 // choice：S2A_VK_CHOICE_GENERIC / DIRECT（手动）/ AUTO（冷启动准备时按包与上局状态判，direct_choice.h）
