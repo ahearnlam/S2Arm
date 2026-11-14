@@ -196,6 +196,14 @@ if(ANDROID)
     target_link_libraries(s2arm_android PRIVATE s2arm_android_memory android log vulkan aaudio mediandk)
     if(S2A_ANDROID_NATIVE_MODE STREQUAL "game")
         target_link_libraries(s2arm_android PRIVATE ${S2A_ANDROID_CODEC_LIBS})
+        # 窄 shim：选驱动时把实例创建入口路由到 adrenotools 的私有 loader；其余 Vulkan 命令不变。
+        target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_VK_LOADER_SHIM=1)
+        target_link_options(s2arm_android PRIVATE
+            -Wl,--wrap=vkEnumerateInstanceVersion
+            -Wl,--wrap=vkEnumerateInstanceExtensionProperties
+            -Wl,--wrap=vkEnumerateInstanceLayerProperties
+            -Wl,--wrap=vkCreateInstance
+            -Wl,--wrap=vkGetInstanceProcAddr)
     endif()
     if(S2A_ANDROID_EXPERIMENTAL_TOUCH)
         target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_EXPERIMENTAL_TOUCH=1)
