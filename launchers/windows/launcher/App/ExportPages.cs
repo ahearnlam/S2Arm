@@ -198,8 +198,9 @@ public sealed partial class EnvironmentWindow
         else if (page == "phoneupdate") contentBody.Children.Add(Card(PhoneUpdateCard()));   // 更新手机上的 S2Arm（InstallModePage.cs）
         else RenderInstall(contentBody);
 
-        // 底部操作栏
-        var bottomBar = RenderBottomBar();
+        // 底部操作栏：出包选择页、装机页左上角已有同去游戏库的「← 游戏库」，不再在底栏重复一个（11-14 体验梳理）；
+        //   进度页（停止 / 回游戏库）与手机更新页（没有别的返回入口）照旧
+        var bottomBar = page is "build" or "install" ? null : RenderBottomBar();
 
         // 出包 / 进度 / 装机页没有游戏库页那条顶栏：胶囊放在这些页顶部，在哪页都找得回装机（#308）；装机进度事件只刷新胶囊这一格
         Control? top = PhonePill() is null ? null
@@ -619,6 +620,7 @@ public sealed partial class EnvironmentWindow
         "files" => T("library.requirements") + " · " + string.Join(" / ", game.Missing),
         "keys" => T("export.block.keys"),
         "busy" => T("export.block.busy"),
+        "queued" => T("export.status.queued"),
         _ => null,
     };
 
@@ -632,23 +634,61 @@ public sealed partial class EnvironmentWindow
         if (!exportIos) return "platform";
         if (game.Missing.Count > 0) return "files";
         if (game.NeedsKeys && catalog?.KeysReady != true) return "keys";
-        if (BusyFor(game) || busy || batchRunning) return "busy";   // 只锁正在装的那款（后端安装不占出包执行锁）；批量出包进行中两款之间也不插单款
+        if (exportQueue.Any(q => q.Game.Id == game.Id)) return "queued";
+        // 出包（单款或批量）在跑时别的款不挡、点了就排队，出完接着出（同 Mac S2ArmLauncherModel.export，「不许堵门」）；
+        //   正在出的这款本身、别的作业锁着这款（装机只锁装的那款，导入 / 游戏库 / 释放空间锁全部）、环境检查中照旧挡
+        if (LockedNow(game)) return "busy";
         return null;
     }
+
+    /// <summary>这款现在被锁着、不能起出包：环境检查中、别的作业锁着这款（出包作业除外，那种排队）、或正在出的就是这款</summary>
+    private bool LockedNow(LibraryGame game) =>
+        busy || jobs.Any(j => j.Kind != JobKind.Pack && j.Blocks(game.Id)) || ((packRunning || batchRunning) && packGame?.Id == game.Id);
 
     private PackJobClient.Request PackRequest(string operation, string gameId, IReadOnlyDictionary<string, object?>? extra = null) =>
         new(paths, privateRoot, connectedFolder!, libraryId!, operation, gameId, extra);
 
     // ---- pack job ----
 
+    /// <summary>出包在跑时点「开始出包」的款：按点的顺序排着，前一个出完（单款或一批）接着出（同 Mac exportQueue）</summary>
+    private readonly List<(LibraryGame Game, bool SpaceOverride, string? Location)> exportQueue = new();
+
     private void StartPack(LibraryGame game, bool spaceOverride = false)
     {
         if (ExportStops(game)) return;
         // 「仍然出包」重试沿用这一款上次选的位置；出包页没读到这款时不传，后端按这款现在的位置
-        if (!spaceOverride || packGame?.Id != game.Id) packLocation = locationsFor == game.Id && exportLocation.Length > 0 ? exportLocation : null;
+        var location = !spaceOverride || packGame?.Id != game.Id ? (locationsFor == game.Id && exportLocation.Length > 0 ? exportLocation : null) : packLocation;
+        if (packRunning || batchRunning)
+        {
+            exportQueue.Add((game, spaceOverride, location));
+            Render();
+            return;
+        }
+        packLocation = location;
         ResetPack(game);
         Navigate("progress");
         packOperation = RunPackAsync(game, spaceOverride);
+    }
+
+    /// <summary>出包（单款或一批）收尾后、以及任何作业收尾后（EndJob）接着出排队的下一款。排头那款被别的作业暂时锁着
+    ///   （出包收尾紧跟着刷新游戏库，那一下所有款都锁着）就原样留在排头、等下一个作业收尾再看；只有这款已不在游戏库、或出 iPhone 关了才从队里拿掉。
+    /// 不跳出包页：玩家正看着别的页就留在原页，状态在顶栏和出包页看得到</summary>
+    private void PumpExportQueue()
+    {
+        while (!packRunning && !batchRunning && exportQueue.Count > 0)
+        {
+            var (queued, spaceOverride, location) = exportQueue[0];
+            var game = catalog?.Games.FirstOrDefault(g => g.Id == queued.Id && !g.Hidden);
+            if (game is not null && exportIos && LockedNow(game)) return;   // 暂时锁着：留在排头，等作业收尾再来
+            exportQueue.RemoveAt(0);
+            if (game is null || !exportIos) continue;   // 已不在游戏库 / 出 iPhone 关了：拿掉，接着下一款
+            var watching = page == "progress";
+            packLocation = location;
+            ResetPack(game);
+            if (watching) Navigate("progress"); else sessionHidden = true;
+            packOperation = RunPackAsync(game, spaceOverride);
+        }
+        Render();
     }
 
     /// 开始出一款前清掉上一款的出包状态，并登记这次出包的作业（出包页「开始出包」）
@@ -715,6 +755,7 @@ public sealed partial class EnvironmentWindow
                 Render();
                 if (batch) _ = BatchExportEndedAsync(job?.Report, error);
                 else if (exportAfterPack is { } g) { exportAfterPack = null; _ = InstallAsync(g); }
+                if (!batch) PumpExportQueue();
             });
         }
     }

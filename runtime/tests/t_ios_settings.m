@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
         };
         for (NSDictionary *spec in plist[@"PreferenceSpecifiers"]) {
             if ([spec[@"Type"] isEqual:@"PSGroupSpecifier"]) {
-                if (group) check(gfxGroup ? groupItems == 1 : groupItems >= 1, gfxGroup ? @"画面组说明对应且仅对应一个设置项" : @"非画面组不为空");
+                if (group && group[@"Title"]) check(gfxGroup ? groupItems == 1 : groupItems >= 1, gfxGroup ? @"画面组说明对应且仅对应一个设置项" : @"非画面组不为空");   // 没标题的组是顶部说明（11-14），本来就没有设置项
                 group = spec;
                 groupItems = 0; gfxGroup = NO;
             } else {
@@ -269,7 +269,7 @@ int main(int argc, char **argv) {
         {
             clear_environment(); unsetenv("S2A_HUD"); [a removeObjectForKey:@"S2ADevHUD"];
             NSDictionary *hud = nil; for (NSDictionary *spec in plist[@"PreferenceSpecifiers"]) if ([spec[@"Key"] isEqual:@"S2ADevHUD"]) hud = spec;
-            check([hud[@"Type"] isEqual:@"PSToggleSwitchSpecifier"] && [hud[@"DefaultValue"] isEqual:@NO], @"开发浮层开关在设置页、缺省关");
+            check(hud == nil, @"开发浮层开关不在系统设置页（11-14 起只在 App 内设置的「诊断」组；系统设置只留 App 打不开时要用的）");
             s2a_ios_apply_graphics_settings(a); check(getenv("S2A_HUD") == NULL, @"开发浮层开关关着：不设 S2A_HUD");
             [a setBool:YES forKey:@"S2ADevHUD"]; clear_environment();
             s2a_ios_apply_graphics_settings(a); check(getenv("S2A_HUD") && !strcmp(getenv("S2A_HUD"), "1"), @"开发浮层开关打开：S2A_HUD=1");
@@ -302,7 +302,7 @@ int main(int argc, char **argv) {
             NSDictionary *metal = nil;
             for (NSDictionary *spec in plist[@"PreferenceSpecifiers"])
                 if ([spec[@"Key"] isEqual:key]) metal = spec;
-            check([metal[@"Type"] isEqual:@"PSToggleSwitchSpecifier"] && [metal[@"DefaultValue"] isEqual:@NO], @"Metal HUD 使用官方偏好键且缺省关");
+            check(metal == nil && ![a objectForKey:key], @"Metal HUD 不在系统设置页（11-14 起只在 App 内「诊断」组），没设过 = 缺省关");
             [a setBool:YES forKey:key];
             check([a synchronize], @"Metal HUD 偏好写入成功");
             NSUserDefaults *reopened = [[NSUserDefaults alloc] initWithSuiteName:suiteA];
