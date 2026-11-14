@@ -731,10 +731,11 @@ def backup(c):
         destination = Path(c.r["path"]).expanduser()
         destination = resolve_path(destination.parent) / destination.name
         home = resolve_path(layout.root_of(c, game["id"]))   # 这款所在存放位置（可以不是默认游戏库）也不许放
+        library = resolve_path(c.library)   # 玩家写的样子（映射盘保留盘符）→ 和解析过的 destination 同一写法再比
         if (
             not destination.parent.is_dir()
-            or destination == c.library
-            or c.library in destination.parents
+            or destination == library
+            or library in destination.parents
             or destination == home
             or home in destination.parents
             or destination == c.private

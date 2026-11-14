@@ -767,7 +767,8 @@ def move_library(c, source):
     info = read(source / ".s2arm-library.json", None)
     if not isinstance(info, dict) or not info.get("id"):
         raise Failure("原来的位置不是可搬的游戏库。", code="library_move_failed")
-    if c.library == source or c.library.is_relative_to(source) or source.is_relative_to(c.library):
+    here = resolve_path(c.library)   # c.library 是玩家写的样子（映射盘保留盘符，core.resolve_library_path），和解析过的 source 比要先解析
+    if here == source or here.is_relative_to(source) or source.is_relative_to(here):
         raise Failure("新位置不能在原来的游戏库里面，也不能包含它。", code="library_move_failed")
     with store_meta_quiet(c, source), _source_locked(c, source):
         pairs = _move_pairs(c, source)
@@ -898,7 +899,7 @@ def _setup(c):
     if c.library == Path(c.library.anchor) or c.library == Path.home() or c.library == c.engine:
         raise Failure("请选择独立的游戏库文件夹，不能直接用整个盘或用户文件夹。")
     install = c.r.get("installDir")
-    if install and (_within(c.library, resolve_path(install)) or _within(resolve_path(install), c.library)):
+    if install and (_within(resolve_path(c.library), resolve_path(install)) or _within(resolve_path(install), resolve_path(c.library))):
         raise Failure("游戏库不能放在 S2Arm 启动器自己的文件夹里，也不能包含它（升级时这个文件夹会整个替换，库会被一起删掉）：换一个文件夹。")
     if c.r.get("freeDefault") and _occupied(c.library):
         c.library = next((n for n in (c.library.with_name(f"{c.library.name} Library" + (f" {i}" if i > 1 else "")) for i in range(1, 10))
@@ -2815,7 +2816,8 @@ def diagnostics(c):
             return {"error": "启动器 Info.plist 无法读取"}
 
     destination = resolve_path(Path(c.r["path"]).expanduser())
-    if c.private == destination or c.private in destination.parents or c.library == destination or c.library in destination.parents:
+    library = resolve_path(c.library)
+    if c.private == destination or c.private in destination.parents or library == destination or library in destination.parents:
         raise Failure("诊断包请选择应用数据和游戏库以外的位置。")
     descriptors = []
     temporary = None
