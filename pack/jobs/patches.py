@@ -329,6 +329,7 @@ def match(c):
     game = community.game_of(c, gid)
     import cheats
     build = cheats.main_build(c, game)
+    version = display_version(c, game) if build else ""
     exact, others = {k: 0 for k in CATS}, {}
     for it, _ in items_for(c, gid, build):
         if it.get("kind") == "pso":   # 管线种子不是玩家可选的补丁，不列
@@ -341,8 +342,22 @@ def match(c):
             v = _version_label(it)   # 看不出版本号的不列（构建号对玩家没意义）
             if v:
                 others.setdefault(v, set()).add(cat)
-    return dict(build=build, exact=exact, total=sum(exact.values()),
+    return dict(build=build, version=version, exact=exact, total=sum(exact.values()),
                 others=[dict(version=v, cats=[k for k in CATS if k in cs]) for v, cs in sorted(others.items(), key=lambda kv: [int(x) if x.isdigit() else 0 for x in re.split(r"[.]", kv[0])])])
+
+
+def display_version(c, game):
+    """这款解过包的显示版本号（共用解包目录 unpack.tsv 的 display_version，带更新的款是更新后的版本）；读不到 = ''。
+    出包页「S 级优化」写明补丁对应哪个版本用（11-14 维护者：让玩家知道版本对上才打入）"""
+    try:
+        from build import shared_dir
+        for line in (shared_dir(c, game) / "extract/unpack.tsv").read_text(encoding="utf-8").splitlines():
+            k, _, v = line.partition("\t")
+            if k == "display_version":
+                return v.strip()
+    except (OSError, ImportError, UnicodeDecodeError, Failure):
+        pass
+    return ""
 
 
 def bid_hit(build16, theirs):

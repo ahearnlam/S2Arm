@@ -511,17 +511,25 @@ public sealed partial class EnvironmentWindow
             // 都没有（这个版本没命中、游戏的别的版本也没有）：整张卡不出（11-13 维护者「没匹配就什么都不显示」）
             if (total == 0 && build.Length > 0 && !(r.TryGetProperty("others", out var oo) && oo.ValueKind == JsonValueKind.Array && oo.GetArrayLength() > 0))
                 return new Panel { IsVisible = false };
-            if (total > 0) { lit = true; stack.Children.Add(rows); stack.Children.Add(Muted(T("export.sgrade.hit.note"), 12)); }
+            // 补丁按版本生效（11-14 维护者）：写明对应玩家这份游戏的哪个版本；列出的别的版本不会打入（同 Mac SGradeCard）
+            var ver = r.TryGetProperty("version", out var vv) ? vv.GetString() ?? "" : "";
+            var mine = ver.Length > 0 ? ver : (build.Length > 16 ? build[..16] : build).ToUpperInvariant();
+            if (total > 0)
+            {
+                lit = true; stack.Children.Add(rows);
+                stack.Children.Add(Muted(T("export.sgrade.hit.version").Replace("{0}", mine), 12));
+                stack.Children.Add(Muted(T("export.sgrade.hit.note"), 12));
+            }
             else
             {
-                stack.Children.Add(Muted(T(build.Length == 0 ? "export.sgrade.later" : "export.sgrade.none"), 12));
+                stack.Children.Add(Muted(build.Length == 0 ? T("export.sgrade.later") : T("export.sgrade.none").Replace("{0}", mine), 12));
                 if (r.TryGetProperty("others", out var others) && others.ValueKind == JsonValueKind.Array && others.GetArrayLength() > 0)
                 {
                     var sep = language == "en" ? ", " : "、";
                     var (open, close) = language == "en" ? (" (", ")") : ("（", "）");
                     var parts = others.EnumerateArray().Take(6).Select(o => o.GetProperty("version").GetString() + open +
                         string.Join(sep, o.GetProperty("cats").EnumerateArray().Select(c => T("export.sgrade.cat." + c.GetString()))) + close);
-                    stack.Children.Add(Muted(T("export.sgrade.others") + string.Join(language == "en" ? "; " : "；", parts), 12));
+                    stack.Children.Add(Muted(T(build.Length == 0 ? "export.sgrade.listed" : "export.sgrade.others") + string.Join(language == "en" ? "; " : "；", parts), 12));
                 }
             }
         }

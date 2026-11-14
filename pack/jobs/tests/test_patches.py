@@ -167,14 +167,18 @@ class PatchesTests(unittest.TestCase):
         self.bundles[f"g/{GID}"].append(it(b"R\t00\n", "pso", "pso", "2.0.1.tsv", [GID], [], path=f"{GID}/2.0.1.tsv"))   # 管线种子：路径带版本号也不列
         self.publish()
         real = cheats.main_build
+        import build   # 解包记录里的显示版本号（出包页写明补丁对应玩家哪一版，11-14）：共用解包目录 extract/unpack.tsv
+        sd = self.t / "shared"; (sd / "extract").mkdir(parents=True); (sd / "extract/unpack.tsv").write_text("title_id\tx\ndisplay_version\t1.3.0\n")
+        real_sd = build.shared_dir; build.shared_dir = lambda c, g: sd; self.addCleanup(setattr, build, "shared_dir", real_sd)
         try:
             cheats.main_build = lambda c, g: "FF1D1C05670DB602"
             r = patches.match(self.c)
             self.assertEqual((r["build"], r["exact"], r["total"]), ("FF1D1C05670DB602", {"widescreen": 0, "fps": 1, "gfx": 0, "cheat": 1}, 2))
+            self.assertEqual(r["version"], "1.3.0")
             self.assertEqual(r["others"], [{"version": "1.0", "cats": ["widescreen"]}, {"version": "1.3.0", "cats": ["fps"]}])
             cheats.main_build = lambda c, g: ""                                    # 没解过包：不知道版本，精确命中为空，只列各版本
             r = patches.match(self.c)
-            self.assertEqual((r["build"], r["total"]), ("", 0))
+            self.assertEqual((r["build"], r["total"], r["version"]), ("", 0, ""), "没解过包不报版本号（不知道玩家是哪一版）")
             self.assertEqual([o["version"] for o in r["others"]], ["1.0", "1.3.0"])
         finally:
             cheats.main_build = real
