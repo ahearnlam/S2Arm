@@ -177,6 +177,16 @@
       "reason": "自家 S2Arm 应用图标（同目录 AppIcon.svg 为源稿）和透明底字标。"
     },
     {
+      "id": "own_feature_spotlight_art",
+      "categories": [
+        "game_screenshot"
+      ],
+      "paths": [
+        "docs/site/feature/*.jpg"
+      ],
+      "reason": "启动器新功能大窗的示意图（HTML 画的界面示意与抽象风景，生成脚本在维护者本机），不含任何游戏画面。"
+    },
+    {
       "id": "own_installer_ui",
       "categories": [
         "game_screenshot"
