@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# 门禁只看：pack/sysdata_synth.py pack/sysdata_mii.py tools/make_sysdata_synth_tar.py services/S2A.Services/systemdata_synth.tar
 # 嵌进服务程序集的合成系统数据（services/S2A.Services/systemdata_synth.tar）与生成器 pack/sysdata_synth.py 不漂移：
 #   期望 = 现在重跑 tools/make_sysdata_synth_tar.py 的输出，逐字节相同；成员覆盖生成器登记的全部号（GEN）。改了生成器忘了重出这份 tar → 红，
 #   提示命令：python3 tools/make_sysdata_synth_tar.py services/S2A.Services/systemdata_synth.tar
