@@ -13706,6 +13706,38 @@
           }
         }
       }
+    },
+    "Mix with Other Apps": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mix with Other Apps"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "与其他 App 混音"
+          }
+        }
+      }
+    },
+    "When on, music or podcasts from other apps keep playing with the game, and the Silent switch only mutes the game.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When on, music or podcasts from other apps keep playing with the game, and the Silent switch only mutes the game."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开后，别的 App 的音乐、播客和游戏一起放，静音键只静音游戏。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

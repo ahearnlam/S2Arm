@@ -7212,10 +7212,6 @@
   "en": "Check this computer's network (that s2arm.com opens) and click again; a partial download is never used as a good one."
  },
  {
-  "source": "导出诊断包，手动发到 GitHub 帖子或群里；网络恢复后也可以再点一次「上传给开发者」。",
-  "en": "Export the diagnostics package and post it to the GitHub issue or group yourself; once the network is back you can also click \"Upload to developers\" again."
- },
- {
   "source": "用原版游戏文件重新导入这款：先在游戏库里移除它，再把原版文件拖进来。",
   "en": "Re-import this game from the original game files: remove it from the library first, then drag the original files in."
  },
@@ -7366,5 +7362,9 @@
  {
   "source": "连不上苹果的组件服务器：检查网络，关掉或换个代理后在设置里再点「一键下载」；还不行就从苹果开发者网站下载与你的 Xcode 配套的 Metal Toolchain（.dmg），在「终端」运行 xcodebuild -importComponent MetalToolchain -importPath <下载的 .dmg>，回来点「重新检查」。",
   "en": "Can't reach Apple's component server: check your network, turn off or switch your proxy, then click Download in Settings again. If it still fails, download the Metal Toolchain (.dmg) matching your Xcode from Apple's developer website, run xcodebuild -importComponent MetalToolchain -importPath <the .dmg> in Terminal, then click Recheck."
+ },
+ {
+  "source": "导出诊断包，手动发到 GitHub 帖子或群里；网络恢复后也可以再点一次「故障报修」。",
+  "en": "Export the diagnostics package and post it to the GitHub issue or group yourself; once the network is back you can also click \"Report a problem\" again."
  }
 ]
