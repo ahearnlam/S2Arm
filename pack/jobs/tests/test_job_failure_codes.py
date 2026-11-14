@@ -600,6 +600,18 @@ class LogCauses(JobCase):
         got = ipa.oneclick_failure(events, None, log)
         self.assertEqual((got.code, str(got)), ("disk_full", "磁盘空间不够：准备这个游戏需要更多空余空间。"))
 
+    @um.patch("errors._free_bytes", lambda path: 500 << 30)   # 盘上还有 500 GB：不是真满，是我方开工前复核按预估停的
+    def test_direct_preflight_space_estimate_is_disk_full(self):
+        # 诊断 D-QDK9（Mac 0.3.9）：直连库开工前空间复核按预估停下。原先盘满字样被「核实剩余空间」否掉，落成未归类的 package_failed，
+        #   玩家没了「释放空间 / 仍然继续」。期望手写：码 disk_full、上屏同盘满那句
+        events = self.root / "events.jsonl"
+        events.write_text(json.dumps(dict(ev="result", ok=False, msg="刷新停在：【红】0400A3A01EE4C000 刷新停在 direct 阶段（rc=1）")))
+        log = self.root / "ipa.log"
+        log.write_text("【红】0400A3A01EE4C000 直连库出库失败（rc=1，[直连库] 🔴 直连库开工前空间不足，没开始编）\n"
+                       "【红】0400A3A01EE4C000 刷新停在 direct 阶段（rc=1），现行 = 0400A3A01EE4C000@ex-8addb90a\n")
+        got = ipa.oneclick_failure(events, None, log)
+        self.assertEqual((got.code, str(got)), ("disk_full", "磁盘空间不够：准备这个游戏需要更多空余空间。"))
+
     def test_metal_missing_beats_direct_stage(self):
         for line in ('xcrun: error: unable to find utility "metal", not a developer tool or in PATH',
                      "error: cannot execute tool 'metal' due to missing Metal Toolchain; use: xcodebuild -downloadComponent MetalToolchain"):

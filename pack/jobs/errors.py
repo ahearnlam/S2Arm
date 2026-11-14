@@ -310,7 +310,7 @@ LOG_CAUSES = (
     (r"WinError 206|filename or extension is too long|文件名或扩展名太长", "windows_path_too_long"),
     (r"No space left on device|\bENOSPC\b|\[Errno 28\]|\berrno\s*[=:]?\s*28\b"          # POSIX / Python OSError / .NET IOException（Mac）
      r"|There is not enough space on the disk|\bDisk full\b|WinError 112|ERROR_DISK_FULL|0x80070070"   # Windows / .NET
-     r"|STATUS_DISK_FULL|磁盘空间不足", "disk_full"),                                       # Windows 退出码注（direct_lib.sh 127）/ 我方字样
+     r"|STATUS_DISK_FULL|磁盘空间不足|开工前空间不足", "disk_full"),                                       # Windows 退出码注（direct_lib.sh 127）/ 我方字样
     # 内存用完（#711：Windows 16 GB 抽取按核数开满进程池，Python 子进程 MemoryError）：Python / .NET / Windows 提交上限原样字样
     (r"(?m:^\s*MemoryError\b)|OutOfMemoryException|\[WinError 1455\]|paging file is too small|页面文件太小|Cannot allocate memory|\bENOMEM\b", "out_of_memory"),
     # 盘不支持某种文件操作（exFAT 外接盘不支持原子改名 / 克隆 / 硬链接，实测 errno 45）：出包写入的这块盘格式不对，说清换 APFS 盘（11-10 网友：存放位置设到外接盘写入失败）
@@ -436,6 +436,10 @@ def _tool_present(name):
 def _confirm(code, line, log):
     """候选码的事实核对 → (是否采信, 依据)。只核环境类的码，其余直接采信"""
     if code == "disk_full":
+        # 我方自己的开工前空间复核（graphics/tools/direct/direct_lib.sh → pack/jobs/space_rule.py direct-check）按预估停下：盘本身没满，
+        #   不能按「剩余空间」核真假，按原话采信（诊断 D-QDK9：被核成「不是盘满」后落到未归类的 package_failed，玩家没了「释放空间 / 仍然继续」）
+        if re.search(r"开工前空间不足|直连库预计还要", line):
+            return True, "我方开工前空间复核按预估停下"
         paths = [m.group(1) for m in _LOG_PATH_ANY.finditer(line)] + ([str(Path(log).parent)] if log else [])
         free = [(p, f) for p, f in ((p, _free_bytes(p)) for p in paths) if f is not None]
         if not free:
