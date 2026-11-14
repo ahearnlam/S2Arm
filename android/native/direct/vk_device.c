@@ -176,6 +176,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     vkGetPhysicalDeviceProperties2(out->physical, &props2);
     snprintf(out->driver_name, sizeof out->driver_name, "%.120s", driver.driverName);
     snprintf(out->driver_info, sizeof out->driver_info, "%.120s", driver.driverInfo);
+    out->driver_id = (int)driver.driverID;
 
     uint32_t family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(out->physical, &family_count, NULL);

@@ -26,6 +26,7 @@ struct s2a_vk_device {
     VkCommandPool command_pool;
     char driver_name[128];
     char driver_info[128];
+    int driver_id;   // VkDriverId（VkPhysicalDeviceDriverProperties.driverID）：区分厂商驱动与 Mesa 实现
     int has_android_surface;
     int has_swapchain;
     // VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT（Vulkan 1.1 / VK_KHR_maintenance1）：
