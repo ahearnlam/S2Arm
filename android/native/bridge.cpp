@@ -942,6 +942,8 @@ Java_org_s2arm_android_NativeBridge_configureFrameLogDir(JNIEnv *env, jclass, js
 static std::string g_gpu_driver_files_dir, g_gpu_driver_external_dir;
 extern "C" const char *s2a_android_gpu_driver_files_dir(void) { return g_gpu_driver_files_dir.c_str(); }
 extern "C" const char *s2a_android_gpu_driver_external_dir(void) { return g_gpu_driver_external_dir.c_str(); }
+// 隔离探针（direct_session.c）：诊断 / 非 game 构建里没有这个符号。
+extern "C" int s2a_android_vk_probe_driver(void) __attribute__((weak));
 
 extern "C" JNIEXPORT jint JNICALL
 Java_org_s2arm_android_NativeBridge_configureGpuDriver(JNIEnv *env, jclass, jstring files_dir, jstring external_dir) {
@@ -954,7 +956,6 @@ Java_org_s2arm_android_NativeBridge_configureGpuDriver(JNIEnv *env, jclass, jstr
     fprintf(stderr, "[vk-direct] 驱动目录配置：files=%s external=%s\n",
             files.c_str(), external.empty() ? "(空)" : external.c_str());
     // 隔离探针（direct_session.c）：有选择时只打开驱动并枚举设备，不改渲染路径。
-    extern "C" int s2a_android_vk_probe_driver(void) __attribute__((weak));
     if (s2a_android_vk_probe_driver) s2a_android_vk_probe_driver();
     return 0;
 }
