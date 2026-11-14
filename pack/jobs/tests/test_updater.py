@@ -7,6 +7,8 @@ import shutil
 import sys
 import subprocess
 import tempfile
+import unittest.mock
+import types
 import threading
 import time
 import unittest
@@ -561,6 +563,94 @@ class LegacyCleanupTests(unittest.TestCase):
             self.assertFalse(updater.legacy_apply_running(u))
             self.assertTrue(updater.clear_stale_pending(d, "0.3.10"))
             self.assertEqual(sorted(p.name for p in u.iterdir()), ["notes", "seen.json"])
+
+    def test_install_dir_mac_windows_and_source_tree(self):
+        """期望手写：Mac S2Arm.app/Contents/Resources/Jobs/updater.py → S2Arm.app；Windows <装>/Engine/pack/jobs/updater.py → <装>；源码树 → None"""
+        with tempfile.TemporaryDirectory() as d:
+            mac = Path(d) / "Applications/S2Arm.app"; (mac / "Contents/Resources/Jobs").mkdir(parents=True); (mac / "Contents/Info.plist").write_text("x")
+            win = Path(d) / "Programs/S2Arm"; (win / "Engine/pack/jobs").mkdir(parents=True); (win / "S2Arm.exe").write_text("x")
+            self.assertEqual(updater.install_dir(mac / "Contents/Resources/Jobs/updater.py"), mac.resolve())
+            self.assertEqual(updater.install_dir(win / "Engine/pack/jobs/updater.py"), win.resolve())
+            self.assertIsNone(updater.install_dir())   # 本文件在源码树 pack/jobs/ 下
+
+    def _leftovers(self, d):
+        inst = Path(d) / "Programs/S2Arm"; (inst / "Engine").mkdir(parents=True); (inst / "S2Arm.exe").write_text("x")
+        old = Path(d) / "Programs/S2Arm.s2arm-old"; (old / "Runtime/python").mkdir(parents=True); (old / "Runtime/python/python.exe").write_bytes(b"x" * 2 * 1048576)
+        (Path(d) / "Programs/S2Arm.s2arm-bad").mkdir(); (Path(d) / "Programs/S2Arm.s2arm-new/Engine").mkdir(parents=True)
+        for keep in ("S2Arm.backup", "Other.s2arm-old", "S2Arm.s2arm-old.txt"):
+            (Path(d) / "Programs" / keep).mkdir() if "." not in keep[-4:] else (Path(d) / "Programs" / keep).write_text("x")
+        return inst
+
+    def test_sweeps_only_our_three_leftovers_and_logs_each(self):
+        """Windows 实测的现场：完整 .s2arm-old（这里 2 MB）+ 空 .s2arm-bad + 半份 .s2arm-new。期望手写：三个都删、返回三个名字、update.log 三行带大小；
+        安装目录本身、名字不合规则的（S2Arm.backup、Other.s2arm-old、S2Arm.s2arm-old.txt）都不动"""
+        with tempfile.TemporaryDirectory() as d:
+            inst = self._leftovers(d)
+            gone = updater.sweep_install_leftovers(d, inst, in_use=lambda f: False)
+            self.assertEqual(sorted(gone), ["S2Arm.s2arm-bad", "S2Arm.s2arm-new", "S2Arm.s2arm-old"])
+            self.assertEqual(sorted(p.name for p in (Path(d) / "Programs").iterdir()), ["Other.s2arm-old", "S2Arm", "S2Arm.backup", "S2Arm.s2arm-old.txt"])
+            log = (Path(d) / "logs/update.log").read_text(encoding="utf-8")
+            self.assertEqual(log.count("update_leftover_removed"), 3)
+            self.assertIn("S2Arm.s2arm-old（2 MB）", log)
+            self.assertEqual(updater.sweep_install_leftovers(d, inst, in_use=lambda f: False), [])   # 再来一次没东西
+
+    def test_leftover_in_use_or_locked_by_windows_is_kept(self):
+        """期望手写：有进程在用的（in_use）不删；改名失败（Windows 文件被占用）的不删、不记日志；其余照删"""
+        with tempfile.TemporaryDirectory() as d:
+            inst = self._leftovers(d)
+            real = os.rename
+            def rename(a, b):
+                if Path(a).name == "S2Arm.s2arm-new":
+                    raise PermissionError(5, "拒绝访问")
+                return real(a, b)
+            with unittest.mock.patch.object(updater.os, "rename", rename):
+                gone = updater.sweep_install_leftovers(d, inst, in_use=lambda f: f.name == "S2Arm.s2arm-old")
+            self.assertEqual(gone, ["S2Arm.s2arm-bad"])
+            self.assertTrue((Path(d) / "Programs/S2Arm.s2arm-old/Runtime/python/python.exe").is_file())
+            self.assertTrue((Path(d) / "Programs/S2Arm.s2arm-new/Engine").is_dir())
+            self.assertEqual((Path(d) / "logs/update.log").read_text(encoding="utf-8").count("update_leftover_removed"), 1)
+
+    def test_leftovers_kept_while_old_updater_is_swapping_and_half_deleted_resumed(self):
+        """期望手写：旧替换进程持着 .update.lock（还在换版，它要用 .s2arm-old / -new）→ 一个都不删；锁放开后照删，上次删到一半的 .deleting 也删掉"""
+        with tempfile.TemporaryDirectory() as d:
+            inst = self._leftovers(d)
+            (Path(d) / "Programs/S2Arm.s2arm-old.deleting/x").mkdir(parents=True)
+            u = Path(d) / "updates"; u.mkdir(); (u / ".update.lock").write_text("x")
+            holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys, time; f = open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(60)",
+                                       str(u / ".update.lock")], stdout=subprocess.PIPE, text=True)
+            self.addCleanup(holder.kill)
+            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            self.assertEqual(updater.sweep_install_leftovers(d, inst, in_use=lambda f: False), [])
+            self.assertTrue((Path(d) / "Programs/S2Arm.s2arm-old").is_dir())
+            holder.kill(); holder.wait()
+            # 三个残骸；上次删到一半的 S2Arm.s2arm-old.deleting 和这次 .s2arm-old 改名的目标同名，改名前先删掉它，不另计
+            self.assertEqual(len(updater.sweep_install_leftovers(d, inst, in_use=lambda f: False)), 3)
+            self.assertFalse((Path(d) / "Programs/S2Arm.s2arm-old.deleting").exists())
+
+    def test_in_use_reads_process_table(self):
+        """期望手写：进程表里有可执行文件在这个目录下的 → 在用；只是名字前缀相同的另一个目录（S2Arm.app.s2arm-old2）不算；进程表拿不到（None）→ 一律算在用"""
+        exes = ["/Applications/S2Arm.app.s2arm-old/Contents/MacOS/S2ArmApple --control", "/Applications/S2Arm.app.s2arm-old2/x"]
+        check = updater.in_use_by(exes)
+        self.assertTrue(check(Path("/Applications/S2Arm.app.s2arm-old")))
+        self.assertFalse(check(Path("/Applications/S2Arm.app.s2arm-new")))
+        self.assertTrue(updater.in_use_by(None)(Path("/Applications/S2Arm.app.s2arm-new")))
+
+    def test_half_deleted_in_use_kept_and_resumed_one_logged(self):
+        """期望手写：上次删到一半的 .deleting 有进程在用 → 不动；没人用 → 删掉并记一行「上次没删完」"""
+        with tempfile.TemporaryDirectory() as d:
+            inst = Path(d) / "Programs/S2Arm"; (inst / "Engine").mkdir(parents=True); (inst / "S2Arm.exe").write_text("x")
+            half = Path(d) / "Programs/S2Arm.s2arm-old.deleting"; (half / "Runtime").mkdir(parents=True)
+            self.assertEqual(updater.sweep_install_leftovers(d, inst, in_use=lambda f: True), [])
+            self.assertTrue(half.is_dir())
+            self.assertEqual(updater.sweep_install_leftovers(d, inst, in_use=lambda f: False), ["S2Arm.s2arm-old.deleting"])
+            self.assertIn("上次没删完", (Path(d) / "logs/update.log").read_text(encoding="utf-8"))
+
+    def test_no_leftovers_does_not_read_process_table(self):
+        """绝大多数启动没有残骸：期望手写，不起进程表（running_executables 一次都不调）"""
+        with tempfile.TemporaryDirectory() as d:
+            inst = Path(d) / "Programs/S2Arm"; (inst / "Engine").mkdir(parents=True); (inst / "S2Arm.exe").write_text("x")
+            with unittest.mock.patch.object(updater, "running_executables", side_effect=AssertionError("不该读进程表")):
+                self.assertEqual(updater.sweep_install_leftovers(d, inst), [])
 
     def test_pending_without_running_updater_is_cleared(self):
         """准备好了没换（旧版下载完、玩家改用 DMG 装了新版）：没有替换进程，照常全清。期望手写：只剩 notes/ 与 seen.json"""

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 
@@ -534,6 +535,90 @@ def clear_stale_pending(private_root, current):
     return gone
 
 
+LEFTOVER_SUFFIXES = (".s2arm-old", ".s2arm-new", ".s2arm-bad")   # 旧自写换版（≤0.3.9 apply / swap）在安装目录旁边起的名字
+
+
+def install_dir(here=None):
+    """本文件所在的安装目录：Mac S2Arm.app/Contents/Resources/Jobs/updater.py、Windows <安装目录>/Engine/pack/jobs/updater.py，往上三层。
+    认不出（源码树里跑）→ None"""
+    root = Path(here or __file__).resolve().parents[3]
+    if root.name.endswith(".app") and (root / "Contents" / "Info.plist").is_file():
+        return root
+    if (root / "S2Arm.exe").is_file() and (root / "Engine").is_dir():
+        return root
+    return None
+
+
+def running_executables():
+    """当前所有进程的可执行文件路径（看不了进程表 → None，调用方当「在用」不删）。
+    Windows 不能靠「改名失败 = 在用」：11-14 Windows 实测，目录里的 python.exe 正在跑，整目录改名照样成功"""
+    try:
+        if os.name == "nt":
+            cmd = ["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { $_.ExecutablePath }"]
+        else:
+            cmd = ["/bin/ps", "-axww", "-o", "command="]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+
+def in_use_by(executables):
+    """→ folder 判定函数：有进程的可执行文件在这个目录里（启动器、内置 Python、游戏宿主……）；进程表拿不到一律算在用"""
+    def check(folder):
+        if executables is None:
+            return True
+        prefix = os.path.normcase(str(folder)) + os.sep
+        return any(os.path.normcase(line).startswith(prefix) for line in executables)
+    return check
+
+
+def sweep_install_leftovers(private_root, install=None, *, in_use=None):
+    """旧自写换版留在安装目录旁的残骸（11-14 Windows 实测：0.3.9 → 0.3.10 回滚没成，旁边留下完整的 S2Arm.s2arm-old 约 680 MB 和空的 .s2arm-bad；
+    Mac 半途换版也会留 .s2arm-new / .s2arm-old）启动时清掉。只认「安装目录名 + 这三个后缀」，不碰别的；旧替换进程还持着更新锁（还在换版）就不动；
+    有进程在用的不删——Mac 看进程表；Windows 先整目录改名到临时名，文件被占用改名就失败、照样跳过。清掉的每一个记进 update.log。返回清掉的目录名"""
+    install = Path(install) if install else install_dir()
+    if install is None or legacy_apply_running(Path(private_root) / "updates"):
+        return []
+    candidates = [install.with_name(install.name + suffix) for suffix in LEFTOVER_SUFFIXES] + list(install.parent.glob(install.name + ".s2arm-*.deleting"))
+    if not any(c.is_dir() for c in candidates):
+        return []   # 绝大多数启动走这里：不起进程表
+    if in_use is None:
+        in_use = in_use_by(running_executables())
+    log = lambda what: record_failure(types.SimpleNamespace(private_root=str(private_root)), "update_leftover_removed", what)
+    gone = []
+    for suffix in LEFTOVER_SUFFIXES:
+        leftover = install.with_name(install.name + suffix)
+        if not leftover.is_dir() or leftover.is_symlink() or in_use(leftover):
+            continue
+        try:
+            size = sum(f.stat().st_size for f in leftover.rglob("*") if f.is_file() and not f.is_symlink())
+        except OSError:
+            size = 0
+        doomed = leftover.with_name(leftover.name + ".deleting")
+        try:
+            if doomed.exists():
+                shutil.rmtree(doomed, ignore_errors=True)
+            os.rename(leftover, doomed)   # 先改名再删：删到一半断电 / 被杀，下次认 .deleting 接着删，不留半个像样的旧版
+        except OSError:
+            continue
+        shutil.rmtree(doomed, ignore_errors=True)
+        if doomed.exists():
+            continue   # 只删掉一部分：留着 .deleting，下次启动接着删
+        gone.append(leftover.name)
+        log(f"清掉了旧版应用内更新留下的 {leftover}（{size / 1048576:.0f} MB）")
+    for left in install.parent.glob(install.name + ".s2arm-*.deleting"):   # 上次删到一半的
+        if not left.is_dir() or left.is_symlink() or in_use(left):
+            continue
+        shutil.rmtree(left, ignore_errors=True)
+        if not left.exists():
+            gone.append(left.name)
+            log(f"清掉了上次没删完的 {left}")
+    return gone
+
+
 def record_failure(args, code, message, detail=""):
     """失败原因写进诊断包会收的日志（core.logs_root：默认位置的 logs/，库没建好时私有目录/logs）：界面只有一句话，玩家反馈时靠这里定位"""
     root = getattr(args, "private_root", None)
@@ -567,6 +652,10 @@ def main(argv=None):
     if a.command == "inbox":
         try:
             clear_stale_pending(a.private_root, a.current)
+        except OSError:
+            pass
+        try:
+            sweep_install_leftovers(a.private_root)
         except OSError:
             pass
         try:
