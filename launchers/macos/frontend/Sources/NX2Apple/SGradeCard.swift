@@ -136,19 +136,17 @@ struct SGradeCardView: View {
     }
 }
 
-/// 游戏库封面左上角的金色 S（v0.4.0 维护者：已导出的游戏自动补上 S 级优化，封面点亮金色 S）：金色毛玻璃 S + 暗底圆角托，浅色深色封面上都看得清
+/// 游戏库封面左上角的金色 S（v0.4.0 维护者：已导出的游戏自动补上 S 级优化，封面点亮金色 S；只要这个 S，不加外框和底色）：
+///   一层淡投影让它在浅色封面上也看得清
 struct SGradeBadge: View {
     var size: CGFloat = 28
     var sImage: NSImage = SGradeCardView.sGold
     var body: some View {
-        Image(nsImage: sImage).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+        let s = Image(nsImage: sImage).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+        s.overlay(s)   // 毛玻璃 S 本身半透明：叠一层更实，浅色封面上不被冲淡
             .frame(width: size, height: size)
-            .padding(size * 0.14)
-            .background(RoundedRectangle(cornerRadius: size * 0.32).fill(Color.black.opacity(0.42)))
-            .overlay(RoundedRectangle(cornerRadius: size * 0.32).strokeBorder(LinearGradient(colors: [SGradeCardView.goldHi.opacity(0.7), SGradeCardView.rose.opacity(0.5)],
-                                                                                              startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8))
-            .shadow(color: SGradeCardView.gold.opacity(0.55), radius: size * 0.3)
-            .padding(6)
+            .shadow(color: .black.opacity(0.45), radius: size * 0.12, y: size * 0.04)
+            .padding(8)
             .accessibilityLabel("S")
             .accessibilityIdentifier("card.sgrade")
     }

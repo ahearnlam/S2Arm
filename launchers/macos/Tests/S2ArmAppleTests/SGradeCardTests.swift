@@ -55,7 +55,12 @@ import XCTest
             let r = ImageRenderer(content: view); r.scale = 2
             let rep = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(r.nsImage?.tiffRepresentation)))
             if let dir = ProcessInfo.processInfo.environment["S2A_SGRADE_SHOT"] { try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appendingPathComponent("sgrade_badge_\(name).png")) }
-            XCTAssertGreaterThan(goldPixels(rep), 0, "\(name) 封面上金色 S 画得出")
+            // 看得见 = 角上有足够多的像素和封面底色明显不同（只有 S、没有框和底色，v0.4.0 维护者）
+            let bgc = try XCTUnwrap(rep.colorAt(x: rep.pixelsWide - 4, y: rep.pixelsHigh - 4)?.usingColorSpace(.sRGB)); var diff = 0
+            for y in 0..<min(rep.pixelsHigh, 200) { for x in 0..<min(rep.pixelsWide, 200) {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                if abs(c.redComponent - bgc.redComponent) + abs(c.greenComponent - bgc.greenComponent) + abs(c.blueComponent - bgc.blueComponent) > 0.35 { diff += 1 } } }
+            XCTAssertGreaterThan(diff, 400, "\(name) 封面上 S 看得见（明显不同的像素 \(diff)）")
         }
     }
 
