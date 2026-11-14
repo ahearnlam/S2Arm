@@ -83,6 +83,25 @@ public sealed partial class EnvironmentWindow
         Background = Surface, CornerRadius = new CornerRadius(12), Padding = new Thickness(padding), Child = content
     };
 
+    /// <summary>顶部大图：只认这款文件夹里的商店横图（LibraryGame.BannerFile），按 1600 宽解码（铺满整条也不糊）；读不出就 null、退回封面卡片</summary>
+    private Bitmap? HeroBanner(LibraryGame game)
+    {
+        if (connectedFolder is null || game.BannerFile() is not { } path) return null;
+        try
+        {
+            if (new FileInfo(path).Length > 16 * 1024 * 1024) return null;
+            // 缓存键另起：没有自带图标的款 cover 也指向 banner.jpg，封面卡片按 240 宽解码的那份不能拿来铺大图
+            if (!covers.TryGetValue(path + "#hero", out var image))
+            {
+                using var file = File.OpenRead(path);
+                image = Bitmap.DecodeToWidth(file, 1600);
+                covers.Add(path + "#hero", image);
+            }
+            return image;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+    }
+
     /// <summary>封面 + 已打上 S 级优化的左上角金色 S（同 Mac LauncherView+Library SGradeBadge：只有 S、没有框和底色，叠三层更实、加投影）</summary>
     private Control GameCover(LibraryGame game, int size)
     {
@@ -164,7 +183,21 @@ public sealed partial class EnvironmentWindow
 
         var games = catalog?.Games.Where(g => !g.Hidden).ToArray() ?? [];
         var hero = games.FirstOrDefault(g => g.Id == selectedGame) ?? games.FirstOrDefault();
-        if (hero is not null)
+        if (hero is not null && HeroBanner(hero) is { } heroBanner)
+        {
+            // 顶部大图（11-14 维护者：「换成用 banner」）：商店横图 1920×1080 铺满整条，标题压在底部渐变上；没有横图的款退回下面的封面卡片
+            var art = new Grid { Height = 280 };
+            art.Children.Add(new Image { Source = heroBanner, Stretch = Stretch.UniformToFill, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Center });
+            art.Children.Add(new Border { Background = new LinearGradientBrush { StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
+                GradientStops = { new GradientStop(Color.Parse("#000E0E10"), 0.35), new GradientStop(Color.Parse("#E60E0E10"), 1) } } });
+            var overlay = new StackPanel { Spacing = 6, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(28, 0, 28, 22) };
+            overlay.Children.Add(Muted(T(selectedGame is null ? "library.title" : "library.selected"), 14));
+            overlay.Children.Add(Label(hero.Name, 32));
+            overlay.Children.Add(Muted(T("library.version") + " · " + hero.Version, 14));
+            art.Children.Add(overlay);
+            body.Children.Add(new Border { CornerRadius = new CornerRadius(16), ClipToBounds = true, Child = art });
+        }
+        else if (hero is not null)
         {
             var banner = new Grid { ColumnDefinitions = new ColumnDefinitions("100,*"), ColumnSpacing = 24 };
             banner.Children.Add(GameCover(hero, 100));
@@ -172,6 +205,21 @@ public sealed partial class EnvironmentWindow
             title.Children.Add(Label(T(selectedGame is null ? "library.title" : "library.selected")));
             title.Children.Add(Label(hero.Name, 28));
             title.Children.Add(Label(T("library.version") + " · " + hero.Version));
+            // 大卡的主操作（11-14 体验梳理，开发甲定：照 Mac 大卡，两端一套体验；Windows 没有「开始游戏」）：装到 iPhone（iPhone 版做好才有）+ 出包。
+            //   走和下面列表卡片同一套流程（Navigate("install") / OpenBuild），列表上的按钮留作次要入口
+            var heroActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 6, 0, 0) };
+            var heroBusy = BusyFor(hero) || hero.LocationState is "missing" or "offline";
+            if (hero.IphoneReady)
+            {
+                var install = Primary(T(installMode == "export" ? "export.done.export" : "library.hero.install"),
+                    () => { libraryFolder = libraryFolderBox.Text ?? libraryFolder; selectedGame = hero.Id; readinessFor = null; Navigate("install"); }, !BusyFor(hero));
+                AutomationId(install, "library.hero.install");
+                heroActions.Children.Add(install);
+            }
+            var build = Action("nav.build", () => { libraryFolder = libraryFolderBox.Text ?? libraryFolder; selectedGame = hero.Id; OpenBuild(); }, !heroBusy);
+            build.VerticalAlignment = VerticalAlignment.Center;
+            heroActions.Children.Add(build);
+            title.Children.Add(heroActions);
             Grid.SetColumn(title, 1); banner.Children.Add(title); body.Children.Add(Card(banner, 20));
         }
 

@@ -544,8 +544,8 @@ NVN(nvnTextureBuilderSetStride, void, NVNtextureBuilder *b, ptrdiff_t s) { TB(b)
 NVN(nvnTextureBuilderSetStorage, void, NVNtextureBuilder *b, NVNmemoryPool *p, ptrdiff_t off) { TB(b)->pool = (pool_t *)p; TB(b)->off = off; }
 NVN(nvnTextureBuilderSetPackagedTextureLayout, void, NVNtextureBuilder *b, const NVNpackagedTextureLayout *l) {
     TB(b)->has_layout = l != NULL; if (l) memcpy(TB(b)->layout, l->layout, 8);
-    // byte 0 = block height (log2 GOBs) + 1 in bits 0-7; byte 1 = row-width alignment (log2 GOBs) + 1 in bits 8-15 (kept in the same int: tex_t must stay <= 0x80)
-    TB(b)->d.pkg_block_h = l ? (l->layout[0] + 1) | (l->layout[1] + 1) << 8 : 0;
+    // byte 0 (low nibble block height, high nibble block depth, log2 GOBs) | byte 1's low nibble (width alignment, log2 GOBs) << 8, + 1 (one int: tex_t must stay <= 0x80; #676)
+    TB(b)->d.pkg_layout = l ? (l->layout[0] | (l->layout[1] & 0xf) << 8) + 1 : 0;
 }
 NVN(nvnTextureBuilderGetFlags, NVNtextureFlags, const NVNtextureBuilder *b) { return (NVNtextureFlags)((const tex_builder_t *)b)->d.flags; }
 NVN(nvnTextureBuilderGetDevice, const NVNdevice *, const NVNtextureBuilder *b) { return ((const tex_builder_t *)b)->dev; }
@@ -1345,7 +1345,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 #endif
     for (int i = 0; i < n; i++) {
         dm_shader_mesh_hold(sd[i].data, sd[i].control);   // NVN2 keys are deferred, but control + code are valid here; retain only mesh inputs
-        if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
+        if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); dm_shader_vs_hold_key(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
         else { uint8_t early[8]; if (keys_hash_early(&sd[i], early)) nvn_be_shader_prefetch(early); }   // S2Arm #674: Switch 2 stages, keyed at first use
 #if defined(__ANDROID__)   // Android 直连的阶段 / 源快照 / 按 serial 记 key；Apple 回放不读这些，保持 main 原行为
         // 阶段只在 control 仍有效、code 已映射的本次调用内读定；code 未映射时留给 Bind

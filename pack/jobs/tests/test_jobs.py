@@ -83,6 +83,87 @@ class JobsTests(unittest.TestCase):
         self.redirect.__exit__(None, None, None)
         self.tmp.cleanup()
 
+    def test_context_accepts_readable_windows_volume_when_final_path_query_is_unsupported(self):
+        import core
+        # 用真实路径起步：Mac 临时目录在 /var（指向 /private/var 的符号链接）下，退回分支逐级查到它会按「路上有链接」照样报错
+        mounted = Path(os.path.realpath(self.root)) / "mounted-library"
+        child = mounted / "games" / "one"
+        child.mkdir(parents=True)
+        (mounted / ".s2arm-library.json").write_text(json.dumps({"schema": 1, "id": "test-library"}), encoding="utf-8")
+        (child / "payload.bin").write_bytes(b"DATA")
+        request = dict(self.request, taskId=str(uuid.uuid4()), privateRoot=str(self.root / "private-mounted"), library=str(mounted), libraryId="test-library")
+        resolve = Path.resolve
+
+        def resolve_with_volume_error(path, *args, **kwargs):
+            if path == mounted or mounted in path.parents:
+                error = OSError(22, "filesystem final-path query unsupported")
+                error.winerror = 1005
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(core, "_windows", lambda: True), patch.object(Path, "resolve", resolve_with_volume_error):
+            context = Context(request)
+            context.require_library()
+            contained = core.contained(mounted, child)
+            self.assertEqual(core.default_home(context.private, context.library), Path(os.path.abspath(mounted)))
+            self.assertEqual(layout.require_in_location(context, child), Path(os.path.abspath(child)))
+            build.validate_files(context, mounted, {"games/one/payload.bin": [4, ""]})
+        self.assertEqual(context.library, Path(os.path.abspath(mounted)))
+        self.assertEqual(contained, Path(os.path.abspath(child)))
+        self.assertTrue((context.logs / "jobs" / (context.task + ".json")).is_file())
+
+    def test_context_does_not_hide_other_library_path_resolution_errors(self):
+        import core
+        mounted = self.root / "denied-library"
+        mounted.mkdir()
+        request = dict(self.request, taskId=str(uuid.uuid4()), privateRoot=str(self.root / "private-denied"), library=str(mounted))
+        resolve = Path.resolve
+
+        def resolve_with_access_error(path, *args, **kwargs):
+            if path == mounted:
+                error = OSError(5, "access denied")
+                error.winerror = 5
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(core, "_windows", lambda: True), patch.object(Path, "resolve", resolve_with_access_error):
+            with self.assertRaises(OSError) as caught:
+                Context(request)
+        self.assertEqual(caught.exception.winerror, 5)
+
+    def test_resolve_path_does_not_fall_back_across_reparse_points(self):
+        import core
+        mounted = Path(os.path.realpath(self.root)) / "reparse-library"   # 同上：只让被测的这一级是重解析点
+        mounted.mkdir()
+        resolve = Path.resolve
+        lstat = Path.lstat
+
+        def resolve_with_volume_error(path, *args, **kwargs):
+            if path == mounted:
+                error = OSError(22, "filesystem final-path query unsupported")
+                error.winerror = 1005
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        def lstat_with_reparse(path, *args, **kwargs):
+            if path == mounted:
+                return type("Stat", (), {"st_mode": stat.S_IFDIR, "st_file_attributes": 0x400})()
+            return lstat(path, *args, **kwargs)
+
+        with patch.object(core, "_windows", lambda: True), patch.object(Path, "resolve", resolve_with_volume_error), patch.object(Path, "lstat", lstat_with_reparse):
+            with self.assertRaises(OSError) as caught:
+                core.resolve_path(mounted)
+        self.assertEqual(caught.exception.winerror, 1005)
+
+    def test_resolve_path_does_not_fall_back_off_windows(self):
+        import core
+        error = OSError(22, "filesystem final-path query unsupported")
+        error.winerror = 1005
+        with patch.object(core, "_windows", lambda: False), patch.object(Path, "resolve", side_effect=error):
+            with self.assertRaises(OSError) as caught:
+                core.resolve_path(self.root / "library")
+        self.assertIs(caught.exception, error)
+
     def catalogue(self, games):
         atomic(self.c.library / "catalog.json", dict(schema=1, games=games))
 
@@ -1342,7 +1423,7 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(env["S2A_RYU_DATA"], str(layout.path(self.c, game["id"], "saves")))
 
     def test_runtime_environment_follows_system_language_and_docks_by_default(self):
-        # 维护者 11-07：不给玩家选游戏语言 / 主机掌机——请求不带 gameLanguage 就不设 S2A_SYSTEM_LANGUAGE（继承来的也不带，c.env 去掉 S2A_*；宿主跟系统首选语言）；
+        # 请求不带 gameLanguage 就不设 S2A_SYSTEM_LANGUAGE（继承来的也不带，c.env 去掉 S2A_*；宿主跟系统首选语言）；玩家在启动设置选的游戏语言走 community launch_env（11-14 维护者确认可选）；
         # 不带 docked 是主机模式，只有明说 false 才掌机
         os.environ["S2A_SYSTEM_LANGUAGE"] = "Japanese"
         try:
@@ -1769,6 +1850,37 @@ class JobsTests(unittest.TestCase):
         self.assertFalse(gdir.exists())
         self.assertEqual([g["id"] for g in self.c.catalog()["games"]], [])
 
+    def test_delete_removes_files_without_holding_library_locks(self):
+        # 诊断#dab32d：删一款大游戏在慢盘上删了 53 分钟，整段占着执行锁，期间开别的款 6 次全 library_busy。
+        #   期望（手写）：挪进 .s2a-trash、清单去掉这款在锁内做完；之后每一次真删（_rm）时执行锁和清单锁都拿得到；
+        #   这款的缓存（直连库）和共用编库缓存照旧删掉（删除语义不变），工具缓存根的 .s2a-trash 删完是空的
+        import filelock
+        package = self.package(); game = self.game(packages=[package]); self.catalogue([game])
+        keep, gone, other = self._build_leftovers(game["id"])
+        free, real = [], library._rm
+        def rm(c, root, p):
+            for name in ("execution", "catalog"):
+                try:
+                    with filelock.held(self.c.library / f".{name}.lock", wait_s=0, holder={}):
+                        free.append(True)
+                except filelock.Busy:
+                    free.append(False)
+            return real(c, root, p)
+        self.c.r["gameId"] = game["id"]
+        with unittest.mock.patch.object(library, "_rm", rm):
+            library.delete(self.c)
+        self.assertTrue(free and all(free), free)
+        self.assertEqual([f for f in keep + gone if f.exists()], [])
+        self.assertEqual([g["id"] for g in self.c.catalog()["games"]], [])
+        self.assertEqual(list((self.c.work_root / library.TRASH).iterdir()), [])
+        self.assertTrue(all(f.exists() for f in other))
+
+    def test_sweep_trash_also_clears_tool_cache_trash(self):
+        # 删除时挪进工具缓存根 .s2a-trash 的缓存当时没删掉（被占用 / 进程被杀）：期望下次启动 sweep_trash 一并清掉
+        left = self.c.work_root / library.TRASH / "0100AAAAAAAAA000-1-bake" / "ok"; left.parent.mkdir(parents=True); left.write_text("x")
+        library.sweep_trash(self.c)
+        self.assertEqual(list((self.c.work_root / library.TRASH).iterdir()), [])
+
     def test_delete_with_undeletable_file_still_removes_game_from_library(self):
         # 11-11 玩家反馈「删除有时生效有时不生效」（真 App 复现：游戏文件夹里一个文件删不掉 → 整个删除失败、目录删一半、游戏还挂在列表里成了「找不到游戏文件」）。
         #   期望（手写）：游戏立刻从清单里去掉、原文件夹不在原处；删不掉的那个文件留在存放位置的 .s2a-trash 里，记一条黄字；
@@ -1788,6 +1900,29 @@ class JobsTests(unittest.TestCase):
         os.chflags(left[0], 0)
         library.sweep_trash(self.c)
         self.assertEqual(list((self.c.library / library.TRASH).iterdir()), [])
+
+    def test_delete_with_saves_on_exfat_skips_appledouble_that_left_with_its_file(self):
+        # 诊断#3d03f4：exFAT 上有存档的款逐项挪进 .s2a-trash，挪走 banner.jpg 时系统连带挪走 ._banner.jpg，列表里还挂着它 →
+        #   原先 rename 报 ENOENT、整单「删不掉 ._banner.jpg」job_failed。期望（手写）：删除完成、清单去掉这款、存档保留、游戏目录里只剩 saves
+        package = self.package(); game = self.game(packages=[package]); self.catalogue([game])
+        gdir = layout.game_dir(self.c, game["id"])
+        (gdir / "banner.jpg").write_bytes(b"j"); (gdir / "._banner.jpg").write_bytes(b"a")
+        save = gdir / "saves" / "s.dat"; save.parent.mkdir(parents=True); save.write_text("keep")
+        real = os.rename
+        def rename(src, dst):   # 照 exFAT：数据文件挪走，它的 AppleDouble 附属文件跟着走
+            real(src, dst)
+            side = Path(src).with_name("._" + Path(src).name)
+            if side.exists():
+                real(side, Path(dst).with_name("._" + Path(dst).name))
+        self.c.r["gameId"] = game["id"]
+        listdir = Path.iterdir
+        def iterdir(d):   # 让 banner.jpg 先于 ._banner.jpg 挪（真盘上的列目录顺序不保证，这里固定成会出事的那种）
+            return iter(sorted(listdir(d), key=lambda q: q.name.startswith("._")))
+        with unittest.mock.patch.object(library.os, "rename", rename), unittest.mock.patch.object(Path, "iterdir", iterdir):
+            library.delete(self.c)
+        self.assertEqual([g["id"] for g in self.c.catalog()["games"]], [])
+        self.assertEqual(save.read_text(), "keep")
+        self.assertEqual(sorted(i.name for i in gdir.iterdir()), ["saves"])
 
     def test_delete_also_drops_game_from_library_container(self):
         # 期望（#227，游戏库结构 v3）：删 A → 各台手机记录（devices/<设备>.json）里摘掉 A，B 与其余字段原样；没装 A 的那台记录不动；

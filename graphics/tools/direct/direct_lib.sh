@@ -378,13 +378,20 @@ rc127_note() {   # rc127_note <rc> <build.log> <目录>… → 追加在报红�
   elif [ -n "$low" ]; then echo "；127 多半是盘满（STATUS_DISK_FULL 0xC000007F 低 8 位）：${gs%、}"
   else echo "；rc=127 不是盘满（${gs%、}）：出库程序异常退出，看下面 build.log 末尾"; fi
 }
+# 出库失败的一句原因（诊断#3d03f4：玩家诊断只收到「出库失败 rc=134（<build.log>）」，异常原文只在 build.log 末尾、上报的红行里没有）：
+#   .NET 未处理异常 / 断言 / 致命错误取第一行，否则取最后一行非缩进、非本脚本进度的输出；放在路径前面——脱敏把路径一直抹到行尾，原因在前才留得下
+fail_why() {
+  local l; l=$(grep -a -m1 -E 'Unhandled exception|Assertion failed|[Ff]atal error' "$1" 2> /dev/null) \
+    || l=$(grep -av -e '^[[:space:]]' -e '^\[直连库\]' "$1" 2> /dev/null | grep -a . | tail -1)
+  printf '%s' "$l" | tr -d '\r' | cut -c1-160
+}
 BTX=; case "${TMPDIR:-}" in ''|/var/folders/*|/private/var/folders/*|/tmp|/tmp/*|/private/tmp|/private/tmp/*|*/AppData/Local/Temp|*/AppData/Local/Temp/*|*'\AppData\Local\Temp'*) BT=$W/tmp;;
   *) BT=${TMPDIR%/}/dsh_batch.$$; BTX=$BT;; esac
 mkdir -p "$BT"
 TMPDIR="$BT" "$PY" "$R/tools/nostall.py" --watch "$MS" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/dsh_batch.py" build "${BA[@]}" > "$W/build.log" 2>&1
 brc=$?
 DF=$(rc127_note "$brc" "$W/build.log" "$BT" "$C")
-[ "$brc" = 0 ] || { [ "$brc" = 1 ] && gap "$W/build.log" "NVN 着色器"; say "🔴 出库失败 rc=${brc}（$W/build.log）${DF}"; tail -"$([ -n "$DF" ] && echo 20 || echo 5)" "$W/build.log"; exit 1; }
+[ "$brc" = 0 ] || { [ "$brc" = 1 ] && gap "$W/build.log" "NVN 着色器"; WHY=$(fail_why "$W/build.log"); say "🔴 出库失败 rc=${brc}${WHY:+：$WHY}${DF}（$W/build.log）"; tail -"$([ -n "$DF" ] && echo 20 || echo 5)" "$W/build.log"; exit 1; }
 # 核产物出自本树的翻译器（11-06 时之笛第 49 版：DSH_BATCH_CMD 指到Windows 出包机上按旧树编的 dsh_batch.exe，它键里的翻译器指纹是旧的，41971 支全命中旧缓存，
 #   2ce17db8c 的翻译器改动没进包、出库照报绿）：dsh_batch 把自己的翻译器指纹 xfp 与 --lock 文件摘要写进库印章 inputs.tsv（Build.cs WriteStamp），
 #   这里拿本树算的 dmsh_chain.xlate_fp()（与 C# 编译期 Xfp 同一份清单、同一算法）与本树锁文件摘要逐项比，不等 / 印章没这两行（旧程序）报红。只核产物，不管出库命令经谁转手

@@ -289,6 +289,16 @@ SetW(pack, "libraryDiagnostics", "");
 SetW(pack, "report", FakeReport(true));
 SetW(pack, "summaryKey", "environment.ready");
 SaveP("tidy_01_library_connected", () => Navigate(pack, "library"));
+// 顶部大图用商店横图（11-14）：S2A_SNAP_BANNER=<一张 1920×1080 的 jpg>（仓库里不放商店图）时拷进这款文件夹，再截一张看清晰度
+if (Environment.GetEnvironmentVariable("S2A_SNAP_BANNER") is { Length: > 0 } snapBanner && File.Exists(snapBanner))
+{
+    Directory.CreateDirectory(atDefault.Location!.Folder);
+    var bannerPath = Path.Combine(atDefault.Location.Folder, "banner.jpg");
+    File.Copy(snapBanner, bannerPath, true);
+    SetW(pack, "catalog", new LibraryCatalog([atDefault with { Banner = bannerPath }, elsewhere], true, "密钥已就绪"));
+    SaveP("tidy_01b_library_banner", () => Navigate(pack, "library"));
+    SetW(pack, "catalog", new LibraryCatalog([atDefault, elsewhere], true, "密钥已就绪"));
+}
 // 游戏库选到 exFAT 盘（setup 报 library_bad_format，v0.3.1）：原因下面列出能放游戏库的 NTFS / ReFS 盘和剩余空间，点「放到这里」就建
 SetW(pack, "catalog", null); SetW(pack, "connectedFolder", null); SetW(pack, "libraryId", null);
 SetW(pack, "librarySummary", "library.failed");

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 
@@ -479,12 +480,50 @@ VERSION_DIR = re.compile(r"\d+(?:\.\d+)+")
 LEGACY = ("pending.json", "health.ok", "last_failure.json", "apply.log", ".update.lock", "runner")
 
 
+def legacy_apply_running(updates):
+    """旧自写换版（v0.3.9 及以前）的替换进程还在：它换版全程持着 updates/.update.lock（内核文件锁，进程没了自动放）"""
+    lock = Path(updates) / ".update.lock"
+    try:
+        fd = os.open(lock, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            os.lseek(fd, 0, 0); msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
 def clear_stale_pending(private_root, current):
     """启动时清掉旧自写换版的残留（pending.json、health.ok、runner/、按版本号命名的整份新版……，可达几百 MB）；
-    updates/notes/（换上新版后弹「这版更新了什么」用，启动器开始下载时写）和 seen.json 不动。返回是否清了东西"""
+    updates/notes/（换上新版后弹「这版更新了什么」用，启动器开始下载时写）和 seen.json 不动。返回是否清了东西。
+    旧版（v0.3.9 及以前）用自写更新器升上来时，它的替换进程换完版、拉起新版后会等 updates/health.ok（HEALTH_SECONDS 秒）证明新版起来了，
+    等不到就当「新版没能启动」把正在跑的新版目录挪走删掉、装回旧版（11-14 本机复现：0.3.9 → 0.3.10 换上 90 秒后回滚，新版进程脚下
+    的 App 变回 0.3.9、又拉起一个 0.3.9；中途读到半份 App 就是「内置 Python 缺失」、新旧件混装、封存坏）。所以这里先回它这一声；
+    它还持着锁（还在换版）就什么都不删——runner/ 是它正在跑的 Python，删了它会中途崩出半新半旧；它确认后自己删备份，下次启动再清残留"""
     updates = Path(private_root) / "updates"
     if not updates.is_dir():
         return False
+    if (updates / "pending.json").exists() or legacy_apply_running(updates):
+        try:
+            (updates / "health.ok").write_text("ok", encoding="utf-8")
+        except OSError:
+            pass
+        if legacy_apply_running(updates):
+            return False
     gone = False
     for item in list(updates.iterdir()):
         if item.name in LEGACY or (item.is_dir() and VERSION_DIR.fullmatch(item.name)):
@@ -493,6 +532,90 @@ def clear_stale_pending(private_root, current):
                 gone = True
             except OSError:
                 pass
+    return gone
+
+
+LEFTOVER_SUFFIXES = (".s2arm-old", ".s2arm-new", ".s2arm-bad")   # 旧自写换版（≤0.3.9 apply / swap）在安装目录旁边起的名字
+
+
+def install_dir(here=None):
+    """本文件所在的安装目录：Mac S2Arm.app/Contents/Resources/Jobs/updater.py、Windows <安装目录>/Engine/pack/jobs/updater.py，往上三层。
+    认不出（源码树里跑）→ None"""
+    root = Path(here or __file__).resolve().parents[3]
+    if root.name.endswith(".app") and (root / "Contents" / "Info.plist").is_file():
+        return root
+    if (root / "S2Arm.exe").is_file() and (root / "Engine").is_dir():
+        return root
+    return None
+
+
+def running_executables():
+    """当前所有进程的可执行文件路径（看不了进程表 → None，调用方当「在用」不删）。
+    Windows 不能靠「改名失败 = 在用」：11-14 Windows 实测，目录里的 python.exe 正在跑，整目录改名照样成功"""
+    try:
+        if os.name == "nt":
+            cmd = ["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { $_.ExecutablePath }"]
+        else:
+            cmd = ["/bin/ps", "-axww", "-o", "command="]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+
+def in_use_by(executables):
+    """→ folder 判定函数：有进程的可执行文件在这个目录里（启动器、内置 Python、游戏宿主……）；进程表拿不到一律算在用"""
+    def check(folder):
+        if executables is None:
+            return True
+        prefix = os.path.normcase(str(folder)) + os.sep
+        return any(os.path.normcase(line).startswith(prefix) for line in executables)
+    return check
+
+
+def sweep_install_leftovers(private_root, install=None, *, in_use=None):
+    """旧自写换版留在安装目录旁的残骸（11-14 Windows 实测：0.3.9 → 0.3.10 回滚没成，旁边留下完整的 S2Arm.s2arm-old 约 680 MB 和空的 .s2arm-bad；
+    Mac 半途换版也会留 .s2arm-new / .s2arm-old）启动时清掉。只认「安装目录名 + 这三个后缀」，不碰别的；旧替换进程还持着更新锁（还在换版）就不动；
+    有进程在用的不删——Mac 看进程表；Windows 先整目录改名到临时名，文件被占用改名就失败、照样跳过。清掉的每一个记进 update.log。返回清掉的目录名"""
+    install = Path(install) if install else install_dir()
+    if install is None or legacy_apply_running(Path(private_root) / "updates"):
+        return []
+    candidates = [install.with_name(install.name + suffix) for suffix in LEFTOVER_SUFFIXES] + list(install.parent.glob(install.name + ".s2arm-*.deleting"))
+    if not any(c.is_dir() for c in candidates):
+        return []   # 绝大多数启动走这里：不起进程表
+    if in_use is None:
+        in_use = in_use_by(running_executables())
+    log = lambda what: record_failure(types.SimpleNamespace(private_root=str(private_root)), "update_leftover_removed", what)
+    gone = []
+    for suffix in LEFTOVER_SUFFIXES:
+        leftover = install.with_name(install.name + suffix)
+        if not leftover.is_dir() or leftover.is_symlink() or in_use(leftover):
+            continue
+        try:
+            size = sum(f.stat().st_size for f in leftover.rglob("*") if f.is_file() and not f.is_symlink())
+        except OSError:
+            size = 0
+        doomed = leftover.with_name(leftover.name + ".deleting")
+        try:
+            if doomed.exists():
+                shutil.rmtree(doomed, ignore_errors=True)
+            os.rename(leftover, doomed)   # 先改名再删：删到一半断电 / 被杀，下次认 .deleting 接着删，不留半个像样的旧版
+        except OSError:
+            continue
+        shutil.rmtree(doomed, ignore_errors=True)
+        if doomed.exists():
+            continue   # 只删掉一部分：留着 .deleting，下次启动接着删
+        gone.append(leftover.name)
+        log(f"清掉了旧版应用内更新留下的 {leftover}（{size / 1048576:.0f} MB）")
+    for left in install.parent.glob(install.name + ".s2arm-*.deleting"):   # 上次删到一半的
+        if not left.is_dir() or left.is_symlink() or in_use(left):
+            continue
+        shutil.rmtree(left, ignore_errors=True)
+        if not left.exists():
+            gone.append(left.name)
+            log(f"清掉了上次没删完的 {left}")
     return gone
 
 
@@ -529,6 +652,10 @@ def main(argv=None):
     if a.command == "inbox":
         try:
             clear_stale_pending(a.private_root, a.current)
+        except OSError:
+            pass
+        try:
+            sweep_install_leftovers(a.private_root)
         except OSError:
             pass
         try:

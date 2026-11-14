@@ -878,7 +878,7 @@ public sealed partial class EnvironmentWindow
         // ---- LEFT: game info panel + disk space ----
         var leftCol = new StackPanel { Spacing = 16 };
         leftCol.Children.Add(GameInfoPanel(game));
-        leftCol.Children.Add(LiveSlot(() => packSpace is { } sp ? SpaceCard(sp) : null));   // 空间事件随时到：每秒刷新这一格
+        leftCol.Children.Add(LiveSlot(() => packSpace is { } sp && packState != "succeeded" ? SpaceCard(sp) : null));   // 空间事件随时到：每秒刷新这一格；只在出包成功后收起（11-14 体验梳理：成功页还挂着出包前的「预计占用」）；在出、失败照显示——磁盘满失败时「要多少 / 剩多少」正是点「释放空间」要看的（开发甲核）
         twoCol.Children.Add(leftCol);
 
         // ---- RIGHT: heading + overall + steps / results ----
