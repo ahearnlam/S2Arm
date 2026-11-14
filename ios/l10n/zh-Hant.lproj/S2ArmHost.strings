@@ -5,7 +5,7 @@
 "cheats.deleteFile" = "刪除這個檔案";
 "cheats.error.deleteFailed" = "無法刪除";
 "cheats.error.toggleNotSaved" = "開關未儲存";
-"cheats.footer" = "逐條開啟，約 1 秒生效，不需重新啟動；修改遊戲程式碼的項目在匯出時已編進遊戲。金手指可能影響存檔，建議先備份。";
+"cheats.footer" = "逐條開啟，約 1 秒生效，不需重新啟動。金手指可能影響存檔，建議先備份。";
 "cheats.footer.buildId" = "本遊戲版本號（組建編號前 16 位）：%@。金手指檔名通常就是它，名稱對不上的檔案不會生效。";
 "cheats.footer.empty" = "還沒有金手指檔案，請點右上角「匯入 txt」。";
 "cheats.import" = "匯入 txt";
@@ -18,7 +18,7 @@
 "cheats.status.badInstruction" = "指令有誤";
 "cheats.status.execError" = "執行出錯";
 "cheats.status.gameNotLoaded" = "遊戲未載入";
-"cheats.status.modifiesCode" = "改程式碼，不支援";
+"cheats.status.modifiesCode" = "要修改遊戲程式碼，手機上匯入的用不了：在電腦上的 S2Arm 裡匯入這份 txt，再更新手機上的 S2Arm 就能用";
 "cheats.status.off" = "關";
 "cheats.status.pending" = "等待生效…";
 "cheats.status.versionMismatch" = "版本不符";
@@ -37,7 +37,7 @@
 "cpatch.state.on" = "已開";
 "cpatch.state.off" = "已關";
 "cpatch.group.gfx" = "畫面";
-"cpatch.group.widescreen" = "寬螢幕";
+"cpatch.group.widescreen" = "滿屏";
 "cpatch.item.detail" = "%@\n%@ · 授權 %@%@";
 "cpatch.item.followsFps" = " · 跟隨 60 幀開關";
 "cpatch.license.none" = "未聲明";

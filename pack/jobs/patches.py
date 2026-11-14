@@ -300,9 +300,111 @@ def prepare(c, game, extraction, env, target="mac"):
         env["S2A_CPATCH_DIRS"] = os.pathsep.join([x for x in env.get("S2A_CPATCH_DIRS", "").split(os.pathsep) if x] + dirs)   # Windows 路径带盘符冒号：按系统分隔符
 
 
-def boost(c, game, image):
+# 补丁打入结果（11-14 维护者：哪些打上了、哪些没打上和为什么，出包 / 升级的结果页都要列；不影响出包成败）。
+#   读产物根里编译器自己的记录（pack/cpatch.py plan / prune）：cpatch.tsv = 最终打进去的；cpatch_plan.log 的「收 / 不收 / 移植不了」行与
+#   cpatch_excluded.tsv（改写器缺口剔掉的）= 没打上的及原因。原因翻成玩家看得懂的话；本来就不该打的（版本不对、同画幅已收另一份、本款有我方帧率表）不算失败、不列
+_WHY = (   # (原因里出现的字样, 给玩家的话)；None = 不算失败
+    (("版本不对", "同画幅", "我方帧率表"), None),
+    (("与 ", "改同一处"), "result.why.conflict"),
+    (("超出模块映像", "不在可写数据区", "代码段末页", "原值不符", "数据格式", "不配套", "位表", "不认"), "result.why.mismatch"),
+    (("改写器", "我方改写点", "填充区", "不翻译", "跳转", "解不出", "落点"), "result.why.translate"),
+    (("挂满", "64 份", "用尽"), "result.why.full"),
+    (("移植不了",), "result.why.port"),
+)
+
+
+def _why(text):
+    for keys, say in _WHY:
+        if say is None and any(k in text for k in keys):
+            return None
+        if say == "result.why.conflict" and "改同一处" in text:
+            return say
+        if say not in (None, "result.why.conflict") and any(k in text for k in keys):
+            return say
+    return "result.why.mismatch"
+
+
+def _cat_of(uid, cat=""):
+    k = uid.split(":", 1)[0]
+    return {"wsauto": "widescreen", "widescreen": "widescreen", "fps": "fps", "gfx": "gfx", "cheat": "cheat"}.get(k) or (cat if cat in CATS else "gfx")
+
+
+def outcome(root):
+    """产物根（出包工作目录 / 升级时的改写工作目录）→ {applied: [{id, cat, name}], failed: [{id, cat, name, why, detail}], cheats: 随包金手指条数}；
+    金手指不逐条进 applied（一款几十条，结果页只写「金手指 N 条，默认关」）：条数按随包原文 cheat-src.*（大多数只改内存、不进补丁表）数；
+    why 是文案键（launchers/shared/experience.v1.json result.why.*），detail 是编译器原话（诊断用）。没出过补丁表 = 两张空表"""
+    root = Path(root)
+    applied, fam = [], set()
+    tsv = root / "cpatch.tsv"
+    for line in (tsv.read_text(encoding="utf-8", errors="replace").splitlines()[1:] if tsv.is_file() else []):
+        col = line.split("\t")
+        if len(col) < 5:
+            continue
+        uid = col[0]
+        key = uid.rsplit(":", 1)[0] if uid.startswith("wsauto:") else uid   # 自适应画幅一族的宽 / 窄两份算一份
+        if key not in fam and not uid.startswith("cheat:"):
+            fam.add(key); applied.append(dict(id=key, cat=_cat_of(uid, col[3]), name=col[4]))
+        fam.add(key)
+    names, failed = {}, {}
+    log = root / "cpatch_plan.log"
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines() if log.is_file() else []
+    ex = root / "cpatch_excluded.tsv"
+    lines += [f"不收\t{l}" for l in (ex.read_text(encoding="utf-8", errors="replace").splitlines() if ex.is_file() else []) if "\t" in l]
+    for line in lines:
+        col = line.split("\t")
+        if col[0] == "收" and len(col) >= 4:
+            names[col[1]] = col[3]
+    for line in lines:
+        col = line.split("\t")
+        if col[0] == "不收" and len(col) >= 5:
+            uid, name, text = col[1], col[3], col[4]
+        elif col[0] == "不收" and len(col) == 3:   # 改写器缺口（prune / cpatch_excluded.tsv）：名字取它当初「收」的那一行
+            uid, text = col[1], col[2]; name = names.get(uid, uid)
+        elif col[0] == "移植不了" and len(col) >= 5:
+            uid, name, text = col[1], col[3], "移植不了：" + col[4]
+        else:
+            continue
+        say = _why(text)
+        if say is not None:
+            failed[uid] = dict(id=uid, cat=_cat_of(uid), name=name, why=say, detail=text[:200])
+    got = {a["id"] for a in applied}
+    has_ws = any(a["cat"] == "widescreen" for a in applied)
+    out = [f for u, f in failed.items() if u not in got and (u.rsplit(":", 1)[0] if u.startswith("wsauto:") else u) not in got
+           and not (has_ws and f["why"] == "result.why.port")]   # 别的满屏已打上：移植不了的那几份不算没打上
+    import cheats as cheat_lib
+    cheats = 0
+    for f in sorted(root.glob("cheat-src.*")):   # Atmosphere 原文：同 pack/jobs/cheats.py parse 的切段口径（文件头标题行没有代码、不算；{主代码} 不算）
+        cheats += sum(1 for _, master, _, _ in cheat_lib.parse(f.read_text(encoding="utf-8", errors="replace"))[1] if not master)
+    return dict(applied=applied, failed=out, cheats=cheats)
+
+
+def record(c, gid, target, root, error=""):
+    """这一端（mac / ios）这次补丁打入的结果记进 game.json sgradeResult（出包 / 升级结果页、之后的游戏库都读它）；
+    error = 整款没打成（改写器在这款上出错等），给玩家说「不匹配，补丁打入失败」"""
+    import layout
+    res = dict(outcome(root) if root else dict(applied=[], failed=[], cheats=0), at=int(time.time()))
+    if error:
+        res["error"] = error[:300]
+    info = layout.game_info(c, gid)
+    allr = dict(info.get("sgradeResult") or {}, **{target: res})
+    layout.update_info(c, gid, sgradeResult=allr)
+    return res
+
+
+def remember(c, gid, res):
+    """这次作业里各款的补丁打入结果（升级 / 装机作业收尾放进结果，前端结果页列）"""
+    c.__dict__.setdefault("sgrade_results", {})[gid.upper()] = res
+    return res
+
+
+def results(c):
+    return dict(getattr(c, "sgrade_results", {}) or {})
+
+
+def boost(c, game, image, result=None):
     """出包结果里「这次自动配好了什么」（完成页的 S 级加强动效与清单，11-12 维护者：「补丁自动打入，玩家开不开是玩家的事，咱都给配置好」）：
-    → {cheats: 这个版本能开的金手指条数, fps / widescreen / gfx: 编进包的社区补丁份数}；全是 0 = 没配到，不播"""
+    → {cheats: 这个版本能开的金手指条数, fps / widescreen / gfx: 编进包的社区补丁份数}；全是 0 = 没配到，不播。
+    result（record 记的这次打入结果）给了：再带 applied / failed（逐条名字；没打上的带原因文案键），完成页列「没打上」（11-14）"""
     import cheats
     out = dict(cheats=sum(1 for it in cheats.listing(c, game)["items"] if it["ok"]), fps=0, widescreen=0, gfx=0)
     tsv = next((p for p in (Path(image) / "cpatch.tsv", Path(image) / "kit" / "cpatch.tsv") if p.is_file()), None)   # Mac 运行版本根 / iPhone kit（ship_ext 拷进去的）
@@ -314,6 +416,8 @@ def boost(c, game, image):
             kind, uid = "widescreen", uid.rsplit(":", 1)[0]
         if kind in ("fps", "widescreen", "gfx") and uid not in seen:
             seen.add(uid); out[kind] += 1
+    if result:
+        out.update(applied=result.get("applied", []), failed=result.get("failed", []), **({"error": result["error"]} if result.get("error") else {}))
     return out
 
 

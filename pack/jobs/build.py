@@ -762,6 +762,7 @@ def prepare(c):
         temporary.mkdir()
         try:
             all_cloned = clone_tree(c, current, temporary, materialize_romfs=True)
+            patches.record(c, game["id"], "mac", current)   # 补丁打入结果（打上 / 没打上，完成页列，11-14）：产物根里编译器的记录
             # Transient stage logs, the packaging workspace and source paths are not runtime dependencies.
             prune_runtime_extras(temporary)
             if not c.r.get("engineBundle") and fingerprint != source_fingerprint(c):   # 只有源码树开发会在出包中途改源码；发版引擎冻结
@@ -801,4 +802,4 @@ def prepare(c):
         import sizes
         host_update.tidy(c, "刷新游戏占用大小", sizes.refresh, c, game["id"])   # 每款各部分大小写回 game.json（游戏库只读不量）
         return dict(gameId=game["id"], outputPath=str(image), outputBytes=_part_bytes([image]), target="macos-arm64", compatibility="unverified",
-                    boost=patches.boost(c, game, image), **({"notes": notes} if notes else {}))
+                    boost=patches.boost(c, game, image, layout.game_info(c, game["id"]).get("sgradeResult", {}).get("mac")), **({"notes": notes} if notes else {}))

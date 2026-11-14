@@ -6,7 +6,7 @@
 "cheats.error.deleteFailed" = "Couldn’t delete";
 "cheats.error.toggleNotSaved" = "Couldn’t save the switch";
 "cheats.fixedAddress" = "Fixed address, may not work";
-"cheats.footer" = "Turn entries on one by one; each takes effect in about a second, no restart. Entries that change game code were built into the game at export. Cheats can affect saves, so back up first.";
+"cheats.footer" = "Turn entries on one by one; each takes effect in about a second, no restart. Cheats can affect saves, so back up first.";
 "cheats.footer.buildId" = "This game’s version (first 16 digits of the build ID): %@. Cheat files are usually named after it; files with other names won’t take effect.";
 "cheats.footer.empty" = "No cheat files yet. Tap “Import .txt” in the top-right corner.";
 "cheats.import" = "Import .txt";
@@ -19,7 +19,7 @@
 "cheats.status.badInstruction" = "Invalid instruction";
 "cheats.status.execError" = "Execution error";
 "cheats.status.gameNotLoaded" = "Game not loaded";
-"cheats.status.modifiesCode" = "Changes game code: reinstall this game from S2Arm on your computer to use it";
+"cheats.status.modifiesCode" = "Changes game code, so it can't run when imported on the phone: import this txt in S2Arm on your computer, then update S2Arm on the phone";
 "cheats.status.packed" = "Active";
 "cheats.status.off" = "Off";
 "cheats.status.pending" = "Waiting to take effect…";
@@ -40,7 +40,7 @@
 "cpatch.state.on" = "On";
 "cpatch.state.off" = "Off";
 "cpatch.group.gfx" = "Graphics";
-"cpatch.group.widescreen" = "Widescreen";
+"cpatch.group.widescreen" = "Full screen";
 "cpatch.item.detail" = "%@\n%@ · License %@%@";
 "cpatch.item.followsFps" = " · Follows 60 FPS";
 "cpatch.item.followsFullscreen" = " · Follows Full screen";

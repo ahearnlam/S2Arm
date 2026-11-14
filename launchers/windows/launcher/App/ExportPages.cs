@@ -62,6 +62,7 @@ public sealed partial class EnvironmentWindow
     private long? packIpaBytes, packPackBytes;
     /// <summary>这一单降级继续的玩家提示（作业层 notes，v0.3.1）：完成卡逐条显示</summary>
     private IReadOnlyList<string> packNotes = [];
+    private JsonElement? packBoost;   // 补丁打入结果（ExportStream.Outcome.Boost，11-14）
     private PackSpace? packSpace;
     // in-progress capsule (shown while session is hidden)
     private bool sessionHidden;
@@ -726,7 +727,7 @@ public sealed partial class EnvironmentWindow
     {
         packGame = game; packState = "running"; packTrack = new(); packStarted = DateTime.UtcNow;
         packSeconds = null; packSummary = ""; packDiagnostics = ""; packIpa = null;
-        packIpaBytes = null; packPackBytes = null; packNotes = []; packSpace = null; sessionHidden = false; packFailureCode = null;
+        packIpaBytes = null; packPackBytes = null; packNotes = []; packBoost = null; packSpace = null; sessionHidden = false; packFailureCode = null;
         exportStepEnded = false; exportChildReport = null;
     }
 
@@ -807,7 +808,7 @@ public sealed partial class EnvironmentWindow
                 var o = ended.Outcome;
                 packTrack.Finish(Clock); packSeconds = (DateTime.UtcNow - packStarted).TotalSeconds;
                 packState = o.State == "completed" ? "succeeded" : o.State;
-                packSummary = o.Message; packIpa = o.Ipa; packIpaBytes = o.IpaBytes; packPackBytes = o.PackBytes; packNotes = o.Notes ?? []; packFailureCode = o.Code;
+                packSummary = o.Message; packIpa = o.Ipa; packIpaBytes = o.IpaBytes; packPackBytes = o.PackBytes; packNotes = o.Notes ?? []; packBoost = o.Boost; packFailureCode = o.Code;
                 packDiagnostics = exportChildReport is { } r
                     ? JobDiagnostics(new LibraryJobOutput(r, new ProbeOutput(r.State == "succeeded" ? 0 : r.State == "cancelled" ? 130 : 1, "", "")))
                     : o.Message;
@@ -1187,6 +1188,33 @@ public sealed partial class EnvironmentWindow
 
     // ---- result section (success / failure / cancelled) ----
 
+    /// 补丁打入结果（11-14 维护者：哪些打上了、哪些没打上和为什么；不影响成败）：每份 = (名字, {applied, failed, error})，名字空 = 不写标题行。
+    ///   同 Mac SGradeResultView（launchers/macos/frontend/Sources/NX2Apple/SGradeResult.swift）；都没有内容 = null（不出这块）
+    internal Control? SGradeResultPanel(IEnumerable<(string Name, JsonElement Res)> results)
+    {
+        string Cat(string c) => T("export.sgrade.cat." + (c is "widescreen" or "fps" or "gfx" or "cheat" ? c : "gfx"));
+        IEnumerable<JsonElement> Arr(JsonElement r, string k) => r.TryGetProperty(k, out var a) && a.ValueKind == JsonValueKind.Array ? a.EnumerateArray() : [];
+        string S(JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+        int Cheats(JsonElement r) => r.TryGetProperty("cheats", out var n) && n.ValueKind == JsonValueKind.Number ? n.GetInt32() : 0;
+        var list = results.Where(r => Arr(r.Res, "applied").Any() || Arr(r.Res, "failed").Any() || S(r.Res, "error").Length > 0 || Cheats(r.Res) > 0).ToList();
+        if (list.Count == 0) return null;
+        var box = new StackPanel { Spacing = 8 };
+        AutomationId(box, "result.sgrade");
+        var title = Label(T("sgrade.result.title"), 15); title.FontWeight = FontWeight.SemiBold; box.Children.Add(title);
+        foreach (var (name, res) in list)
+        {
+            if (list.Count > 1 && name.Length > 0) { var h = Label(name, 13.5); h.FontWeight = FontWeight.SemiBold; box.Children.Add(h); }
+            if (S(res, "error").Length > 0) box.Children.Add(WrappedMuted("✕ " + T("sgrade.result.error"), 13));
+            var applied = Arr(res, "applied").Select(a => Cat(S(a, "cat")) + " · " + S(a, "name")).ToList();
+            if (applied.Count > 0) box.Children.Add(WrappedMuted("✓ " + T("sgrade.result.applied") + string.Join(language == "en" ? ", " : "、", applied), 13));
+            if (Cheats(res) > 0) box.Children.Add(WrappedMuted("✓ " + T("export.sgrade.hit.cheat").Replace("{0}", Cheats(res).ToString()), 13));
+            foreach (var f in Arr(res, "failed"))
+                box.Children.Add(WrappedMuted("⚠ " + T("sgrade.result.failed").Replace("{0}", S(f, "name")).Replace("{1}", Cat(S(f, "cat"))).Replace("{2}", T("sgrade." + S(f, "why"))), 13));
+        }
+        box.Children.Add(WrappedMuted(T("sgrade.result.note"), 12));
+        return new Border { Child = box, Padding = new Thickness(16), CornerRadius = new CornerRadius(14), Background = new SolidColorBrush(Color.FromArgb(10, 255, 255, 255)) };
+    }
+
     private Control ResultSection(LibraryGame game, double elapsed, MilestoneEstimate? estimate = null)
     {
         var result = new StackPanel { Spacing = 20, VerticalAlignment = VerticalAlignment.Center };
@@ -1225,6 +1253,7 @@ public sealed partial class EnvironmentWindow
                 foreach (var note in packNotes) notes.Children.Add(WrappedMuted(note, 13));
                 result.Children.Add(notes);
             }
+            if (SGradeResultPanel(packBoost is { } pbst ? [("", pbst)] : []) is { } sgr) result.Children.Add(sgr);   // 补丁打入结果：打上 / 没打上（同 Mac SGradeResultView，11-14）
 
             // 两个大按钮
             var buttons = new WrapPanel { Orientation = Orientation.Horizontal };
