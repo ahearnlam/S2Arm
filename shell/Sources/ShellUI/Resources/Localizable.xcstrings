@@ -13723,18 +13723,18 @@
         }
       }
     },
-    "**Select a game → Game settings**: this game's picture, controls, community patches and cheats.": {
+    "**Select a game, then the sliders button at the top (Game settings)**: this game's picture, controls, community patches and cheats.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "**Select a game → Game settings**: this game's picture, controls, community patches and cheats."
+            "value": "**Select a game, then the sliders button at the top (Game settings)**: this game's picture, controls, community patches and cheats."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "**选中一款游戏 → 游戏设置**：这款的画面、按键、社区补丁和金手指。"
+            "value": "**选中一款游戏，点顶栏的调节图标（游戏设置）**：这款的画面、按键、社区补丁和金手指。"
           }
         }
       }
@@ -13787,18 +13787,18 @@
         }
       }
     },
-    "Or set them up before playing: **select a game → Game settings → Cheats**.": {
+    "Or set them up before playing: **select a game → sliders button at the top → Cheats**.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Or set them up before playing: **select a game → Game settings → Cheats**."
+            "value": "Or set them up before playing: **select a game → sliders button at the top → Cheats**."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "也可以开玩前先开好：**选中游戏 → 游戏设置 → 金手指**。"
+            "value": "也可以开玩前先开好：**选中游戏 → 顶栏调节图标 → 金手指**。"
           }
         }
       }

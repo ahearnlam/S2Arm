@@ -106,11 +106,11 @@ struct S2ArmGuideView: View {
     private func lines(_ i: Int) -> [String.LocalizationValue] {
         switch i {
         case 0: ["**Gear at the top right**: settings for the whole app, such as interface, sound and reporting a problem.",
-                 "**Select a game → Game settings**: this game's picture, controls, community patches and cheats.",
+                 "**Select a game, then the sliders button at the top (Game settings)**: this game's picture, controls, community patches and cheats.",
                  "**In a game, the gear at the top left** opens the same game settings at any time."]
         case 1: ["Cheats matched to your game's version come built in, and they start **off**.",
                  "In a game: **top-left gear → S-grade → Cheats**, then switch on the ones you want. Each takes effect in about a second.",
-                 "Or set them up before playing: **select a game → Game settings → Cheats**."]
+                 "Or set them up before playing: **select a game → sliders button at the top → Cheats**."]
         default: ["**Gear at the top right → Report a problem** at the bottom.",
                   "Add a sentence about what happened (optional) and upload. You get a short code starting with **D-**; paste it in the group chat or a GitHub issue.",
                   "In a game: **top-left gear → Report a problem**."]
@@ -204,25 +204,21 @@ private struct Scene: View {
     }
 }
 
-/// 第 1 页：游戏库——右上角齿轮、选中游戏下面的「游戏设置」都圈出来（设计尺寸 300×146）
+/// 第 1 页：游戏库——顶栏的「游戏设置」（调节图标）和右上角齿轮都圈出来（设计尺寸 300×146）；按真机游戏库顶栏的排法：排序 / 游戏设置 / 玩家 / 手柄 / 齿轮
 private struct SettingsArt: View {
     var body: some View {
         PhoneFrame {
             ZStack(alignment: .topLeading) {
                 Color(red: 0.07, green: 0.07, blue: 0.08)
                 HStack(spacing: 5) {
+                    Chip(symbol: "arrow.up.arrow.down"); Chip(symbol: "slider.horizontal.3", ring: true)
                     Chip(symbol: "person.crop.circle"); Chip(symbol: "gamecontroller"); Chip(symbol: "gearshape", ring: true)
                 }
                 .frame(width: 300, alignment: .trailing).padding(.top, 9).padding(.trailing, 10)
-                HStack(alignment: .top, spacing: 10) {
-                    tile(false, 44)
-                    VStack(spacing: 8) {
-                        tile(true, 62)
-                        Chip(symbol: "slider.horizontal.3", label: shellText("Game settings"), ring: true)
-                    }
-                    tile(false, 44)
+                HStack(alignment: .center, spacing: 12) {
+                    tile(false, 48); tile(true, 74); tile(false, 48)
                 }
-                .frame(width: 300).padding(.top, 38)
+                .frame(width: 300).padding(.top, 46)
             }
         }
     }
@@ -231,7 +227,6 @@ private struct SettingsArt: View {
             .fill(LinearGradient(colors: selected ? [Color(red: 0.95, green: 0.6, blue: 0.35), Color(red: 0.36, green: 0.24, blue: 0.45)] : [Color(white: 0.24), Color(white: 0.16)], startPoint: .top, endPoint: .bottom))
             .frame(width: size, height: size)
             .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(selected ? ShellPalette.cream : .clear, lineWidth: 1.5))
-            .padding(.top, selected ? 0 : 9)
     }
 }
 
