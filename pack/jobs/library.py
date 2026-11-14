@@ -2427,7 +2427,9 @@ def delete(c):
             has_saves = layout.has_content(saves) or layout.has_content(backups)   # 只有 .DS_Store 之类不算有存档
             root = gdir.parent.parent   # 这款所在存放位置的根（root_of 靠 find_game，认不出时会退回默认位置）
             for item in ([i for i in gdir.iterdir() if i.name not in ("saves", "save-backups")] if has_saves else [gdir]):
-                trashed.append((root, _to_trash(c, root, item, gid)))
+                moved = _to_trash(c, root, item, gid)
+                if moved:
+                    trashed.append((root, moved))
         drop_from_container(c, gid)
         cat = c.catalog()
         cat["games"] = [g for g in cat["games"] if g["id"] != gid]
@@ -2448,7 +2450,7 @@ TRASH = ".s2a-trash"   # 每个存放位置根下：删除时先把这款整块�
 
 
 def _to_trash(c, root, item, gid):
-    """把 root 下的 item 改名挪进 root/.s2a-trash/<游戏号>-<毫秒>-<原名>（同盘改名）→ 新路径；挪不动（权限 / 只读盘）照实报"""
+    """把 root 下的 item 改名挪进 root/.s2a-trash/<游戏号>-<毫秒>-<原名>（同盘改名）→ 新路径；已经不在了 → None；挪不动（权限 / 只读盘）照实报"""
     root, item = Path(os.path.abspath(root)), Path(os.path.abspath(item))
     if root not in item.parents or _is_link(item):   # 不在这个存放位置里的、链接都不碰（同 _rm 的托管目录检查）
         raise Failure("操作路径不属于托管目录。")
@@ -2456,6 +2458,10 @@ def _to_trash(c, root, item, gid):
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.rename(item, dest)
+    except FileNotFoundError:
+        # 列目录后它已经没了：exFAT 上挪走 banner.jpg 时系统连带挪走 ._banner.jpg（AppleDouble），清单里还挂着它的名字。
+        #   要删的东西不存在就是删完了，不能整单 job_failed（诊断#3d03f4：删游戏报「删不掉 ._banner.jpg：No such file or directory」）
+        return None
     except OSError as e:
         raise Failure(f"删不掉「{item.name}」：{e.strerror or e}。确认这块盘没被设成只读、文件没被别的程序锁住，再删一次。", code="job_failed") from e
     return dest
