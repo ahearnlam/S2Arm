@@ -1188,14 +1188,35 @@ public sealed partial class EnvironmentWindow
 
     // ---- result section (success / failure / cancelled) ----
 
+    /// <summary>出包完成页「S 级加强已就位」（同 Mac BoostBanner：金色 S + 标题 + 这次配好的条数 + 去哪开）；条数全是 0 = null（不出）</summary>
+    private Control? BoostBanner(JsonElement? boost)
+    {
+        if (boost is not { ValueKind: JsonValueKind.Object } b) return null;
+        int N(string k) => b.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
+        var parts = new[] { ("cheats", "export.boost.cheats"), ("fps", "export.boost.fps"), ("widescreen", "export.boost.widescreen"), ("gfx", "export.boost.gfx") }
+            .Where(p => N(p.Item1) > 0).Select(p => T(p.Item2).Replace("{0}", N(p.Item1).ToString())).ToList();
+        if (parts.Count == 0) return null;
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 22 };
+        row.Children.Add(new Image { Source = SGoldImage(), Width = 84, Height = 84, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center });
+        var text = new StackPanel { Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        text.Children.Add(new TextBlock { Text = T("export.boost.title"), FontSize = 24, FontWeight = FontWeight.Black, Foreground = Diag((SGoldHi, 0), (SGold, 0.5), (SRose, 1)) });
+        text.Children.Add(new TextBlock { Text = string.Join(" · ", parts), FontSize = 15, FontWeight = FontWeight.SemiBold, Foreground = Ink, TextWrapping = TextWrapping.Wrap });
+        text.Children.Add(WrappedMuted(T("export.boost.hint"), 13));
+        Grid.SetColumn(text, 1); row.Children.Add(text);
+        var card = new Border { Child = row, Padding = new Thickness(22, 18), CornerRadius = new CornerRadius(18), BorderThickness = new Thickness(1),
+            Background = new SolidColorBrush(A(SGold, 0.08)), BorderBrush = new SolidColorBrush(A(SGold, 0.35)) };
+        AutomationId(card, "result.boost");
+        return card;
+    }
+
     /// 补丁打入结果（11-14 维护者：哪些打上了、哪些没打上和为什么；不影响成败）：每份 = (名字, {applied, failed, error})，名字空 = 不写标题行。
     ///   同 Mac SGradeResultView（launchers/macos/frontend/Sources/NX2Apple/SGradeResult.swift）；都没有内容 = null（不出这块）
-    internal Control? SGradeResultPanel(IEnumerable<(string Name, JsonElement Res)> results)
+    internal Control? SGradeResultPanel(IEnumerable<(string Name, JsonElement Res)> results, bool cheats = true)
     {
         string Cat(string c) => T("export.sgrade.cat." + (c is "widescreen" or "fps" or "gfx" or "cheat" ? c : "gfx"));
         IEnumerable<JsonElement> Arr(JsonElement r, string k) => r.TryGetProperty(k, out var a) && a.ValueKind == JsonValueKind.Array ? a.EnumerateArray() : [];
         string S(JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-        int Cheats(JsonElement r) => r.TryGetProperty("cheats", out var n) && n.ValueKind == JsonValueKind.Number ? n.GetInt32() : 0;
+        int Cheats(JsonElement r) => cheats && r.TryGetProperty("cheats", out var n) && n.ValueKind == JsonValueKind.Number ? n.GetInt32() : 0;
         var list = results.Where(r => Arr(r.Res, "applied").Any() || Arr(r.Res, "failed").Any() || S(r.Res, "error").Length > 0 || Cheats(r.Res) > 0).ToList();
         if (list.Count == 0) return null;
         var box = new StackPanel { Spacing = 8 };
@@ -1253,7 +1274,8 @@ public sealed partial class EnvironmentWindow
                 foreach (var note in packNotes) notes.Children.Add(WrappedMuted(note, 13));
                 result.Children.Add(notes);
             }
-            if (SGradeResultPanel(packBoost is { } pbst ? [("", pbst)] : []) is { } sgr) result.Children.Add(sgr);   // 补丁打入结果：打上 / 没打上（同 Mac SGradeResultView，11-14）
+            if (BoostBanner(packBoost) is { } bb) result.Children.Add(bb);   // 「S 级加强已就位」（同 Mac ExportSessionView BoostBanner）
+            if (SGradeResultPanel(packBoost is { } pbst ? [("", pbst)] : [], cheats: false) is { } sgr) result.Children.Add(sgr);   // 金手指条数横幅里已写   // 补丁打入结果：打上 / 没打上（同 Mac SGradeResultView，11-14）
 
             // 两个大按钮
             var buttons = new WrapPanel { Orientation = Orientation.Horizontal };
