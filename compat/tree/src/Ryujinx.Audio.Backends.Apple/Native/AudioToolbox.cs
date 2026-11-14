@@ -55,7 +55,7 @@ namespace Ryujinx.Audio.Backends.Apple.Native
 
         // S2Arm（11-14 设备缓冲）：CoreAudio HAL 属性读写（AudioObjectSetPropertyData / AudioObjectGetPropertyData）。
         //   qualifier 空（设备级属性不用 qualifier）；dataSize 进出都是字节数
-        [LibraryImport("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")]
+        [LibraryImport("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")]   // 平台例外：Apple 后端平台实现的 CoreAudio P/Invoke 声明（设备缓冲）
         internal static partial int AudioObjectSetPropertyData(
             uint objectID,
             ref AudioObjectPropertyAddress address,
@@ -64,7 +64,7 @@ namespace Ryujinx.Audio.Backends.Apple.Native
             uint dataSize,
             ref uint data);
 
-        [LibraryImport("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")]
+        [LibraryImport("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")]   // 平台例外：Apple 后端平台实现的 CoreAudio P/Invoke 声明（设备缓冲）
         internal static partial int AudioObjectGetPropertyData(
             uint objectID,
             ref AudioObjectPropertyAddress address,

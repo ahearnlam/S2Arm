@@ -591,3 +591,4 @@
 20261114-0418-system-data-synth-fallback.patch
 20261114-0312-audio-depth-pace.patch
 20261114-0125-audio-cb-nonblocking.patch
+20261114-1030-audio-buffer-platform-note.patch

@@ -562,7 +562,7 @@ namespace Ryujinx.Audio.Backends.Apple
         //   仅 macOS：iOS 没有 HAL 设备属性（IO 缓冲走 AVAudioSession 的 S2A_AUDIO_IO20 通道）。
         private void S2AApplyDeviceBufferFrames()
         {
-            if (!OperatingSystem.IsMacOS())
+            if (!OperatingSystem.IsMacOS())   // 平台例外：设备 IO 缓冲是 macOS HAL 属性，iOS 走 AVAudioSession
             {
                 return;
             }
