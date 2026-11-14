@@ -143,7 +143,8 @@ struct SGradeBadge: View {
     var sImage: NSImage = SGradeCardView.sGold
     var body: some View {
         let s = Image(nsImage: sImage).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-        s.overlay(s)   // 毛玻璃 S 本身半透明：叠一层更实，浅色封面上不被冲淡
+        s.overlay(s).overlay(s)   // 毛玻璃 S 本身半透明：叠两层更实
+            .brightness(0.22).saturation(1.35)   // 整体调亮（v0.4.0 维护者：叠在游戏封面上要看得清）
             .frame(width: size, height: size)
             .shadow(color: .black.opacity(0.45), radius: size * 0.12, y: size * 0.04)
             .padding(8)

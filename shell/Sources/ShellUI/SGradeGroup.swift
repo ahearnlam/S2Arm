@@ -14,7 +14,8 @@ struct SGradeBadge: View {
     var size: CGFloat = 22
     var body: some View {
         let s = SGradeGroup.sGold.resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-        s.overlay(s)   // the glass S is translucent: a second layer keeps it solid on light key art
+        s.overlay(s).overlay(s)   // the glass S is translucent: two more layers keep it solid
+            .brightness(0.22).saturation(1.35)   // brighter overall, so it reads on top of key art
             .frame(width: size, height: size)
             .shadow(color: .black.opacity(0.45), radius: size * 0.12, y: size * 0.04)
             .accessibilityHidden(true)

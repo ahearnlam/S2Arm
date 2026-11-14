@@ -50,6 +50,17 @@ import XCTest
         _ = NSApplication.shared
         let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../Branding/s-gold.png").standardized
         let img = try XCTUnwrap(NSImage(contentsOf: src))
+        // 真封面看效果：S2A_SGRADE_COVERS=<目录>（放几张游戏横幅 PNG）时逐张叠上存图；单测本身用一亮一暗两种底色
+        if let dir = ProcessInfo.processInfo.environment["S2A_SGRADE_COVERS"], let out = ProcessInfo.processInfo.environment["S2A_SGRADE_SHOT"] {
+            for f in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where f.hasSuffix(".png") {
+                guard let cover = NSImage(contentsOfFile: dir + "/" + f) else { continue }
+                let v = Image(nsImage: cover).resizable().aspectRatio(contentMode: .fill).frame(width: 300, height: 167).clipped()
+                    .overlay(alignment: .topLeading) { SGradeBadge(size: 33, sImage: img) }
+                let r = ImageRenderer(content: v); r.scale = 2
+                try r.nsImage.flatMap { $0.tiffRepresentation }.flatMap { NSBitmapImageRep(data: $0) }?.representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: out).appendingPathComponent("sgrade_cover_" + f))
+            }
+        }
         for (name, bg) in [("light", Color(red: 0.85, green: 0.9, blue: 1.0)), ("dark", Color(red: 0.08, green: 0.1, blue: 0.14))] {
             let view = Rectangle().fill(bg).frame(width: 300, height: 167).overlay(alignment: .topLeading) { SGradeBadge(size: 33, sImage: img) }
             let r = ImageRenderer(content: view); r.scale = 2
