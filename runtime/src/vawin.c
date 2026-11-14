@@ -243,6 +243,7 @@ static void guest_file_map(void);
 static int g_gfile_pending;
 // 多款容器起局时还没选游戏（程序号 0，读不到本款实测 / 「在跑」标记）：先用匿名内存、记下起局时的剩余，装游戏模块前按本款再判一次（s2a_guest_file_retry，#783）
 static int g_gfile_late; static uint64_t g_gfile_room0;
+static uint64_t g_gfile_room;   // 文件后备判定时离单进程上限的剩余（s2a_guest_file_carve 按它决定挖不挖物理映射区）
 static void guest_file_attach_(void);
 static void guest_file_attach(void) { g_attach_phase = 1; guest_file_attach_(); g_attach_phase = 0; }
 // 测试开关 S2A_TEST_BALLAST_MB=<N>（11-12，小内存机型问题在大内存设备上复现用；缺省不设 = 不占）：模拟给 App 少 N MB 内存的机型（#807 6 GB 机型约 4 GB）。
@@ -289,6 +290,7 @@ static void guest_file_attach_(void) {
         (unsigned long long)(pool >> 20), (unsigned long long)(room >> 20), room ? "" : "（0 = 未知）", (unsigned long long)(phys >> 20), (unsigned long long)(host >> 20),
         (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
     if (low && !late) low_ram_notice(phys, pool + host);
+    g_gfile_room = room;
     if (late) { g_gfile_late = 1; g_gfile_room0 = room; return; }
     if (!on) return;
     guest_file_map();
@@ -418,13 +420,22 @@ int s2a_guest_map_fixed(uint64_t a, uint64_t len) {
 static uint64_t g_anon_lo, g_anon_hi;
 static int in_anon(uint64_t a, uint64_t n) { return g_anon_hi > g_anon_lo && a < g_anon_hi && a + n > g_anon_lo; }
 // 布局定下别名区后调（svc_mem.c，那时这段还没放开过）：与窗口的交集按宿主页向内取整，逐块确认仍是不可访问的保留（没有内容）才换成匿名占位
+// 挖不挖（纯函数，单测直接测）：S2A_GUEST_FILE_CARVE=0 / 1 按设的；「物理内存也装不下」那档挖；离单进程上限剩余 ≥ S2A_GUEST_FILE_CARVE_ROOM_MB（缺省 4096）也挖——
+//   11-14 文件后备开着跑 5–12 分钟整进程卡死（测试机1 iOS 27.0.1 两局、玩家 iPhone19,7 iOS 27.2.1 一局，写盘 13–16 GB），写盘几乎全来自物理映射区（Duo 实测挖后 6258 → 33 MB）；
+//   挖的代价是这段常驻计实占（Duo 正式游戏 +2.3 GB），剩余 ≥ 4 GB 的机器装得下。剩余未知（0，Mac）不挖
+int s2a_guest_carve_wanted(const char *e, int low, uint64_t room, uint64_t room_min) {
+    if (e && *e) return *e != '0';
+    if (low) return 1;
+    return room && room >= room_min;
+}
 void s2a_guest_file_carve(uint64_t a, uint64_t n) {
     if (g_gfd < 0 || !n) return;
     const char *e = getenv("S2A_GUEST_FILE_CARVE");
     if (e && *e == '0') { LOG("客体内存文件后备：物理映射区照旧进文件（S2A_GUEST_FILE_CARVE=0，对照用）"); return; }
     // 只在「物理内存也装不下」那档挖（11-13 维护者定）：大内存机（Duo 11.5 GB）文件后备本来不风暴，挖了反而让物理映射区约 1.7 GB 计进实占、抬高切后台时的底线。
     //   S2A_GUEST_FILE_CARVE=1 强制挖（在大内存机上量改后读数用）
-    if (!(e && *e == '1') && !g_low_tier) { LOG("客体内存文件后备：物理映射区照旧进文件（物理内存装得下，不会被反复刷盘；只在内存不够那档改成匿名）"); return; }
+    uint64_t room_min = env_mb("S2A_GUEST_FILE_CARVE_ROOM_MB", 4096);
+    if (!s2a_guest_carve_wanted(e, g_low_tier, g_gfile_room, room_min)) { LOG("客体内存文件后备：物理映射区照旧进文件（不是内存不够那档，离单进程上限剩余 %llu MB < %llu MB：挖了常驻会贴近上限）", (unsigned long long)(g_gfile_room >> 20), (unsigned long long)(room_min >> 20)); return; }
     const uint64_t pg = 0x4000;
     uint64_t lo = a > g_base ? a : g_base, hi = a + n < g_base + g_size ? a + n : g_base + g_size;
     lo = (lo + pg - 1) & ~(pg - 1); hi &= ~(pg - 1);
