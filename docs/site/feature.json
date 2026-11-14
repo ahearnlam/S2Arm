@@ -12,16 +12,16 @@
       "kicker": {"zh-Hans": "S 级优化 · 自动配好", "en": "S-grade · Set up for you"},
       "title": {"zh-Hans": "出包时，自动带上社区补丁和金手指", "en": "Community patches and cheats, built in automatically"},
       "what": {"zh-Hans": "S2Arm 按你的游戏版本，从社区补丁库里找能用的**满屏补丁、帧率补丁和金手指**，出包时一起打进去。", "en": "S2Arm looks up **full-screen patches, frame-rate patches and cheats** that match your game's version and builds them in when you export."},
-      "how": {"zh-Hans": "不用自己找、自己装。照常点「开始出包」就行，命中的会自动带上。", "en": "Nothing to find or install. Just click Start export as usual; matches are added for you."},
-      "where": {"zh-Hans": "游戏库选一款 → **出包页的金色「S 级优化」卡片**，列出这款命中的每一项和作者。", "en": "Pick a game in the library → the **gold \"S-grade\" card on the export page** lists every match and its author."}
+      "how": {"zh-Hans": "不用自己找、自己装。照常点「开始出包」就行，命中的会自动打进包。", "en": "Nothing to find or install. Just click Start export as usual; matches are built in for you."},
+      "where": {"zh-Hans": "选一款去出包：出包页金色的「**S 级优化（Beta）· 出包时打入**」默认勾着，列出命中的每一项和作者，不要可以取消。", "en": "Pick a game and go to export: the gold \"**S-grade (Beta) · Build in when exporting**\" box is checked by default and lists every match and its author. Uncheck it if you don't want them."}
     },
     {
       "image": "feature/sgrade-2.jpg",
       "kicker": {"zh-Hans": "S 级优化 · 满屏与帧率", "en": "S-grade · Full screen and frame rate"},
       "title": {"zh-Hans": "画面铺满，帧率翻倍", "en": "Fill the screen, double the frame rate"},
-      "what": {"zh-Hans": "**满屏补丁**按你的屏幕比例铺满、人物不变形；**帧率补丁**让锁 30 帧的游戏跑 60 帧，有 120 帧补丁的在高刷屏上跟到 120。", "en": "**Full-screen patches** fill your screen at its own aspect ratio without stretching; **frame-rate patches** take 30 fps games to 60, and up to 120 on high-refresh displays where a 120 fps patch exists."},
-      "how": {"zh-Hans": "版本对上的满屏、帧率补丁**出包时默认开启**。开着补丁游戏崩了，下次打开会自动关掉出问题的那项。", "en": "Patches that match your version are **on by default**. If a patch crashes the game, the next launch turns that one off for you."},
-      "where": {"zh-Hans": "装到 iPhone、iPad 或在 Mac 上玩都生效。想关：iPhone 在游戏里**齿轮 → 设置 → S 级优化**，Mac 在这款的**启动设置**。", "en": "Works on iPhone, iPad and Mac. To turn one off: on iPhone, **gear → Settings → S-grade** in the game; on Mac, the game's **Launch settings**."}
+      "what": {"zh-Hans": "**满屏补丁**按你的屏幕比例铺满，不留黑边、人物不变形；**帧率补丁**让 30 帧的游戏跑 60，高刷屏能到 120。", "en": "**Full-screen patches** fill any screen at its own aspect ratio on iPhone, iPad and Mac, without stretching; **frame-rate patches** take 30 fps games to 60, and up to 120 on high-refresh screens."},
+      "how": {"zh-Hans": "版本对得上的满屏、帧率补丁默认开着，帧率按屏幕自动挑最高一档。开着补丁闪退，下次打开会自动关掉那一项。", "en": "Matching full-screen and frame-rate patches are on by default; where there are several frame-rate levels, the highest your screen supports is picked automatically. If a patch crashes the game, the next launch turns that one off."},
+      "where": {"zh-Hans": "想调档或关掉：iPhone / iPad 在游戏里点**左上角齿轮 → S 级优化**；Mac 在游戏库选中这款，点齿轮「**启动设置**」。", "en": "To change or turn one off: on iPhone / iPad, **top-left gear → S-grade** in the game; on Mac, select the game in the library and click the gear, **Launch settings**."}
     },
     {
       "image": "feature/sgrade-3.jpg",
@@ -29,7 +29,7 @@
       "title": {"zh-Hans": "金手指，进游戏逐条打开", "en": "Cheats, one switch at a time"},
       "what": {"zh-Hans": "社区整理好的**金手指**，按你的游戏版本自动配好，出包时一起打进去。", "en": "Community **cheats** matched to your game's version are built in when you export."},
       "how": {"zh-Hans": "打进去后**默认关**。想用哪条就打开哪条，约 1 秒生效，不用重启游戏。", "en": "They start **off**. Turn on the ones you want; each takes effect in about a second, no restart."},
-      "where": {"zh-Hans": "iPhone / iPad：游戏里**点左上角齿轮 → 设置 → S 级优化 → 金手指**。Mac：游戏库里这款的菜单 → **启动设置**。", "en": "iPhone / iPad: in the game, **top-left gear → Settings → S-grade → Cheats**. Mac: the game's menu in the library → **Launch settings**."}
+      "where": {"zh-Hans": "iPhone / iPad：游戏里点**左上角齿轮 → S 级优化 → 金手指**。Mac：游戏库选中这款，点齿轮「**启动设置**」。", "en": "iPhone / iPad: in the game, **top-left gear → S-grade → Cheats**. Mac: select the game in the library and click the gear, **Launch settings**."}
     }
   ]
 }
