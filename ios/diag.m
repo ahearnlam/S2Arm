@@ -659,7 +659,8 @@ void s2a_diag_attach(UIViewController *vc) {
       LOG("诊断包：上次会话标记 %s（主线程 %.2f ms，不读日志）→ %s", prev == S2A_SESMARK_FG ? "前台未收尾" : prev == S2A_SESMARK_BG ? "后台" : "无（正常收尾）", (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6, prev == S2A_SESMARK_FG ? "提示导出" : "不提示");
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         check_toggle();
-        if (prev == S2A_SESMARK_FG) { crash_auto_off(); s2a_diag_prompt(S2AL(@"diag.prompt.abnormalExit")); }
+        // 真机自动化（S2A_OPEN_SETTINGS 测试开关在）每局都是被强杀收尾的，上次异常退出的提示会挡住要截的设置页：只在这时不问（玩家给不了这个环境变量）
+        if (prev == S2A_SESMARK_FG) { crash_auto_off(); if (!getenv("S2A_OPEN_SETTINGS")) s2a_diag_prompt(S2AL(@"diag.prompt.abnormalExit")); }
       }); }
 }
 // 进后台 / 回前台（app.m 生命周期通知，主线程）：改写会话标记，在后台被划掉 / 被系统回收不算异常
