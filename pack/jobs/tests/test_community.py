@@ -173,7 +173,23 @@ class MacDisplayTests(unittest.TestCase):
     def test_every_mac_item_of_the_table_is_on_the_page(self):
         # 定义表里 platforms 含 mac 的 bool / choice 项 = enhance fps60 widescreen docked rumble rumbleLevel motion hud（11-13 widenForce 并进 widescreen）
         self.caps()
-        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "widescreen", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "pauseUnfocused", "diagRun"]))
+        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "fpsPick", "widescreen", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "pauseUnfocused", "diagRun"]))
+
+    def test_fps_pick_level(self):
+        # 帧率档位（11-13）：包里帧率补丁（编号 fps:）目标帧率两档以上才出；选具体档 → S2A_FPS_PICK=档，选自动（"0"）不写；表外取值拒收
+        self.caps("fps60\t1\t# 默认开：来源 社区帧率补丁\nwiden\t0\ndirect\t1\n")
+        tsv = layout.image_mac(self.c, GID) / "cpatch.tsv"
+        write(tsv, "编号\t缺省开\t目标帧率\nfps:a\t1\t60\nfps:b\t1\t\nwidescreen:x\t1\t\n")   # 60 与没写（当 60）= 一档
+        self.assertEqual((community.fps_levels(self.c, GID), self.mac()["fpsPick"].get("hidden")), ([60], True))
+        write(tsv, "编号\t缺省开\t目标帧率\nfps:a\t1\t60\nfps:c\t1\t120\ngfx:d\t1\t30\n")       # gfx: 的目标帧率不算档
+        self.assertEqual((community.fps_levels(self.c, GID), self.mac()["fpsPick"].get("hidden"), self.mac()["fpsPick"]["value"]), ([60, 120], None, "0"))
+        self.assertNotIn("S2A_FPS_PICK", community.launch_env(self.c, GID))
+        self.c.r.update(settings={"fpsPick": "60"}); community.save(self.c)
+        self.assertEqual(community.launch_env(self.c, GID)["S2A_FPS_PICK"], "60")
+        self.c.r = {"gameId": GID, "settings": {"fpsPick": "0"}}; community.save(self.c)
+        self.assertNotIn("S2A_FPS_PICK", community.launch_env(self.c, GID))
+        self.c.r = {"gameId": GID, "settings": {"fpsPick": "90"}}
+        with self.assertRaises(Failure): community.save(self.c)
 
     def test_game_without_a_mac_build_can_still_pick(self):
         # v0.3.1：还没出 Mac 版也能先选、存成偏好（出好后生效）——原先整页置灰写「还没有做好 Mac 版」，玩家只能先去出包

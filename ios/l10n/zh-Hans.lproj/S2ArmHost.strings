@@ -89,6 +89,9 @@
 "sgrade.counts" = "已开 %ld · 共 %ld";
 "settings.fps.patchTitle" = "帧率";
 "settings.fps.patchNote" = "社区补丁接管 · 最高 %ld 帧";
+"settings.fps.pick" = "帧率档位";
+"settings.fps.pick.auto" = "自动（跟随屏幕）";
+"settings.fps.pick.level" = "%ld 帧";
 "settings.patchNote" = "社区补丁接管";
 "settings.fullscreen.patchNote" = "社区满屏补丁接管";
 "game.fps.note" = "游戏支持时以 60 帧运行；跑不动会自动降回原帧率。下次进游戏生效";

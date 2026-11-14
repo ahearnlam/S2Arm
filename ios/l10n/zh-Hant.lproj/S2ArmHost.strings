@@ -500,6 +500,9 @@
 "sgrade.counts" = "已開 %ld · 共 %ld";
 "settings.fps.patchTitle" = "幀率";
 "settings.fps.patchNote" = "社區補丁接管 · 最高 %ld 幀";
+"settings.fps.pick" = "幀率檔位";
+"settings.fps.pick.auto" = "自動（跟隨螢幕）";
+"settings.fps.pick.level" = "%ld 幀";
 "settings.patchNote" = "社區補丁接管";
 "settings.fullscreen.patchNote" = "社區滿屏補丁接管";
 "game.fps.note" = "遊戲支援時以 60 幀執行；跑不動會自動降回原幀率。下次進遊戲生效";

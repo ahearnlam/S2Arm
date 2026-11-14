@@ -223,6 +223,9 @@ nonisolated(unsafe) private var lastPlayed = ""
                 cheats: [.init(id: "a.txt/Coins", title: "Coins", note: "fixed", on: false), .init(id: "a.txt/Jump", title: "Jump", on: true)]),
         "G2": O(fps: .init(on: false), fullscreen: .init(on: false, enabled: false, note: "blocked")),
         "G4": O(fps: .init(on: false, hidden: true), fullscreen: .init(on: false, hidden: true)),   // 没有帧率 / 宽屏补丁（11-13 只用补丁）：两行都不出
+        // 帧率补丁带 60 / 120 两档（11-13）：帧率开关下多一行档位；宿主记的档不在列表里按「自动」显示
+        "G5": O(fps: .init(on: true, levels: [.init(value: "0", label: "Auto"), .init(value: "60", label: "60 fps"), .init(value: "120", label: "120 fps")], pick: "120", levelsTitle: "Level"), fullscreen: .init(on: false, hidden: true)),
+        "G6": O(fps: .init(on: true, levels: [.init(value: "0", label: "Auto"), .init(value: "60", label: "60 fps")], pick: "90"), fullscreen: .init(on: false, hidden: true)),
     ]
     var sets: [String] = []
     let stores = S2ArmGameSettings.Stores(game: { id in
@@ -257,12 +260,21 @@ nonisolated(unsafe) private var lastPlayed = ""
     let s4 = S2ArmGameSettings.sections(for: "G4", stores: stores, state: .init(selected: "default", hasMine: false))
     #expect(row(s4, "fps60") == nil && row(s4, "fullscreen") == nil && row(s4, "splitScreen") != nil)
     #expect(S2ArmGameSettings.Options.parse(#"{"fps":{"on":false,"hidden":true},"fullscreen":{"on":false}}"#)?.fps.hidden == true)
+    // G5：档位行在帧率开关后、值是宿主记的档、选项照宿主给的；G1（没给档位）不出这行；G6 两项（自动 + 一档）也出、记的档不在列表按自动
+    let s5 = S2ArmGameSettings.sections(for: "G5", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s5.first { $0.id == "s2a.picture" }?.rows.map(\.id).suffix(2) == ["fps60", "fpsPick"] && row(s5, "fpsPick")?.value == "120" && row(s5, "fpsPick")?.label == "Level")
+    if case .choice(let o) = row(s5, "fpsPick")?.kind { #expect(o.map(\.id) == ["0", "60", "120"]) } else { Issue.record("档位行应是多选") }
+    #expect(row(S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false)), "fpsPick") == nil)
+    #expect(row(S2ArmGameSettings.sections(for: "G6", stores: stores, state: .init(selected: "default", hasMine: false)), "fpsPick")?.value == "0")
+    let pj = S2ArmGameSettings.Options.parse(#"{"fps":{"on":true,"levels":[{"value":"0","label":"A"},{"value":"120","label":"B"}],"pick":"120","levelsTitle":"T"},"fullscreen":{"on":false}}"#)?.fps
+    #expect(pj?.levels.map(\.value) == ["0", "120"] && pj?.pick == "120" && pj?.levelsTitle == "T")
     // 改：四类都原样交宿主（种类、编号、开关），不返回「打开编辑页」
     #expect(!S2ArmGameSettings.apply(id: "G1", setting: "fps60", value: "off", stores: stores))
     S2ArmGameSettings.apply(id: "G1", setting: "fullscreen", value: "on", stores: stores)
     S2ArmGameSettings.apply(id: "G1", setting: "patch.wsauto:1", value: "on", stores: stores)
     S2ArmGameSettings.apply(id: "G1", setting: "cheat.a.txt/Coins", value: "on", stores: stores)
-    #expect(sets == ["G1 fps  false", "G1 fullscreen  true", "G1 patch wsauto:1 true", "G1 cheat a.txt/Coins true"])
+    S2ArmGameSettings.apply(id: "G5", setting: "fpsPick", value: "60", stores: stores)
+    #expect(sets == ["G1 fps  false", "G1 fullscreen  true", "G1 patch wsauto:1 true", "G1 cheat a.txt/Coins true", "G5 fpspick 60 true"])
     // 透明度全局：40 → 0.4，钳在 10–100：给 5 存成 0.1
     S2ArmGameSettings.apply(id: "G1", setting: "vpadOpacity", value: "40.0", stores: stores)
     #expect(abs((app.object(forKey: "S2AVPadOpacity") as? Double ?? 0) - 0.4) < 1e-9)

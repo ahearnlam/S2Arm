@@ -76,7 +76,7 @@ static int run(const char *dir, int test) {
     CHECK(g_nmod == 2 && s2a_unresolved_count() == 0, "case%d real module load / relocations", test);
     CHECK(module_sym(&g_mod[0], "fps_probe") == g_mod[0].base + 0x100 &&
           module_sym(&g_mod[0], "patch_data") == g_mod[0].base + 0x8000, "case%d ELF symbols", test);
-    state("load", test, test == 0 || test == 3 ? 1 : 0); // 11-13 起没选过（不设 S2A_CPATCH_ON）= 合法项全部默认开（表里「缺省开」列只作我方验过的标签）；case1 选了 none、case2 全是非法项 = 都不开
+    state("load", test, 0); // 11-13 起帧率类装载时只登记、不写不开（几档改同一处，cpatch.c fps_pick），由 fps_start 跟随定；下面原注释说的「默认开」是跟随开时的状态 // 11-13 起没选过（不设 S2A_CPATCH_ON）= 合法项全部默认开（表里「缺省开」列只作我方验过的标签）；case1 选了 none、case2 全是非法项 = 都不开
     CHECK(s2a_cpatch_fps_count() == (test == 3 ? 65 : test == 2 ? 0 : 2), "case%d admitted count=%d", test, s2a_cpatch_fps_count());
     s2a_fps_start(dir); state(test == 1 ? "start-on" : "start-off", test, test == 1);
     s2a_fps_set_enabled(0); state("off-before-roundtrip", test, 0);

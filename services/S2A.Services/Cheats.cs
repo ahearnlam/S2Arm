@@ -284,8 +284,12 @@ namespace S2A.Services
 
             public void WriteMemory<T>(ulong va, T value) where T : unmanaged
             {
-                if (Check(va, (ulong)Unsafe.SizeOf<T>(), true)) Dispatcher.Instance.Memory.Write(va, value);
+                if (!Check(va, (ulong)Unsafe.SizeOf<T>(), true)) return;
+                Dispatcher.Instance.Memory.Write(va, value);
+                // 每个写入地址首次写时记一行（至多 64 个）：指针链金手指落到哪里只有运行时知道，排查「写成功但没效果」靠它对照宿主对象地址
+                lock (Written) if (Written.Count < 64 && Written.Add(va)) Console.Error.WriteLine($"金手指：写 0x{va:X} {Unsafe.SizeOf<T>()} 字节");
             }
+            private static readonly HashSet<ulong> Written = new HashSet<ulong>();
 
             public void PauseProcess() => Console.Error.WriteLine("金手指：暂停进程指令不支持，已忽略");
             public void ResumeProcess() { }

@@ -25,14 +25,17 @@ void s2a_cpatch_abort_boot_inputs(void) {
     if (file && fclose(file)) LOG("【红】失败装载的社区补丁表关闭失败 errno=%d", errno);
 }
 
-static struct cp_fm { _Atomic uint64_t *slot; uint64_t bits; } *g_fm; static int g_cfm;   // 有帧率类补丁的各模块：掩码槽、其中帧率类的位（按需增长，无上限；只在装载时追加）
-static struct { module_t *m; char *spec; } g_fd[64]; static int g_nfm, g_nfd;   // 帧率类的数据写入（切换时写补丁值 / 写回原值）
+// 帧率补丁逐份（11-13 维护者：60 / 120 都带进去，玩家自己切档）：模块、掩码槽（模块装载完补上）、位、数据写入（可空）、目标帧率（表第 10 列，0 = 取不到）、
+//   allow = 这份能开（安卓只认开关列表里的；iOS 屏蔽的画面类不算）。跟随开关时只开选中档的那几份（fps_pick），其余关位、写回原值
+struct cp_fu { module_t *m; _Atomic uint64_t *slot; uint64_t bits; char *spec; int target, allow; char id[48]; };
+static struct cp_fu g_fu[256]; static int g_nfu, g_nfud;   // g_nfud：其中带数据写入的份数（上限 64，同原帧率跟随表口径；只改代码的不计）   // 有帧率类补丁的各模块：掩码槽、其中帧率类的位（按需增长，无上限；只在装载时追加）
 // 随包表：fpslocker.json
 // FPSLocker 帧率配置的运行时部分（pack/fpslocker.py 出、与 cpatch.tsv 同目录）：服务层 services/S2A.Services/FpsLocker.cs 经 s2a_cpatch_tables_dir 找到它
 static char g_tables_dir[1024];
 const char *s2a_cpatch_tables_dir(void) { return g_tables_dir; }
 static _Atomic int g_nfps;   // 设置页可与会话装载 / 释放并发查询
-static int g_fps_target;   // 开着的帧率补丁里最高的目标帧率（表第 10 列；s2a_cpatch_fps_follow → fps_link）
+static int g_fps_target;   // 当前选中档的目标帧率（fps_pick 定；s2a_cpatch_fps_follow → fps_link 按它定出图上限与节拍）
+static int g_fps_on = -1, g_fps_want;   // 跟随开关的最近状态（-1 = 还没跟随过）；玩家选的档（0 = 没选：默认取不超过屏幕最高刷新率的最高一档）
 // 金手指（编号 cheat:，pack/cpatch.py scan_cheats；11-12）：缺省全关、不看 S2A_CPATCH_ON，由服务层金手指线程（services/S2A.Services/Cheats.cs）按玩家开关逐条调 s2a_cpatch_cheat。
 //   「位」列是逗号表（共享挂钩按「共用这条改动的条目集合」分位，见 cpatch.py）或「-」（只写填充 / 数据、不占位）。
 //   数据写入是各条的开关字（空洞开关表搬到映像结尾的可写区后）：变体（伤害 x2 / x5…）写同一处，每次开关先把关着的写回原值、再按表序写开着的（同 Atmosphere 每帧「主代码清零 → 各条写」）
@@ -77,9 +80,8 @@ void s2a_cpatch_session_reset(void) {
     for (int i = 0; i < g_nfx; i++) free(g_fx[i].spec);
     free(g_fx); g_fx = NULL; g_nfx = g_cfx = 0; g_fx_aspect = 0;
     pthread_mutex_unlock(&g_ad_lock);
-    for (int i = 0; i < g_nfd; i++) free(g_fd[i].spec);
-    memset(g_fd, 0, sizeof g_fd); free(g_fm); g_fm = NULL; g_cfm = 0;
-    g_nfd = g_nfm = 0; atomic_store(&g_nfps, 0); g_fps_target = 0;
+    for (int i = 0; i < g_nfu; i++) free(g_fu[i].spec);
+    memset(g_fu, 0, sizeof g_fu); g_nfu = g_nfud = 0; atomic_store(&g_nfps, 0); g_fps_target = 0; g_fps_on = -1; g_fps_want = 0;
 }
 
 static int in_list(const char *list, const char *id) {
@@ -271,7 +273,7 @@ void s2a_cpatch_load(module_t *m, const char *dir) {
     if (!on) on = "none";
     fps_list = 1;
 #endif
-    uint64_t mask = 0, fbits = 0; int n = 0, cheat_mods = 0, ch0 = g_nch;
+    uint64_t mask = 0; int n = 0, cheat_mods = 0, ch0 = g_nch, fu0 = g_nfu;
     static char line[1 << 16];
     if (!fgets(line, sizeof line, f)) { fclose(f); g_boot_file = NULL; return; }   // 表头
     while (fgets(line, sizeof line, f)) {
@@ -290,7 +292,6 @@ void s2a_cpatch_load(module_t *m, const char *dir) {
         // 帧率补丁里最高的目标帧率（s2a_cpatch_fps_follow 按它定出图上限、出图节拍与服务层 vsync）。帧率类的开关位本来就跟 60 帧开关走、不看开关列表，
         //   目标却原先只从列表里的取：iOS 设置页把帧率补丁做成 60 帧开关的联动、从不写进 S2ACommunityPatches，玩家动过任何一个补丁开关后目标就是 0，
         //   补丁照开、节拍不放（11-13 实机：列表只有 widescreen:auto → 「sdk fps:… 关」、present tick 60 Hz）。安卓照旧只认列表里的
-        if (fps && (en || !fps_list) && !cp_ios_blocked(c[0]) && c[9] && atoi(c[9]) > g_fps_target) g_fps_target = atoi(c[9]);
         if (!strncmp(c[0], "wsauto:", 7)) {   // 自适应画幅：开关按族（去掉末尾 :w / :n），登记后按当前画幅开其一（见 ad_apply）
             char fam[96]; char *sd = strrchr(c[0], ':');
             if (!sd || (sd[1] != 'w' && sd[1] != 'n') || sd[2] || (size_t)(sd - c[0]) >= sizeof fam || c[2][0] < '0' || c[2][0] > '9' || *end || bit < 0 || bit >= 64) {
@@ -349,18 +350,20 @@ void s2a_cpatch_load(module_t *m, const char *dir) {
             continue;
         }
         if (fps) {
-            if (c[7][0] && g_nfd >= 64) {
+            if (g_nfu >= (int)(sizeof g_fu / sizeof g_fu[0]) || (c[7][0] && g_nfud >= 64)) {
                 LOG("【红】社区补丁 %s %s：帧率跟随表容量已满，整份不开", m->name, c[0]); st_put(c[0], "表不认"); continue;
             }
-            if (c[7][0]) {
-                char *spec = strdup(c[7]); if (!spec) die("社区帧率补丁数据分配失败");
-                g_fd[g_nfd].m = m; g_fd[g_nfd].spec = spec; g_nfd++;
-            }
-            atomic_fetch_add(&g_nfps, 1); fbits |= 1ull << bit;
-            st_put(c[0], "关");   // 开关由 s2a_cpatch_fps_follow 定
+            struct cp_fu *u = &g_fu[g_nfu++]; memset(u, 0, sizeof *u);
+            u->m = m; u->bits = 1ull << bit; u->target = c[9] ? atoi(c[9]) : 0; u->allow = (en || !fps_list) && !cp_ios_blocked(c[0]);
+            snprintf(u->id, sizeof u->id, "%s", c[0]);
+            if (c[7][0] && !(u->spec = strdup(c[7]))) die("社区帧率补丁数据分配失败");
+            if (c[7][0]) g_nfud++;
+            atomic_fetch_add(&g_nfps, 1);
+            st_put(c[0], "关");   // 开关由 s2a_cpatch_fps_follow 定（按档只开选中的那几份）
         }
-        if (en && c[7][0] && data_writes(m, c[7], 1)) die("社区补丁已校验的数据写入失败");
-        if (en) mask |= 1ull << bit;
+        // 帧率类装载时只登记、不写不开（11-13：几档改同一处，先写一份另一份的原值校验就不过）；位与数据由 s2a_cpatch_fps_follow 按档定（fps.c 起局调一次）
+        if (en && !fps && c[7][0] && data_writes(m, c[7], 1)) die("社区补丁已校验的数据写入失败");
+        if (en && !fps) mask |= 1ull << bit;
         LOG("社区补丁：%s %s（%s · %s · 许可 %s）%s", m->name, c[0], c[3], c[4], c[5][0] ? c[5] : "未声明", en ? "开" : "关");
         if (!fps) st_put(c[0], en ? "开" : "关");   // 帧率类跟 60 帧开关（s2a_cpatch_fps_follow 定开关时记）
     }
@@ -385,12 +388,7 @@ void s2a_cpatch_load(module_t *m, const char *dir) {
         s2a_cpatch_aspect(A > 0 ? A : g_aspect);
     }
     if (cheat_mods) LOG("金手指：%s 编进包 %d 条（缺省关，局内逐条开关）", m->name, cheat_mods);
-    if (fbits && g_nfm == g_cfm) {
-        int nc = g_cfm ? g_cfm * 2 : 16; struct cp_fm *q = realloc(g_fm, (size_t)nc * sizeof *q);
-        if (!q) die("社区帧率跟随表 %d 项分配失败", nc);
-        g_fm = q; g_cfm = nc;
-    }
-    if (fbits) { g_fm[g_nfm].slot = (_Atomic uint64_t *)((uint64_t *)page + CP_SLOT); g_fm[g_nfm].bits = fbits; g_nfm++; }
+    for (int i = fu0; i < g_nfu; i++) g_fu[i].slot = (_Atomic uint64_t *)((uint64_t *)page + CP_SLOT);
 }
 // 定画幅变体按画幅 A 选（持 g_ad_lock）：开着的几份里取与 A 同在 16:9 一侧、log 比值最近的一份；先关不该开的（写回原值、清位）再开选中的
 static void fx_select(double A) {
@@ -477,8 +475,10 @@ static int ws_scan(const char *dir, int need_docked) {
 // 补丁优先（11-13 维护者：有 120 帧补丁就盖过我们的 60 帧，有 60 帧补丁就盖过我们自己的 60 帧，满屏同理）：帧率补丁开着、目标高于 60 时，
 //   出图链改 60–120 Hz（graphics/nvn/gfx/nvn/nvn_mtl.m link_range 模式 2；每帧 link_sync 按 g_dm_present_link 对齐，局中切换也即时生效），
 //   游戏解了帧率锁后按屏幕的高刷出图；屏幕只有 60 Hz 时系统给 60。关掉帧率补丁回到 60 Hz（模式 1）。启动环境显式给了 DM_PRESENT_LINK 的不动（对照局）
-static void fps_link(int on) {
-    if (g_fps_target <= 60 || getenv("S2A_PRESENT_LINK_USER")) return;
+static int tgt(const struct cp_fu *u);
+static void fps_link(int on) {   // on = 选中档高于 60（开高刷）；包里有高于 60 的档才归补丁管出图链与节拍，关 / 选回 60 档时退回 60 Hz
+    int hi = 0; for (int i = 0; i < g_nfu; i++) if (g_fu[i].allow && tgt(&g_fu[i]) > hi) hi = tgt(&g_fu[i]);
+    if (hi <= 60 || getenv("S2A_PRESENT_LINK_USER")) return;
     const char *pin = getenv("DM_PRESENT_LINK");
     static int owned = -1; if (owned < 0) owned = !pin;   // 第一次进来时启动环境没给，才归补丁管
     if (!owned) return;
@@ -495,18 +495,76 @@ static void fps_link(int on) {
     }
     LOG("社区补丁：帧率补丁目标 %d 帧，%s", g_fps_target, on ? "出图链放开到 60–120 Hz、出图节拍跟到补丁目标（补丁优先，盖过我方 60 帧）" : "关了，出图链与出图节拍回 60 Hz");
 }
-void s2a_cpatch_fps_follow(int on) {
-    fps_link(on);
-    for (int i = 0; i < g_nfm; i++) { if (on) atomic_fetch_or(g_fm[i].slot, g_fm[i].bits); else atomic_fetch_and(g_fm[i].slot, ~g_fm[i].bits); }
-    for (int i = 0; i < g_nfd; i++) {
-        if (data_writes(g_fd[i].m, g_fd[i].spec, on ? 1 : 2)) die("社区帧率补丁已准入的数据写入失败");
+// 选档（11-13 维护者：60 / 120 都带进去，玩家自己切）：能开的各份里，玩家选了档（S2A_FPS_PICK / s2a_cpatch_fps_pick）就取它，没有这一档取不超过它的最高一档；
+//   没选取不超过屏幕最高刷新率的最高一档（120 Hz 屏开 120、60 Hz 屏开 60）；都超过就取最低一档。取不到目标的（0）当 60 档。→ 选中的目标帧率；没有能开的 → 0
+__attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // macos/front_mac.m 强定义（只 Mac 宿主有）；单测 / iOS 用这个弱的（0 = 不知道，按 60）
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+int s2a_ios_screen_max_fps(void);
+#endif
+static int screen_max_hz(void) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    return s2a_ios_screen_max_fps();
+#else
+    int v = front_screen_max_fps(); return v > 0 ? v : 60;
+#endif
+}
+static int tgt(const struct cp_fu *u) { return u->target > 0 ? u->target : 60; }
+static int fps_pick(void) {
+    int want = g_fps_want;
+    if (!want) { const char *e = getenv("S2A_FPS_PICK"); want = e ? atoi(e) : 0; }
+    int cap = want > 0 ? want : screen_max_hz(), best = 0, low = 0;
+    for (int i = 0; i < g_nfu; i++) {
+        if (!g_fu[i].allow || !g_fu[i].slot) continue;
+        int t = tgt(&g_fu[i]);
+        if (t <= cap && t > best) best = t;
+        if (!low || t < low) low = t;
     }
-    if (g_nfm || g_nfd) LOG("社区补丁：帧率类 %d 份跟 60 帧开关 %s", g_nfps, on ? "开" : "关");
+    return best ? best : low;
+}
+// 可选档位（设置页列「帧率」档用）：能开的各份的目标帧率，去重升序写进 out（最多 n 个）→ 个数；cur 填当前选中档（没跟随过按默认算）
+int s2a_cpatch_fps_levels(int *out, int n, int *cur) {
+    int k = 0;
+    for (int i = 0; i < g_nfu; i++) {
+        if (!g_fu[i].allow) continue;
+        int t = tgt(&g_fu[i]), j = 0;
+        while (j < k && out[j] < t) j++;
+        if (j < k && out[j] == t) continue;
+        if (k < n) { memmove(out + j + 1, out + j, (size_t)(k - j) * sizeof *out); out[j] = t; k++; }
+    }
+    if (cur) *cur = g_fps_on > 0 ? g_fps_target : fps_pick();
+    return k;
+}
+void s2a_cpatch_fps_follow(int on) {
+    g_fps_on = on;
+    int pick = on ? fps_pick() : 0;
+    g_fps_target = pick;
+    fps_link(on && pick > 60);
+    for (int i = 0; i < g_nfu; i++) {   // 先关不选的（写回原值、清位），再开选中的：几档改同一处，顺序不能反
+        struct cp_fu *u = &g_fu[i];
+        if (!u->slot || (on && u->allow && tgt(u) == pick)) continue;
+        atomic_fetch_and(u->slot, ~u->bits);
+        if (u->spec && data_writes(u->m, u->spec, 2)) die("社区帧率补丁已准入的数据写入失败");
+    }
+    for (int i = 0; on && i < g_nfu; i++) {
+        struct cp_fu *u = &g_fu[i];
+        if (!u->slot || !u->allow || tgt(u) != pick) continue;
+        if (u->spec && data_writes(u->m, u->spec, 1)) die("社区帧率补丁已准入的数据写入失败");
+        atomic_fetch_or(u->slot, u->bits);
+    }
+    if (g_nfu) LOG("社区补丁：帧率类 %d 份，%s", g_nfps, on && pick ? "" : "全关");
+    if (g_nfu && on && pick) LOG("社区补丁：帧率档 %d 帧（%s；屏幕最高 %d Hz）", pick, g_fps_want || getenv("S2A_FPS_PICK") ? "玩家选的" : "默认：不超过屏幕刷新率的最高一档", screen_max_hz());
     pthread_mutex_lock(&g_st_lock); int any = 0;
-    for (int i = 0; i < g_nst; i++) if (!strncmp(g_st[i].id, "fps:", 4) && strcmp(g_st[i].st, "不配套") && strcmp(g_st[i].st, "表不认")) {
-        snprintf(g_st[i].st, sizeof g_st[i].st, "%s", on ? "开" : "关"); if (!on) g_st[i].eff[0] = 0; any = 1; }
+    for (int j = 0; j < g_nst; j++) if (!strncmp(g_st[j].id, "fps:", 4) && strcmp(g_st[j].st, "不配套") && strcmp(g_st[j].st, "表不认")) {
+        int lit = 0;
+        for (int i = 0; i < g_nfu; i++) if (!strcmp(g_fu[i].id, g_st[j].id) && on && g_fu[i].allow && tgt(&g_fu[i]) == pick) lit = 1;
+        snprintf(g_st[j].st, sizeof g_st[j].st, "%s", lit ? "开" : "关"); if (!lit) g_st[j].eff[0] = 0; any = 1; }
     if (any) st_flush_locked();
     pthread_mutex_unlock(&g_st_lock);
+}
+// 玩家切档（设置页 / 局内菜单）：记下选的档；已在跟随（帧率补丁开着）就当场重选并切换，下一帧生效
+void s2a_cpatch_fps_pick(int target) {
+    g_fps_want = target > 0 ? target : 0;
+    if (g_fps_on > 0) s2a_cpatch_fps_follow(1);
 }
 // 金手指逐条开关（Cheats.cs 每次重载开关表时对每条调；主代码 = 同文件任一条开着）：
 //   → 1 这条编进了包、已按 on 生效；0 包里没有这条（交运行时 Tamper）

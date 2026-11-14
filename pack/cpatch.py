@@ -1422,6 +1422,7 @@ def plan(root, default_on, index_dirs):
     own_fps = os.path.exists(fp) and any(l.split('#', 1)[0].split()[:1] == ['c'] for l in open(fp, encoding='utf-8', errors='replace'))
     claim = {}; bits = {}; rows = []; table = []; branch_cache = {}; cheats = []
     uasp = {uid: u['meta'].get('aspect') for (uid, _), u in units.items() if uid.startswith('widescreen:')}
+    ufps = {uid: u['meta'].get('fps') for (uid, _), u in units.items() if uid.startswith('fps:')}   # 帧率档位（11-13 维护者：60 / 120 都带进去，玩家自己切）
     wk = {}
     def wkinds(mod):   # 本模块宽屏候选点 {偏移: 种类}（widen_sites.tsv；与有没有我方宽屏表无关）
         if mod not in wk:
@@ -1439,8 +1440,12 @@ def plan(root, default_on, index_dirs):
         ad = u['meta'].get('adapt') or {}; marks = ad.get('marks', {}); adata = [x for x in ad.get('adata', []) if not str(x[0]).startswith('k')]   # 自适应画幅（adapt_families）：@k 行与按画幅算的数据写入
         A0 = u['meta'].get('aspect') if uid.startswith('widescreen:') else None
         # 宽 / 窄兄弟：运行时只开一份，可改同一处。画幅不同的宽屏补丁同理（runtime/src/cpatch.c 按当前屏幕比例只开最近的一份）；同画幅的两份照旧按「改同一处」落选（排前的留下）
+        F0 = ufps.get(uid) if uid.startswith('fps:') else None
+        # 兄弟（运行时只开其一，可改同一处）：自适应画幅宽 / 窄两份；画幅不同的定画幅宽屏变体；目标帧率不同的帧率补丁（60 / 120 …，运行时按玩家选的档只开一份，
+        #   runtime/src/cpatch.c fps_pick）。目标相同的两份照旧按「改同一处」落选
         sib = lambda x: (uid.startswith('wsauto:') and x.startswith('wsauto:') and x.rsplit(':', 1)[0] == uid.rsplit(':', 1)[0]) or \
-            (A0 is not None and x.startswith('widescreen:') and uasp.get(x) is not None and abs(uasp[x] - A0) > 1e-3)
+            (A0 is not None and x.startswith('widescreen:') and uasp.get(x) is not None and abs(uasp[x] - A0) > 1e-3) or \
+            (F0 and x.startswith('fps:') and ufps.get(x) and ufps[x] != F0)
         # 金手指专用（11-12）：映像到键页前（bss 与其后空余可写，开关表搬过去）、写原值的字节不占（暗黑 3 主控把空洞清零）、
         #   代码段结尾到 ro 开头的尾巴当代码字（金手指往这里写新代码，改写器按 w 行常写）。社区补丁照原判定
         ext = cheat or u['meta'].get('ext')   # FPSLocker 单元同此规则

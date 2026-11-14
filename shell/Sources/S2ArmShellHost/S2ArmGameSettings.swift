@@ -12,7 +12,7 @@ import ShellUI
 /// - 按键透明度：App 级 `S2AVPadOpacity`（0.1–1，缺省 1），全部游戏共用；宿主 ios/vpad.m 进游戏时读
 /// - 虚拟手柄布局：按游戏，走 C 接口 s2a_shell_vpad_*（宿主 ios/vpad_shell.m），与游戏内拖动编辑同一份文件
 public enum S2ArmGameSettings {
-    public static let fps60 = "fps60", fullscreen = "fullscreen", opacity = "vpadOpacity", layout = "vpadLayout", holdLock = "vpadHoldLock", identity = "gameIdentity", editIdentity = "edit"
+    public static let fps60 = "fps60", fpsPick = "fpsPick", fullscreen = "fullscreen", opacity = "vpadOpacity", layout = "vpadLayout", holdLock = "vpadHoldLock", identity = "gameIdentity", editIdentity = "edit"
     /// 社区补丁 / 金手指的行号前缀（后接补丁编号 / 「文件名/条目名」）
     public static let patchPrefix = "patch.", cheatPrefix = "cheat."
     /// 布局多选里打开二级编辑页的那一项（不是一个方案）
@@ -23,13 +23,20 @@ public enum S2ArmGameSettings {
     public struct Options: Equatable, Sendable {
         /// title：宿主给了就用它当这一行的名字（补丁接管时「帧率」），没给用缺省（「60 FPS」/「Full screen」）
         /// hidden：这款没有对应的社区补丁（11-13 起只用补丁，没有补丁 = 原生游戏），这一行不出
-        public struct Switch: Equatable, Sendable { public var on: Bool; public var enabled = true; public var note = ""; public var title = ""; public var hidden = false }
+        /// levels / pick / levelsTitle：帧率档位（11-13：60 / 120 帧补丁都带进去，玩家自选；两档以上宿主才给，第一项「自动」值 "0"）
+        public struct Level: Equatable, Sendable { public var value: String; public var label: String }
+        public struct Switch: Equatable, Sendable { public var on: Bool; public var enabled = true; public var note = ""; public var title = ""; public var hidden = false; public var levels: [Level] = []; public var pick = "0"; public var levelsTitle = "" }
         public struct Item: Equatable, Sendable { public var id: String; public var title: String; public var note = ""; public var on: Bool }
         public var fps: Switch; public var fullscreen: Switch; public var patches: [Item] = []; public var cheats: [Item] = []
         public init(fps: Switch, fullscreen: Switch, patches: [Item] = [], cheats: [Item] = []) { self.fps = fps; self.fullscreen = fullscreen; self.patches = patches; self.cheats = cheats }
         static func parse(_ json: String) -> Options? {
             guard let o = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return nil }
-            func sw(_ v: Any?) -> Switch { let d = v as? [String: Any] ?? [:]; return Switch(on: d["on"] as? Bool ?? false, enabled: d["enabled"] as? Bool ?? true, note: d["note"] as? String ?? "", title: d["title"] as? String ?? "", hidden: d["hidden"] as? Bool ?? false) }
+            func sw(_ v: Any?) -> Switch {
+                let d = v as? [String: Any] ?? [:]
+                let lv = (d["levels"] as? [[String: Any]] ?? []).compactMap { e in (e["value"] as? String).map { Level(value: $0, label: e["label"] as? String ?? $0) } }
+                return Switch(on: d["on"] as? Bool ?? false, enabled: d["enabled"] as? Bool ?? true, note: d["note"] as? String ?? "", title: d["title"] as? String ?? "", hidden: d["hidden"] as? Bool ?? false,
+                              levels: lv, pick: d["pick"] as? String ?? "0", levelsTitle: d["levelsTitle"] as? String ?? "")
+            }
             func items(_ v: Any?, _ idKey: String, _ titleKey: String) -> [Item] {
                 (v as? [[String: Any]] ?? []).compactMap { d in (d[idKey] as? String).map { Item(id: $0, title: d[titleKey] as? String ?? $0, note: d["note"] as? String ?? "", on: d["on"] as? Bool ?? false) } }
             }
@@ -103,6 +110,10 @@ public enum S2ArmGameSettings {
         let o = stores.options(id)
         if let o {
             if !o.fps.hidden { picture.append(toggle(fps60, o.fps.title.isEmpty ? "60 FPS" : o.fps.title, o.fps)) }
+            if !o.fps.hidden && o.fps.levels.count > 1 {
+                picture.append(SettingRow(id: fpsPick, label: o.fps.levelsTitle.isEmpty ? "Frame rate level" : o.fps.levelsTitle, note: "",
+                                          kind: .choice(o.fps.levels.map { SettingOption($0.value, $0.label) }), value: o.fps.levels.contains { $0.value == o.fps.pick } ? o.fps.pick : "0"))
+            }
             if !o.fullscreen.hidden { picture.append(toggle(fullscreen, o.fullscreen.title.isEmpty ? "Full screen" : o.fullscreen.title, o.fullscreen)) }
         }
         out.append(SettingSection(id: "s2a.picture", title: "Picture", rows: picture))
@@ -131,6 +142,7 @@ public enum S2ArmGameSettings {
         case splitScreen: if ["auto", "on", "off"].contains(value) { stores.app.set(value, forKey: splitScreen); stores.app.removeObject(forKey: "S2ASplitScreen") }
         case screenOrientation: if ["auto", "landscape", "portrait"].contains(value) { stores.app.set(value, forKey: screenOrientation); stores.app.removeObject(forKey: "S2AScreenOrientation") }
         case fps60: _ = stores.setOption(id, "fps", "", value == "on")
+        case fpsPick: _ = stores.setOption(id, "fpspick", value, true)
         case fullscreen: _ = stores.setOption(id, "fullscreen", "", value == "on")
         case _ where setting.hasPrefix(patchPrefix): _ = stores.setOption(id, "patch", String(setting.dropFirst(patchPrefix.count)), value == "on")
         case _ where setting.hasPrefix(cheatPrefix): _ = stores.setOption(id, "cheat", String(setting.dropFirst(cheatPrefix.count)), value == "on")

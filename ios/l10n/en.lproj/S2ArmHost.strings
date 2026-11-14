@@ -89,6 +89,9 @@
 "sgrade.counts" = "%ld on · %ld in all";
 "settings.fps.patchTitle" = "Frame rate";
 "settings.fps.patchNote" = "Community patch · up to %ld fps";
+"settings.fps.pick" = "Frame rate level";
+"settings.fps.pick.auto" = "Auto (match screen)";
+"settings.fps.pick.level" = "%ld fps";
 "settings.patchNote" = "Community patch";
 "settings.fullscreen.patchNote" = "Community full-screen patch";
 "game.fps.note" = "Runs at 60 FPS when the game supports it and falls back when it can’t keep up. Takes effect next time you start the game";

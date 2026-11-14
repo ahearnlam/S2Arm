@@ -127,6 +127,16 @@ char *s2a_shell_game_options_json(const char *game_id) {
             if (fpsP) {
                 fps[@"title"] = S2AL(@"settings.fps.patchTitle"); fps[@"enabled"] = @YES; fps[@"on"] = @(s2a_ios_fps60_on_for(gid));
                 fps[@"note"] = target > 0 ? [NSString stringWithFormat:S2AL(@"settings.fps.patchNote"), (long)target] : S2AL(@"settings.patchNote");
+                // 帧率档位（11-13 维护者：60 / 120 帧补丁都带进去，玩家自己选；同 app_settings.m 帧率档位行）：两档以上才给，值 0 = 自动（不超过屏幕刷新率的最高一档）
+                NSMutableOrderedSet *lv = [NSMutableOrderedSet orderedSet];
+                for (S2ACPatchGroup *g in groups) for (S2ACPatchItem *it in g.items) if (it.followsFps60) [lv addObject:@(it.targetFps > 0 ? it.targetFps : 60)];
+                NSArray *sorted = [lv.array sortedArrayUsingSelector:@selector(compare:)];
+                if (sorted.count > 1) {
+                    NSMutableArray *opts = [NSMutableArray arrayWithObject:@{@"value": @"0", @"label": S2AL(@"settings.fps.pick.auto")}];
+                    for (NSNumber *n in sorted) [opts addObject:@{@"value": n.stringValue, @"label": [NSString stringWithFormat:S2AL(@"settings.fps.pick.level"), n.longValue]}];
+                    NSInteger pick = [d integerForKey:@"S2AFpsPick"];
+                    fps[@"levels"] = opts; fps[@"levelsTitle"] = S2AL(@"settings.fps.pick"); fps[@"pick"] = [sorted containsObject:@(pick)] ? @(pick).stringValue : @"0";
+                }
             }
             if (wsP && !blocked) full[@"note"] = S2AL(@"settings.fullscreen.patchNote");
         }
@@ -149,12 +159,13 @@ char *s2a_shell_game_options_json(const char *game_id) {
     }
 }
 
-// kind = fps / fullscreen / patch / cheat；key = 补丁编号 / 「文件名/条目名」（fps、fullscreen 不看）。返回 1 存成 / 0 没存成
+// kind = fps / fpspick / fullscreen / patch / cheat；key = 补丁编号 / 「文件名/条目名」（fps、fullscreen 不看）。返回 1 存成 / 0 没存成
 int s2a_shell_game_option_set(const char *game_id, const char *kind, const char *key, int on) {
     @autoreleasepool {
         if (!gid_ok(game_id) || !kind) return 0;
         NSString *gid = @(game_id), *k = @(kind), *item = key ? @(key) : @"";
         if ([k isEqual:@"fps"]) { s2a_ios_set_fps60_for(gid, on != 0); return 1; }
+        if ([k isEqual:@"fpspick"]) { [s2a_ios_settings_defaults_for(gid) setInteger:MAX(0, item.integerValue) forKey:@"S2AFpsPick"]; return 1; }   // 帧率档位：key = 目标帧率（"0" = 自动），on 不看
         if ([k isEqual:@"fullscreen"]) { BOOL now; if (s2a_ios_fullscreen_state(gid, &now)) return 0; s2a_ios_set_fullscreen(gid, on != 0); return 1; }
         if ([k isEqual:@"patch"]) { S2ACPatchSetEnabled(patch_groups(gid), s2a_ios_settings_defaults_for(gid), item, on != 0); return 1; }
         if ([k isEqual:@"cheat"]) {

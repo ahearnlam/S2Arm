@@ -231,10 +231,16 @@ def mac_settings(c, gid):
     if caps:
         fps_p = "社区帧率补丁" in rows.get("fps60", ("", ""))[1]
         ws_p = any((r.get("编号") or "").startswith(("widescreen:", "wsauto:")) for r in _rows(layout.image_mac(c, gid, create=False) / "cpatch.tsv"))
-        for key, has in (("fps60", fps_p), ("widescreen", ws_p)):
+        for key, has in (("fps60", fps_p), ("widescreen", ws_p), ("fpsPick", len(fps_levels(c, gid)) > 1)):
             if key in out and not has:
                 out[key]["hidden"] = True
     return out
+
+
+def fps_levels(c, gid):
+    """这款 Mac 包里帧率补丁（编号 fps:）的目标帧率档，去重升序；没写目标的当 60（同 iPhone app_settings.m fpsLevels）。两档以上才出「帧率档位」"""
+    return sorted({int(r.get("目标帧率") or 0) or 60 for r in _rows(layout.image_mac(c, gid, create=False) / "cpatch.tsv")
+                   if (r.get("编号") or "").startswith("fps:") and (r.get("目标帧率") or "0").isdigit()})
 
 
 def selection(c, gid):
@@ -419,6 +425,9 @@ def launch_env(c, gid):
         env["S2A_FPS60"] = "1"
     elif s.get("fps60") is False:
         env["S2A_FPS60"] = "0"
+    # 帧率档位（11-13 维护者：60 / 120 帧补丁都带进去，玩家自己选）：选了具体档才写，宿主（runtime/src/cpatch.c fps_pick）取不超过它的最高一档；没选 / 自动不写，宿主按屏幕最高刷新率挑
+    if str(s.get("fpsPick") or "0") not in ("", "0"):
+        env["S2A_FPS_PICK"] = str(s["fpsPick"])
     # 满屏（11-13 合并「宽屏」与「宽屏强制启用」，同 iPhone settings.m）：明确开 = 没验证过也铺满（画面被拉伸会自动退回 16:9）；明确关 = 16:9；
     #   没选过 = 清单 widen 1 或包里有我方验过的自适应满屏补丁才开。有自适应满屏补丁的款由补丁铺满（下面写进 S2A_CPATCH_ON，S2Arm 满屏让开）；
     #   清单原因「强信号」= 判过坏，一律不开

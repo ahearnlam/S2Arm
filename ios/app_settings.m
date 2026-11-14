@@ -11,6 +11,8 @@ int s2a_fps_cap_reason(void) __attribute__((weak_import));
 #import "vpad_settings.h"
 #import "cpatch_settings.h"
 #include "s2a_pad.h"   // 手柄按键排布（自动 / Switch / Xbox）的取值解析，同齿轮菜单
+// 弱链接[lab]：s2a_cpatch_fps_pick（runtime/src/cpatch.c：局中切帧率档，下一帧生效；输入工作台不链原生核，取不到就只记、下次进游戏生效）
+void s2a_cpatch_fps_pick(int target) __attribute__((weak_import));
 // 弱链接[lab]：s2a_pad_layout_parse（runtime/src/pad.c；输入工作台不链原生核，取不到就按存的字面值认）
 int s2a_pad_layout_parse(const char *value) __attribute__((weak_import));
 // 弱链接[lab]：s2a_hud_brief_show（ios/hud.m 简版性能浮层；输入工作台不链 hud.m，取不到就只记开关、下次进游戏生效）
@@ -335,12 +337,19 @@ static UILabel *textLabel(UIFontTextStyle style) {
 }
 // 画面组的行（11-13 维护者撤掉我方 60 帧与通用满屏，只用社区补丁）：画质四项 → 满屏（这款有宽屏补丁才列）→ 帧率（有帧率补丁才列）→ 运行模式；
 //   值 0–3 = 画质选项序号，6 / 7 / 9 = toggleKeys 序号（满屏 / 帧率 / 运行模式）
+// 这款帧率补丁的档位（目标帧率去重升序，取不到目标的当 60；11-13 维护者：60 / 120 都带进去，玩家自己切）
+- (NSArray<NSNumber *> *)fpsLevels {
+    NSMutableOrderedSet *s = [NSMutableOrderedSet orderedSet];
+    for (S2ACPatchGroup *g in _patchGroups) for (S2ACPatchItem *it in g.items) if (it.followsFps60) [s addObject:@(it.targetFps > 0 ? it.targetFps : 60)];
+    return [s.array sortedArrayUsingSelector:@selector(compare:)];
+}
 - (NSArray<NSNumber *> *)graphicsRows {
     BOOL fpsP = NO, wsP = NO;
     for (S2ACPatchGroup *g in _patchGroups) for (S2ACPatchItem *it in g.items) { if (it.followsFps60) fpsP = YES; if ([g.kind isEqual:@"widescreen"] || it.followsFullscreen) wsP = YES; }
     NSMutableArray *rows = [@[@0, @1, @2, @3] mutableCopy];
     if (wsP) [rows addObject:@6];
     if (fpsP) [rows addObject:@7];
+    if (fpsP && [self fpsLevels].count > 1) [rows addObject:@20];   // 帧率档位（两档以上才列）
     [rows addObject:@9];
     return rows;
 }
@@ -406,6 +415,18 @@ static UILabel *textLabel(UIFontTextStyle style) {
     }
     if (group == 0) {
         NSInteger kind = [self graphicsRows][row].integerValue;
+        if (kind == 20) {   // 帧率档位：自动（不超过屏幕刷新率的最高一档）/ 各档；选了存 S2AFpsPick，游戏里当场切（s2a_cpatch_fps_pick），否则下次进游戏生效
+            NSArray<NSNumber *> *lv = [self fpsLevels]; NSMutableArray *labels = [NSMutableArray arrayWithObject:S2AL(@"settings.fps.pick.auto")];
+            for (NSNumber *n in lv) [labels addObject:[NSString stringWithFormat:S2AL(@"settings.fps.pick.level"), n.longValue]];
+            NSInteger cur = [s2a_ios_settings_defaults() integerForKey:@"S2AFpsPick"], sel = cur > 0 ? (NSInteger)[lv indexOfObject:@(cur)] + 1 : 0;
+            if (sel < 0 || sel > (NSInteger)lv.count) sel = 0;
+            return [self dropdown:S2AL(@"settings.fps.pick") labels:labels selected:sel enabled:^BOOL(NSInteger index) { (void)index; return YES; } choose:^(NSInteger index) {
+                NSInteger v = index > 0 ? lv[index - 1].integerValue : 0;
+                [s2a_ios_settings_defaults() setInteger:v forKey:@"S2AFpsPick"];
+                if (s2a_cpatch_fps_pick) s2a_cpatch_fps_pick((int)v);
+                [weakSelf refresh];
+            } identifier:@"settings.fpsPick"];
+        }
         if (kind >= 6) return [self toggleCell:kind];
         row = kind;
         NSDictionary *option = s2a_ios_graphics_options()[row];
