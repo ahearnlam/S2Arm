@@ -2430,19 +2430,28 @@ def delete(c):
                 moved = _to_trash(c, root, item, gid)
                 if moved:
                     trashed.append((root, moved))
+        # 缓存（game_caches：这款的直连库 / 烘焙 / 补丁 / 宽屏，连同删除语义里一并清的共用编库缓存）同样锁内挪进工具缓存根的 .s2a-trash：
+        #   锁一放，别的款出包重建共用缓存、重新加回同一款再出包，都不会和锁外的删除撞在同一个目录上
+        for p in game_caches(c, gid):
+            moved = _to_trash(c, c.work_root, p, gid)
+            if moved:
+                trashed.append((c.work_root, moved))
         drop_from_container(c, gid)
         cat = c.catalog()
         cat["games"] = [g for g in cat["games"] if g["id"] != gid]
         atomic(c.library / "catalog.json", cat)
-        left = []
-        for root, p in trashed + [(c.work_root, p) for p in game_caches(c, gid)]:
-            try:
-                _rm(c, root, p)
-            except (Failure, OSError) as e:
+    # 真正删文件放在锁外（诊断#dab32d：一款 100 GB 级的游戏在慢盘上删了 53 分钟，整段占着执行锁，期间开别的款 6 次全 library_busy）。
+    #   上面已经挪进 .s2a-trash、从清单去掉，别的任务看不到也碰不到这堆文件，不需要锁
+    left = []
+    for root, p in trashed:
+        try:
+            _rm(c, root, p)
+        except (Failure, OSError) as e:
+            if p.exists() or p.is_symlink():   # 删的过程中被别处（启动时的 sweep_trash）删完了，不算没删掉
                 left.append(f"{p.name}（{e}）")
-        if left:
-            c.diagnostic("这款已从游戏库删掉；有几个文件当时删不掉（可能正被别的程序打开），S2Arm 空闲时会再删：" + "；".join(left)[:400],
-                         code="job_failed", severity="warning")
+    if left:
+        c.diagnostic("这款已从游戏库删掉；有几个文件当时删不掉（可能正被别的程序打开），S2Arm 空闲时会再删：" + "；".join(left)[:400],
+                     code="job_failed", severity="warning")
     return {}
 
 
@@ -2455,6 +2464,9 @@ def _to_trash(c, root, item, gid):
     if root not in item.parents or _is_link(item):   # 不在这个存放位置里的、链接都不碰（同 _rm 的托管目录检查）
         raise Failure("操作路径不属于托管目录。")
     dest = root / TRASH / f"{gid}-{int(time.time() * 1000)}-{item.name}"
+    n = 1
+    while os.path.lexists(dest):   # 同一毫秒挪两个同名的（widen/ 与 widen/auto/ 下同名的缓存目录）
+        dest, n = dest.with_name(f"{gid}-{int(time.time() * 1000)}-{n}-{item.name}"), n + 1
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.rename(item, dest)
@@ -2469,7 +2481,7 @@ def _to_trash(c, root, item, gid):
 
 def sweep_trash(c):
     """删掉各存放位置 .s2a-trash/ 里上次没删干净的（delete 挪进来的、已不在游戏库里）；删不掉下次再试，不影响读游戏库"""
-    for _, root, ok in layout.locations(c):
+    for root, ok in [(root, ok) for _, root, ok in layout.locations(c)] + [(c.work_root, True)]:   # 工具缓存根：delete 挪进来的这款自己的缓存
         t = root / TRASH
         if not ok or not t.is_dir():
             continue

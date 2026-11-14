@@ -1769,6 +1769,37 @@ class JobsTests(unittest.TestCase):
         self.assertFalse(gdir.exists())
         self.assertEqual([g["id"] for g in self.c.catalog()["games"]], [])
 
+    def test_delete_removes_files_without_holding_library_locks(self):
+        # 诊断#dab32d：删一款大游戏在慢盘上删了 53 分钟，整段占着执行锁，期间开别的款 6 次全 library_busy。
+        #   期望（手写）：挪进 .s2a-trash、清单去掉这款在锁内做完；之后每一次真删（_rm）时执行锁和清单锁都拿得到；
+        #   这款的缓存（直连库）和共用编库缓存照旧删掉（删除语义不变），工具缓存根的 .s2a-trash 删完是空的
+        import filelock
+        package = self.package(); game = self.game(packages=[package]); self.catalogue([game])
+        keep, gone, other = self._build_leftovers(game["id"])
+        free, real = [], library._rm
+        def rm(c, root, p):
+            for name in ("execution", "catalog"):
+                try:
+                    with filelock.held(self.c.library / f".{name}.lock", wait_s=0, holder={}):
+                        free.append(True)
+                except filelock.Busy:
+                    free.append(False)
+            return real(c, root, p)
+        self.c.r["gameId"] = game["id"]
+        with unittest.mock.patch.object(library, "_rm", rm):
+            library.delete(self.c)
+        self.assertTrue(free and all(free), free)
+        self.assertEqual([f for f in keep + gone if f.exists()], [])
+        self.assertEqual([g["id"] for g in self.c.catalog()["games"]], [])
+        self.assertEqual(list((self.c.work_root / library.TRASH).iterdir()), [])
+        self.assertTrue(all(f.exists() for f in other))
+
+    def test_sweep_trash_also_clears_tool_cache_trash(self):
+        # 删除时挪进工具缓存根 .s2a-trash 的缓存当时没删掉（被占用 / 进程被杀）：期望下次启动 sweep_trash 一并清掉
+        left = self.c.work_root / library.TRASH / "0100AAAAAAAAA000-1-bake" / "ok"; left.parent.mkdir(parents=True); left.write_text("x")
+        library.sweep_trash(self.c)
+        self.assertEqual(list((self.c.work_root / library.TRASH).iterdir()), [])
+
     def test_delete_with_undeletable_file_still_removes_game_from_library(self):
         # 11-11 玩家反馈「删除有时生效有时不生效」（真 App 复现：游戏文件夹里一个文件删不掉 → 整个删除失败、目录删一半、游戏还挂在列表里成了「找不到游戏文件」）。
         #   期望（手写）：游戏立刻从清单里去掉、原文件夹不在原处；删不掉的那个文件留在存放位置的 .s2a-trash 里，记一条黄字；
