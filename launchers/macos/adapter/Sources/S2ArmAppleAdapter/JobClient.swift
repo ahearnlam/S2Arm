@@ -183,8 +183,8 @@ public final class JobClient {
         return checkout
     }
 
-    /// 请求体（schema 1）：字段与旧 Store.worker 一一对应；extra 覆盖同名字段。不带 gameLanguage / docked（11-07 维护者 删游戏选项）：
-    /// 作业层起局跟 Mac 系统首选语言、主机模式（pack/jobs/build.py runtime_env）。
+    /// 请求体（schema 1）：字段与旧 Store.worker 一一对应；extra 覆盖同名字段。不带 gameLanguage / docked：
+    /// 逐款的游戏语言 / 主机模式在启动设置里选（作业层 community 存这款的 launch.json、起局 launch_env 转成宿主变量；11-14 维护者确认玩家可选，推翻 11-07 的「不给玩家选」）；没选过 = 跟 Mac 系统首选语言、主机模式。
     public func request(id: String, operation: String, extra: [String: Any] = [:]) -> [String: Any] {
         let env = environment
         var req: [String: Any] = [
