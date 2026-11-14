@@ -1342,7 +1342,7 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(env["S2A_RYU_DATA"], str(layout.path(self.c, game["id"], "saves")))
 
     def test_runtime_environment_follows_system_language_and_docks_by_default(self):
-        # 维护者 11-07：不给玩家选游戏语言 / 主机掌机——请求不带 gameLanguage 就不设 S2A_SYSTEM_LANGUAGE（继承来的也不带，c.env 去掉 S2A_*；宿主跟系统首选语言）；
+        # 请求不带 gameLanguage 就不设 S2A_SYSTEM_LANGUAGE（继承来的也不带，c.env 去掉 S2A_*；宿主跟系统首选语言）；玩家在启动设置选的游戏语言走 community launch_env（11-14 维护者确认可选）；
         # 不带 docked 是主机模式，只有明说 false 才掌机
         os.environ["S2A_SYSTEM_LANGUAGE"] = "Japanese"
         try:

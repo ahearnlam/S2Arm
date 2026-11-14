@@ -469,6 +469,7 @@
 "settings.gameLanguage" = "遊戲語言";
 "settings.gameLanguage.system" = "跟隨系統";
 "settings.gameLanguage.restart" = "下次開啟這款遊戲時生效。";
+"settings.gameLanguage.fallback" = "這款不支援%@，啟動時用%@。";
 "settings.gameLanguage.ja" = "日本語";
 "cheats.fixedAddress" = "地址寫死，可能不生效";
 "cheats.status.packed" = "已生效";

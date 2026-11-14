@@ -499,4 +499,5 @@
 "settings.gameLanguage" = "游戏语言";
 "settings.gameLanguage.system" = "跟随系统";
 "settings.gameLanguage.restart" = "下次打开这款游戏时生效。";
+"settings.gameLanguage.fallback" = "这款不支持%@，起局用%@。";
 "settings.gameLanguage.ja" = "日本語";

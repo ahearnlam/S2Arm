@@ -499,4 +499,5 @@
 "settings.gameLanguage" = "Game language";
 "settings.gameLanguage.system" = "Same as system";
 "settings.gameLanguage.restart" = "Takes effect the next time you open this game.";
+"settings.gameLanguage.fallback" = "This game doesn't have %@; it starts in %@.";
 "settings.gameLanguage.ja" = "日本語";

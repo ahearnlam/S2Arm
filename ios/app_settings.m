@@ -89,7 +89,10 @@ static UILabel *textLabel(UIFontTextStyle style) {
     switch (self.groups[section].integerValue) {
         case 8: return nil;   // S 级优化
         case 6: return S2AL(@"play.footer");
-        case 7: return S2AL(@"settings.footer.language");
+        case 7: {   // 选的（跟随系统 = 系统语言）这款不支持：说明里写明起局实际用哪种（11-14 维护者：标出来、不弹窗；规则同宿主 SystemLocale.TitleFallback）
+            NSString *note = s2a_ios_game_language_note();
+            return note ? [NSString stringWithFormat:@"%@\n%@", note, S2AL(@"settings.footer.language")] : S2AL(@"settings.footer.language");
+        }
         case 0: return S2AL(@"settings.footer.graphics");
         default: return S2AL(@"settings.footer.dev");   // 2：开发者页
     }
@@ -401,8 +404,15 @@ static UILabel *textLabel(UIFontTextStyle style) {
         NSArray<NSString *> *labels = @[S2AL(@"settings.gameLanguage.system"), S2AL(@"settings.language.zhHans"), S2AL(@"settings.language.zhHant"), @"English (US)", @"English (UK)", S2AL(@"settings.gameLanguage.ja"), @"한국어", @"Français", @"Français (Canada)", @"Deutsch",
                                         @"Español", @"Español (Latinoamérica)", @"Italiano", @"Nederlands", @"Português", @"Português (Brasil)", @"Русский", @"Polski", @"ไทย"];
         NSUserDefaults *d = s2a_ios_settings_defaults();
-        NSString *cur = [d stringForKey:S2AGameLanguageKey]; NSInteger selected = cur ? (NSInteger)[values indexOfObject:cur] : 0; if (selected == NSNotFound) selected = 0;
-        return [self dropdown:S2AL(@"settings.gameLanguage") labels:labels selected:selected enabled:^BOOL(NSInteger i) { (void)i; return YES; } choose:^(NSInteger i) {
+        NSString *cur = [d stringForKey:S2AGameLanguageKey];
+        // 只列这款支持的（11-14 维护者：读资源包 ctl/control.nacp 的支持语言标志，settings.m）；读不到 = 不知道，照旧列全部；已选的这款没有也留着
+        NSArray<NSString *> *supported = s2a_ios_game_supported_languages();
+        NSMutableArray<NSString *> *keep = [NSMutableArray array], *shown = [NSMutableArray array];
+        for (NSUInteger i = 0; i < values.count; i++)
+            if (i == 0 || supported.count == 0 || [supported containsObject:values[i]] || [values[i] isEqualToString:cur]) { [keep addObject:values[i]]; [shown addObject:labels[i]]; }
+        values = keep;
+        NSInteger selected = cur ? (NSInteger)[values indexOfObject:cur] : 0; if (selected == NSNotFound) selected = 0;
+        return [self dropdown:S2AL(@"settings.gameLanguage") labels:shown selected:selected enabled:^BOOL(NSInteger i) { (void)i; return YES; } choose:^(NSInteger i) {
             if (i == selected) return;
             if (i == 0) [d removeObjectForKey:S2AGameLanguageKey]; else [d setObject:values[i] forKey:S2AGameLanguageKey];
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"settings.gameLanguage") message:S2AL(@"settings.gameLanguage.restart") preferredStyle:UIAlertControllerStyleAlert];
