@@ -82,6 +82,36 @@ class CommunityTests(unittest.TestCase):
         self.assertNotIn("S2A_AUDIO_BUFFER_FRAMES", community.launch_env(self.c, GID))
         self.c.r = {"gameId": GID, "settings": {"audioLatency": "16"}}
         with self.assertRaises(Failure): community.save(self.c)
+    def test_game_language_only_supported(self):
+        # 11-14 维护者「按你的建议加上」：只列这款 control.nacp 支持的语言；系统语言不支持时在设置里写明起局用哪种（不弹窗）。期望按 NACP 位序手算
+        def nacp(*bits):
+            raw = bytearray(0x4000); raw[0x302C:0x3030] = sum(1 << b for b in bits).to_bytes(4, "little"); return bytes(raw)
+        self.assertEqual(community.nacp_languages(nacp(0, 2, 13, 14)), ["AmericanEnglish", "Japanese", "TraditionalChinese", "SimplifiedChinese"])
+        self.assertEqual(community.nacp_languages(nacp()), [])            # 合成的 nacp 不声明：不知道
+        self.assertEqual(community.nacp_languages(b"short"), [])
+        ctl = layout.image_mac(self.c, GID) / "ctl" / "control.nacp"
+        self.assertNotIn("choices", community.mac_settings(self.c, GID)["language"])   # 还没出包（没有 nacp）：照旧列全部
+        write(ctl, ""); ctl.write_bytes(nacp(0, 2, 14))                      # 美英、日、简中
+        os.environ["S2A_TEST_PREFERRED_LANGUAGES"] = "zh-Hans-CN,en-US"
+        try:
+            lang = community.mac_settings(self.c, GID)["language"]
+            self.assertEqual(lang["choices"], ["system", "AmericanEnglish", "Japanese", "SimplifiedChinese"])
+            self.assertNotIn("note", lang)                                    # 系统简中、这款有：不标
+            os.environ["S2A_TEST_PREFERRED_LANGUAGES"] = "ko-KR"
+            self.assertEqual(community.mac_settings(self.c, GID)["language"]["note"],
+                             {"zh-Hans": "这款不支持한국어，起局用English (US)。", "en": "This game doesn't have 한국어; it starts in English (US)."})
+            ctl.write_bytes(nacp(2, 13))                                       # 没有英语：落支持表第一项（日语）
+            self.assertEqual(community.mac_settings(self.c, GID)["language"]["note"]["zh-Hans"], "这款不支持한국어，起局用日本語。")
+            self.c.r = {"gameId": GID, "settings": {"language": "German"}}; community.save(self.c)
+            self.assertEqual(community.mac_settings(self.c, GID)["language"]["note"]["zh-Hans"], "这款不支持Deutsch，起局用日本語。")   # 选过的语言这款没有也标
+        finally:
+            del os.environ["S2A_TEST_PREFERRED_LANGUAGES"]
+        # 系统语言映射照宿主 SystemLocale.Map；实际语言照 TitleFallback：想要的 → 美式 / 英式英语 → 支持表第一项
+        for tags, want in ((["zh-Hant-HK"], "TraditionalChinese"), (["zh-HK"], "TraditionalChinese"), (["zh-CN"], "SimplifiedChinese"), (["en-GB"], "BritishEnglish"),
+                           (["es-MX"], "LatinAmericanSpanish"), (["es"], "Spanish"), (["pt-BR"], "BrazilianPortuguese"), (["fr-CA"], "CanadianFrench"), (["xx", "ja-JP"], "Japanese"), ([], "AmericanEnglish")):
+            self.assertEqual(community.system_title_language(tags), want, tags)
+        self.assertEqual(community.effective_language("Korean", ["BritishEnglish", "Japanese"]), "BritishEnglish")
+        self.assertEqual(community.effective_language("Korean", []), "Korean")
 
     def test_game_language_ios_same_as_table(self):
         # 游戏语言 iOS 下拉（ios/settings.m s2a_ios_game_languages、ios/app_settings.m 的标签）与定义表 language 的 options 同值同序、条数相同；
