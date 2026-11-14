@@ -161,11 +161,27 @@ static int copy_file(const char *src, const char *dst) {
     return failed ? -1 : 0;
 }
 
+// 逐级建目录（内部 files/gpu_drivers 可能还不存在）；已存在不算错。
+static int ensure_dir(const char *path) {
+    char tmp[PATH_MAX];
+    size_t n = strlen(path);
+    if (n == 0 || n >= sizeof tmp) return -1;
+    memcpy(tmp, path, n + 1);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return -1;
+        *p = '/';
+    }
+    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
 // 平铺复制（只取普通文件，最多 256 个 / 512 MB）；同名文件覆盖，失败时下次重试。
 static int stage_driver_dir(const char *src, const char *dst) {
     DIR *dir = opendir(src);
     if (!dir) return -1;
-    if (mkdir(dst, 0700) != 0 && errno != EEXIST) { closedir(dir); return -1; }
+    if (ensure_dir(dst) != 0) { closedir(dir); return -1; }
     struct dirent *e;
     int files = 0, result = 0;
     unsigned long long total = 0;
@@ -310,7 +326,7 @@ static void *custom_driver_open(const char *state_dir) {
     }
     // 共享存储没有执行权限：adrenotools 要求驱动在应用内部资料目录，先复制过去。
     if (!strncmp(dir, "/sdcard/", 8) || !strncmp(dir, "/storage/", 9) || !strncmp(dir, "/mnt/", 5)) {
-        if (!files) { fprintf(stderr, "[vk-direct] 自定义驱动：%s 在共享存储，但没有内部目录可复制\n", dir); return NULL; }
+        if (!files) { fprintf(stderr, "[vk-direct] 自定义驱动：%s 在共享存储，但没有内部目录可复制\n", dir); driver_log("没有内部目录可复制"); return NULL; }
         const char *base = strrchr(dir, '/');
         base = base && base[1] ? base + 1 : "driver";
         char staged[PATH_MAX], staged_lib[PATH_MAX], library[128];
@@ -319,10 +335,12 @@ static void *custom_driver_open(const char *state_dir) {
             meta_library(dir, library, sizeof library) != 0 ||
             snprintf(staged_lib, sizeof staged_lib, "%s/%s", staged, library) >= (int)sizeof staged_lib) {
             fprintf(stderr, "[vk-direct] 自定义驱动：%s 不像驱动目录（meta.json/libraryName）\n", dir);
+            driver_log("外部驱动目录不可用（meta.json/libraryName）");
             return NULL;
         }
         if (stat(staged_lib, &st) != 0 && stage_driver_dir(dir, staged) != 0) {
             fprintf(stderr, "[vk-direct] 自定义驱动：复制 %s → %s 失败（errno=%d）\n", dir, staged, errno);
+            driver_log("复制到内部失败（errno=%d）", errno);
             return NULL;
         }
         snprintf(dir, sizeof dir, "%s", staged);
