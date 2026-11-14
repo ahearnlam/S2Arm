@@ -213,6 +213,12 @@ static UILabel *textLabel(UIFontTextStyle style) {
     static BOOL once; const char *e = getenv("S2A_SETTINGS_DEV");
     if (e) LOG("设置页：测试开关 S2A_SETTINGS_DEV=%s（once=%d）", e, once);
     if (!once && e && !strcmp(e, "1")) { once = YES; [self openDeveloper]; }
+    // 同理 S2A_SETTINGS_SCROLL=language：一打开就把「语言」组滚到顶（截图核游戏语言那一行和说明）
+    const char *sc = getenv("S2A_SETTINGS_SCROLL"); NSUInteger sec = [_left.groups indexOfObject:@7];
+    if (sc && !strcmp(sc, "language") && sec != NSNotFound) {
+        LOG("设置页：测试开关 S2A_SETTINGS_SCROLL=language");
+        [_left.tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:sec] atScrollPosition:UITableViewScrollPositionTop animated:NO];
+    }
 }
 - (void)refresh {
     if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self refresh]; }); return; }
