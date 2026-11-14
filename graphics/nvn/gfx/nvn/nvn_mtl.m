@@ -2405,6 +2405,7 @@ static void rp_flush(void);
 static void rt_keep_state(void);
 static void ghost_finish_submission(void);
 static void alias_dead_views(void);
+static void bcal_sweep_overwritten(void);
 static const char *cctx_snap(void);   // What is in this submission (printed into the failure line on error; defined before nvn_be_exec)
 static void lc_land(void); static int g_nlc;   // lazy clears waiting (lc_push; fb_prepare lands them before a feedback read)
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
@@ -2439,6 +2440,7 @@ uint64_t nvn_be_sub_commit(void) {
     g_cut_copy = 0;
     ghost_finish_submission();   // before the fence is taken: what it drops is released behind this submission
     alias_dead_views();   // likewise for the texture-ID views of textures dropped as overwritten
+    bcal_sweep_overwritten();   // and the writer textures the block-compressed alias table keeps over storage since overwritten
     uint64_t fence = ++g_fence;
     rc_commit(fence);
     gw_commit(fence);
@@ -2684,6 +2686,9 @@ static void alias_note_write(const tex_t *t) {   // gpw_mark: the texture's stor
     alias_key ak; alias_key_of(&ak, t);
     pthread_mutex_lock(&g_smu); if (nvn_hm_get(&g_alias, &ak)) nvn_hm_put(&g_alias_wrote, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
 }
+// 存储接管后被丢掉的贴图（弱引用）：它们本该在 GPU 用完后释放；还活着的就是有别处留着（内存统计行报数量 / 大小、其中多少被块压缩别名表留着）
+static NSHashTable *g_evict_w; static os_unfair_lock g_evict_lk = OS_UNFAIR_LOCK_INIT; static uint64_t g_evict_n;
+static void evict_note(id o);
 static void alias_take_over(const alias_key *nk) {
     nvn_texlayout L; nvn_tex_layout(&nk->d, &L);
     if (!L.size) return;
@@ -2711,6 +2716,7 @@ static void alias_take_over(const alias_key *nk) {
             uint64_t sk; memcpy(&sk, g_by_serial.keys + (size_t)i * g_by_serial.klen, sizeof sk); defer_obj_unref(o); hm_del_id(&g_by_serial, &sk); i = (uint32_t)-1; g_alias_dead++;   // deletion shifts entries: rescan
             if (g_alias_dead_n == g_alias_dead_cap) { uint32_t c = g_alias_dead_cap ? 2 * g_alias_dead_cap : 64; uint64_t *q = realloc(g_alias_dead_ser, c * sizeof *q); if (q) { g_alias_dead_ser = q; g_alias_dead_cap = c; } }
             if (g_alias_dead_n < g_alias_dead_cap) g_alias_dead_ser[g_alias_dead_n++] = sk; }   // its texture-ID views go at the end of the submission (alias_dead_views: they need g_rmu, taken before g_smu)
+        @autoreleasepool { evict_note(o); }
         if (serial_holds(&g_ghost, o) || serial_holds(&g_ghost_active, o)) defer_obj_unref(o); else defer_obj_release(o);
     }
     if (n) { g_ser_gen++; g_alias_taken += n; }
@@ -2896,6 +2902,12 @@ int nvn_be_tex_from_gl(tex_t *t, uint32_t gl_name) { @autoreleasepool {
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
 static void ph_free(uint64_t *ph, uint32_t n);
 @interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, check_epoch; const void *span; int sparse, vbase; uint64_t *ph, *pgpu; uint32_t nph; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
+static void evict_note(id obj) {
+    id o = [obj isKindOfClass:[NvPkg class]] ? ((NvPkg *)obj)->tex : obj;
+    id<MTLTexture> m = [o conformsToProtocol:@protocol(MTLTexture)] ? o : nil; while (m.parentTexture) m = m.parentTexture;
+    if (!m) return;
+    os_unfair_lock_lock(&g_evict_lk); if (!g_evict_w) g_evict_w = [NSHashTable weakObjectsHashTable]; [g_evict_w addObject:m]; g_evict_n++; os_unfair_lock_unlock(&g_evict_lk);
+}
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
 @implementation NvPkg
 - (void)dealloc { res_remove(tex); if (spare) res_remove(spare); ph_free(ph, nph); free(pgpu); }
@@ -3840,6 +3852,7 @@ typedef struct bcal_e {
     _Atomic uint64_t wser, lgen[16], maxgen;          // 各层最近一次写的代数（0 = 没写过）、其中最大的
     _Atomic int seen;                    // 这段存储上解析过 BC 贴图：再写时 g_ser_gen 前进（③）
     _Atomic uint64_t s_ser, s_gen; const void *_Atomic s_r;   // 最近一次同步：哪张 BC 贴图、同步到的代数、它当时解析成的 Metal 贴图（无锁的「已是最新」判定）
+    _Atomic uint64_t wfence;             // 写入者最近一次写时的提交号（g_fence + 1）：之后别的贴图 GPU 写过这段存储，字节就不是它的了（bcal_sweep_overwritten）
     void *wtex;                          // 写入者的 Metal 贴图（CFBridgingRetain，g_bcal_mu 下换）：游戏画完就把那张未压缩贴图 Finalize 了，字节只在 GPU 上，按序号 / 共享表都取不到时从这里拷
                                          //   （11-13 #951：菜单缩略图 320×270 写完即释放，BC 贴图读成全黑）
     struct bcal_e *next_free;
@@ -3874,7 +3887,7 @@ static void bcal_note(const tex_t *t, unsigned level) {
         atomic_store_explicit(&g_bcal_wc[h], e, memory_order_release);
         pthread_mutex_unlock(&g_bcal_mu);
     }
-    uint64_t g = atomic_fetch_add(&g_bcal_gen, 1) + 1; atomic_store(&e->lgen[level], g); atomic_store(&e->maxgen, g);
+    uint64_t g = atomic_fetch_add(&g_bcal_gen, 1) + 1; atomic_store(&e->lgen[level], g); atomic_store(&e->maxgen, g); atomic_store_explicit(&e->wfence, g_fence + 1, memory_order_relaxed);
     if (atomic_load_explicit(&e->seen, memory_order_relaxed)) { pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu); }   // ③ 已解析过的 BC 贴图从视图缓存的慢路径重新解析
 }
 static void bcal_snap(bcal_e *e, tex_t *w, uint64_t lgen[16]) {   // 顺序锁下取写入者描述与各层代数
@@ -3908,6 +3921,24 @@ static void bcal_drop_pool(const void *pool) {   // 内存池 Finalize：这段�
     for (unsigned h = 0; h < BCAL_C; h++) { atomic_store(&g_bcal_wc[h], NULL); atomic_store(&g_bcal_neg[h], 0); atomic_store(&g_bcal_seen_c[h], 0); }
     atomic_fetch_add(&g_bcal_cgen, 1);
     pthread_mutex_unlock(&g_bcal_mu);
+}
+// 记账留住的写入者贴图只在它的字节还在这段存储上时有用：别的贴图在它最后一次写之后 GPU 写过这段存储（与存储接管 alias_take_over 同一判据），
+//   字节已不是它的，放掉贴图、这一项的各层写入作废（BC 贴图照常按游戏内存取）。不放的话，每帧换尺寸、换位置的渲染目标一张张被这里留住，
+//   直到内存池释放才走：11-14 Duo 长局 18 分钟实占 1.3 → 7.9 GB、图形内存压缩部分 74 → 3960 MB 后被系统杀。提交末尾每 16 次扫一遍；先 g_bcal_mu 后 g_smu（与 bcal_note 同序）
+static uint64_t g_bcal_dropped, g_bcal_dropped_b;
+static void bcal_sweep_overwritten(void) {
+    if (!atomic_load_explicit(&g_bcal_n, memory_order_relaxed) || (g_fence & 15)) return;
+    void **drop = NULL; uint32_t nd = 0, cap = 0;
+    pthread_mutex_lock(&g_bcal_mu); pthread_mutex_lock(&g_smu);
+    for (uint32_t i = 0; i < g_bcal.cap; i++) { bcal_e *e = g_bcal.vals[i]; if (!e || !e->wtex) continue;
+        alias_key k; alias_key_of(&k, &e->w); nvn_texlayout L; nvn_tex_layout(&e->w.d, &L);
+        if (!L.size || !alias_overwritten(&k, k.off, k.off + (int64_t)L.size, atomic_load_explicit(&e->wfence, memory_order_relaxed))) continue;
+        if (nd == cap) { uint32_t c = cap ? 2 * cap : 64; void **q = realloc(drop, c * sizeof *q); if (!q) break; drop = q; cap = c; }
+        drop[nd++] = e->wtex; e->wtex = NULL;
+        atomic_fetch_add(&e->seq, 1); for (int l = 0; l < 16; l++) atomic_store(&e->lgen[l], 0); atomic_fetch_add(&e->seq, 1); }
+    pthread_mutex_unlock(&g_smu); pthread_mutex_unlock(&g_bcal_mu);
+    for (uint32_t i = 0; i < nd; i++) { id<MTLTexture> w = CFBridgingRelease(drop[i]); g_bcal_dropped++; g_bcal_dropped_b += w.allocatedSize; defer_obj_release(w); }   // GPU 可能还在用：做完再放
+    free(drop);
 }
 static void bcal_forget(uint64_t serial) {   // BC 贴图对象没了：它的同步记录作废
     if (!atomic_load(&g_bcal_n)) return;
@@ -4668,6 +4699,53 @@ static void audit_probe_report(uint64_t frame);   // audit #1534 passive probes 
 // 我方按种类的字节（S2A_MEM_SPLIT 跳变行，ios/app.m 的 100 ms 采样线程调；任意线程可调）：驻留集里的对象逐个分类——
 //   私有贴图（游戏贴图的 Metal 副本、渲染目标）、私有缓冲（上传暂存块为主）、游戏内存池的零拷贝缓冲（按池表认，记虚拟长度和其中常驻 / 压缩页，含被驻留集钉住的未写页）、其它共享缓冲（每帧块、常量块等）。
 //   锁序同 pool_res（g_mu → g_res_mu）：先在 g_mu 里拷池缓冲与范围，放锁后再取 g_res_mu 拍驻留集快照（强引用），分类在锁外做
+// 切后台瘦身（11-13 维护者定，降低在后台被系统杀的概率）：进后台、GPU 排空后（hle_nvn.c dm_gfx_suspend_drain），把驻留集里我们自己分配的私有根贴图
+//   （打包贴图副本 + 渲染目标等，正式游戏约 1.7 GB）标成可清除（MTLPurgeableStateVolatile）：可清除内存不计进 phys_footprint
+//   （11-13 Duo 实测 1024 MB 共享缓冲：实占 1089 → 65 MB，标回 1089 MB、内容还在），系统缺内存时直接清掉这些、不用杀我们。
+//   回前台、放开闸门之前（dm_gfx_suspend(0)）标回不可清除：没被清的原样接着用；被清的登记进 g_up_lost——打包贴图下次取用整张从客体内存重新上传（同上传被丢的
+//   处理），渲染目标内容丢了、游戏下一帧重画（跨帧保留的花一两帧，好过进度没了）。不碰：零拷贝池缓冲（就是客体内存）、视图、缓冲背着的贴图、MTLHeap 分出来的（可清除按整堆算）、
+//   各种缓冲（参数表、转换缓存等跨帧保留，被清了会错）。S2A_BG_PURGE=0 关
+static NSMutableArray<id<MTLTexture>> *g_bg_purged;   // 只在挂起 / 恢复的那一刻碰（闸门关着，提交线程停在闸门外）
+static uint64_t bg_fp_mb(void) { task_vm_info_data_t v; mach_msg_type_number_t n = TASK_VM_INFO_COUNT; return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&v, &n) == KERN_SUCCESS ? v.phys_footprint >> 20 : 0; }
+void nvn_be_background_purge(int bg) {
+    static int off = -1; if (off < 0) { const char *e = getenv("S2A_BG_PURGE"); off = e && *e == '0'; }
+    if (!g_dev) return;
+    // 后台期间的实占：标完那一刻读不出差别（系统挂起进程时才结算可清除页），进程挂起后定时器也不跑，所以在回前台、标回之前读一次——
+    //   挂起期间实占不再变（除了被清），这个读数就是系统在后台看到的值；瘦身关（S2A_BG_PURGE=0）的局也记，好对照
+    static uint64_t bg_in;
+    if (bg) bg_in = bg_fp_mb();
+    else if (bg_in) { LOG("[nvn] 回前台那刻实占 %llu MB（进后台时 %llu MB，切后台瘦身%s）", (unsigned long long)bg_fp_mb(), (unsigned long long)bg_in, off ? "关" : "开"); bg_in = 0; }   // 起局时的放闸不算
+    if (off) return;
+    @autoreleasepool {
+        if (bg) {
+            uint64_t f0 = bg_fp_mb(), bytes = 0;
+            pthread_mutex_lock(&g_res_mu); NSArray *all = g_res_objects ? g_res_objects.allObjects : @[]; pthread_mutex_unlock(&g_res_mu);
+            NSMutableArray<id<MTLTexture>> *marked = [NSMutableArray array];
+            for (id o in all) {
+                if (![o conformsToProtocol:@protocol(MTLTexture)]) continue;
+                id<MTLTexture> t = o;
+                if (t.buffer || t.parentTexture || t.heap || t.storageMode != MTLStorageModePrivate) continue;
+                if ([t setPurgeableState:MTLPurgeableStateVolatile] != MTLPurgeableStateNonVolatile) continue;   // 已经可清除 / 已被清：不是这次标的
+                [marked addObject:t]; bytes += t.allocatedSize;
+            }
+            g_bg_purged = marked;
+            LOG("[nvn] 切后台瘦身：%lu 张贴图 %llu MB 标成可清除（系统缺内存时直接清掉、不计实占），实占 %llu → %llu MB",
+                (unsigned long)marked.count, (unsigned long long)(bytes >> 20), (unsigned long long)f0, (unsigned long long)bg_fp_mb());
+        } else if (g_bg_purged) {
+            uint64_t f0 = bg_fp_mb(), lost = 0, lost_b = 0;
+            NSMutableArray<id<MTLTexture>> *emptied = [NSMutableArray array];
+            for (id<MTLTexture> t in g_bg_purged) if ([t setPurgeableState:MTLPurgeableStateNonVolatile] == MTLPurgeableStateEmpty) { [emptied addObject:t]; lost++; lost_b += t.allocatedSize; }
+            if (lost) {
+                os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable];
+                for (id t in emptied) [g_up_lost addObject:t];
+                atomic_store(&g_up_lost_n, (int)g_up_lost.allObjects.count); os_unfair_lock_unlock(&g_up_lost_lk);
+            }
+            LOG("[nvn] 回前台：%lu 张贴图标回不可清除，其中 %llu 张 %llu MB 在后台被系统清掉（打包贴图下次取用整张重新上传、渲染目标下一帧重画），实占 %llu → %llu MB",
+                (unsigned long)g_bg_purged.count, (unsigned long long)lost, (unsigned long long)(lost_b >> 20), (unsigned long long)f0, (unsigned long long)bg_fp_mb());
+            g_bg_purged = nil;
+        }
+    }
+}
 void nvn_be_mem_kinds(uint64_t *priv_tex, uint64_t *priv_buf, uint64_t *pool_len, uint64_t *pool_touched, uint64_t *shared_other, uint64_t *objects) {
     *priv_tex = *priv_buf = *pool_len = *pool_touched = *shared_other = *objects = 0;
     if (!g_dev) return;
@@ -4729,6 +4807,16 @@ void nvn_be_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
         MLOG("memory pools up to frame %llu: %d pools %llu MB, resident %d pools %llu MB; texture uploads from pools that hold only textures, not made resident: %llu (%llu MB read in all)", frame, pn, (unsigned long long)(pall >> 20),
              pres, (unsigned long long)(pres_b >> 20), (unsigned long long)g_up_src_n, (unsigned long long)(g_up_src_bytes >> 20)); }
     tess_stat_line(frame);
+    @autoreleasepool {   // 存储接管丢掉的贴图还活着多少、谁留着（块压缩别名表的写入者贴图 wtex）
+        os_unfair_lock_lock(&g_evict_lk); NSArray *ev = g_evict_w ? g_evict_w.allObjects : @[]; uint64_t evn = g_evict_n; os_unfair_lock_unlock(&g_evict_lk);
+        uint64_t evb = 0, inb = 0, inn = 0, wn = 0, wb = 0; CFMutableSetRef ws = CFSetCreateMutable(NULL, 0, NULL);
+        pthread_mutex_lock(&g_bcal_mu); uint64_t bn = atomic_load(&g_bcal_n);
+        for (uint32_t i = 0; i < g_bcal.cap; i++) { bcal_e *e = g_bcal.vals[i]; if (e && e->wtex) { wn++; wb += ((__bridge id<MTLTexture>)e->wtex).allocatedSize; CFSetAddValue(ws, e->wtex); } }
+        pthread_mutex_unlock(&g_bcal_mu);
+        for (id<MTLTexture> m in ev) { evb += m.allocatedSize; if (CFSetContainsValue(ws, (__bridge const void *)m)) { inn++; inb += m.allocatedSize; } }
+        CFRelease(ws);
+        MLOG("textures dropped on storage takeover still alive up to frame %llu: %lu, %llu MB (of %llu dropped in total; held by the block-compressed alias table %llu, %llu MB); that table: %llu entries, %llu writer textures kept, %llu MB, let go as overwritten %llu, %llu MB in total",
+             frame, (unsigned long)ev.count, (unsigned long long)(evb >> 20), (unsigned long long)evn, (unsigned long long)inn, (unsigned long long)(inb >> 20), (unsigned long long)bn, (unsigned long long)wn, (unsigned long long)(wb >> 20), (unsigned long long)g_bcal_dropped, (unsigned long long)(g_bcal_dropped_b >> 20)); }
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tt;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tt);
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, "
@@ -16022,6 +16110,7 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     if (!v) { RED_ONCE(69, "present: cannot create a non-sRGB view of the sRGB swapchain texture (format %lu); presenting the decoded values", (unsigned long)src.pixelFormat); return src; }
     return v;
 }
+__attribute__((weak)) double s2a_cpatch_present_aspect(void) { return 0; }   // native runtime/src/cpatch.c: current aspect while an adaptive community widescreen patch is on; graphics unit tests without the host have none
 #include "nvn_present_fit.h"   // pf_crop_fit (present_now) / pf_viewport (both blits); plain C, tested by graphics/nvn/tests/t_present_fit.c
 static int present_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], BOOL flip) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
@@ -16040,8 +16129,8 @@ static int present_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTextu
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     // Keep the game picture's aspect ratio and center it, leaving black bars in the rest (no stretching when the screen ratio differs from the game's, e.g. iPhone about 19.5:9 versus the game's 16:9);
     // when the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border
-    double dw = dst.width, dh = dst.height;
-    pf_vp pv = pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
+    double dw = dst.width, dh = dst.height, ca = s2a_cpatch_present_aspect();   // 自适应画幅补丁开着：游戏按当前画幅画世界，16:9 尺寸的图拉满到这个画幅
+    pf_vp pv = ca > 0 ? pf_viewport(dw, dh, ca, 1) : pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -16070,8 +16159,8 @@ static int present_blit_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLT
         cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
     }
     present_pipeline(dst.pixelFormat);
-    double dw = dst.width, dh = dst.height;
-    pf_vp pv = pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
+    double dw = dst.width, dh = dst.height, ca = s2a_cpatch_present_aspect();   // 自适应画幅补丁开着：游戏按当前画幅画世界，16:9 尺寸的图拉满到这个画幅
+    pf_vp pv = ca > 0 ? pf_viewport(dw, dh, ca, 1) : pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     MTL4RenderPassDescriptor *rp = pass_desc();
     rp.colorAttachments[0].texture = dst;

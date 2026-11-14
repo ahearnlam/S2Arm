@@ -49,6 +49,7 @@ struct ExportSessionView: View {
         }
     }
 
+    private var exportMode: Bool { model.installMode.mode == "export" }
     private func x(_ id: String) -> String { BackendText.launcherText("export." + id, language: uiLanguage) }
 
     var body: some View {
@@ -368,6 +369,9 @@ struct ExportSessionView: View {
                     Text(finished == .completed ? x("done.title") : statusText).font(.manrope(52, .heavy)).tracking(-1.6)
                     Text(x(succeeded.contains(.ios) ? "done.ios" : "done.mac")).font(.manrope(18)).foregroundStyle(.secondary)
                 }
+                if let boost = succeeded.compactMap({ run.outcomes[$0]?.boost }).first(where: { $0.values.contains { $0 > 0 } }) {
+                    BoostBanner(boost: boost, text: x)   // 自动配好了金手指 / 补丁：S 级加强生效（开不开玩家在启动设置里定）
+                }
                 ForEach(succeeded, id: \.self) { platform in success(platform) }
             }
             let others = run.platforms.filter { !succeeded.contains($0) }
@@ -403,7 +407,8 @@ struct ExportSessionView: View {
             }
             HStack(spacing: 14) {
                 if platform == .ios {
-                    Button { install(session.gameID ?? "") } label: { LauncherHeroActionLabel(title: x("done.install"), symbol: "iphone") }
+                    // 装法是「导出，自己签名安装」时（D-9ZF9 / 维护者实测）：按钮和说明照导出写，不再写「一键装到 iPhone / 连上数据线」；出完包会自动接着导出
+                    Button { install(session.gameID ?? "") } label: { LauncherHeroActionLabel(title: x(exportMode ? "done.export" : "done.install"), symbol: exportMode ? "square.and.arrow.up" : "iphone") }
                         .buttonStyle(.plain).keyboardShortcut(.defaultAction).accessibilityIdentifier("result.ios.install")
                     // 出包这步没有 IPA（装机时才组装、整库共用一份）：给「打开游戏文件夹」；真有 IPA 才给「显示 .ipa」
                     if let ipa = o.ipa, !ipa.isEmpty { finderButton(loc.t("s2arm.export.revealIpa")) { model.revealIpa(ipa) } }
@@ -417,7 +422,7 @@ struct ExportSessionView: View {
                 }
             }
             if platform == .ios {
-                Text(x("done.installNote")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(x(exportMode ? "done.exportNote" : "done.installNote")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -590,5 +595,68 @@ struct ExportSessionView: View {
         f.locale = Locale(identifier: loc.lang == .zh ? "zh_CN" : "en_US")
         f.dateStyle = .none; f.timeStyle = .short
         return f.string(from: date)
+    }
+}
+
+/// 「S 级加强生效」仪式（11-12 维护者：补丁自动打入、都给配置好，玩家开不开是玩家的事）：金色大 S 弹出 + 光环扩散 + 扫光 + 粒子迸发，
+/// 下面列出这次自动配好的条数（金手指 / 帧率 / 宽屏 / 画面），并提示在启动设置里开。条数来自作业层出包结果 boost（pack/jobs/patches.py）。
+struct BoostBanner: View {
+    let boost: [String: Int]
+    let text: (String) -> String
+    @State private var shown = false
+    @State private var sweep = false
+    @State private var burst = false
+    /// 测试离屏渲染用：直接画动画结束时的样子（ImageRenderer 不播动画）
+    init(boost: [String: Int], text: @escaping (String) -> String, settled: Bool = false) {
+        self.boost = boost; self.text = text
+        _shown = State(initialValue: settled); _sweep = State(initialValue: settled); _burst = State(initialValue: settled)
+    }
+    private let gold = LinearGradient(colors: [Color(red: 1, green: 0.93, blue: 0.55), Color(red: 1, green: 0.72, blue: 0.18), Color(red: 0.86, green: 0.47, blue: 0.08)],
+                                      startPoint: .topLeading, endPoint: .bottomTrailing)
+
+    private var parts: [String] {
+        [("cheats", "export.boost.cheats"), ("fps", "export.boost.fps"), ("widescreen", "export.boost.widescreen"), ("gfx", "export.boost.gfx")]
+            .compactMap { key, id in (boost[key] ?? 0) > 0 ? text(id).replacingOccurrences(of: "{0}", with: "\(boost[key]!)") : nil }
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 26) {
+            ZStack {
+                ForEach(0..<14, id: \.self) { k in   // 粒子迸发：14 颗金色小星沿圆周飞出、淡出
+                    let angle = Double(k) / 14 * 2 * .pi
+                    Image(systemName: "sparkle").font(.system(size: k % 3 == 0 ? 13 : 9, weight: .bold)).foregroundStyle(gold)
+                        .offset(x: burst ? cos(angle) * 78 : 0, y: burst ? sin(angle) * 78 : 0)
+                        .opacity(burst ? 0 : (shown ? 1 : 0)).scaleEffect(burst ? 0.4 : 1)
+                }
+                Circle().strokeBorder(gold, lineWidth: 3).frame(width: 104, height: 104).scaleEffect(shown ? 1.9 : 0.8).opacity(shown ? 0 : 0.9)   // 光环扩散
+                Circle().fill(Color(red: 1, green: 0.78, blue: 0.2).opacity(shown ? 0.32 : 0)).frame(width: 110, height: 110).blur(radius: 22)
+                Text("S").font(.system(size: 78, weight: .black, design: .rounded)).italic().foregroundStyle(gold)
+                    .shadow(color: Color(red: 1, green: 0.6, blue: 0.1).opacity(0.7), radius: shown ? 16 : 0)
+                    .overlay(   // 扫光：一道白光从左上扫到右下
+                        LinearGradient(colors: [.clear, .white.opacity(0.85), .clear], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: 34).rotationEffect(.degrees(20)).offset(x: sweep ? 70 : -70)
+                            .mask(Text("S").font(.system(size: 78, weight: .black, design: .rounded)).italic())
+                    )
+                    .scaleEffect(shown ? 1 : 0.2).rotationEffect(.degrees(shown ? 0 : -25)).opacity(shown ? 1 : 0)
+            }
+            .frame(width: 110, height: 110)
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(text("export.boost.title")).font(.manrope(26, .heavy)).tracking(-0.6).foregroundStyle(gold)
+                Text(parts.joined(separator: " · ")).font(.manrope(15, .semibold))
+                Text(text("export.boost.hint")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .opacity(shown ? 1 : 0).offset(x: shown ? 0 : -16)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 18).padding(.horizontal, 22)
+        .background(RoundedRectangle(cornerRadius: 18).fill(Color(red: 1, green: 0.75, blue: 0.2).opacity(0.08))
+            .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color(red: 1, green: 0.78, blue: 0.3).opacity(0.35), lineWidth: 1)))
+        .accessibilityElement(children: .combine).accessibilityIdentifier("result.boost")
+        .onAppear {
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.55).delay(0.35)) { shown = true }
+            withAnimation(.easeOut(duration: 0.9).delay(0.45)) { burst = true }
+            withAnimation(.easeInOut(duration: 0.9).delay(0.8)) { sweep = true }
+        }
     }
 }

@@ -98,9 +98,6 @@ public struct InstallResult: Equatable {
     public var exportGames: Int = 0
     public var exportBytes: Int64? = nil
     public var skipped: [String] = []
-    /// 导出后顺手推到手机（11-13）：推进手机上自签 S2Arm「放这里导入」的 .img 文件名（空 = 没推）；没推时 pushNote = 缺什么、怎么做（作业结果原句）
-    public var pushed: [String] = []
-    public var pushNote: String = ""
 }
 
 /// 从手机删一款的结果（installRemove 作业，pack/jobs/install.py remove_from_phone）。
@@ -154,7 +151,7 @@ public final class InstallService {
                              openToFinish: r["openToFinish"] as? Bool ?? false,
                              exportFolder: r["exported"] as? Bool == true ? r["outputPath"] as? String ?? "" : "",
                              exportGames: (r["games"] as? [Any])?.count ?? 0, exportBytes: (r["exportBytes"] as? NSNumber)?.int64Value,
-                             skipped: r["skipped"] as? [String] ?? [], pushed: r["pushed"] as? [String] ?? [], pushNote: r["pushNote"] as? String ?? "")
+                             skipped: r["skipped"] as? [String] ?? [])
     }
 
     /// 推到手机（exportPush，pack/jobs/install.py push_export_job）：把「S2Arm 自签导出」里的完整 .img 推进手机上自签 S2Arm 的「放这里导入」。
@@ -206,11 +203,14 @@ public final class InstallService {
     ///   有要重新出包的款且没 acceptStale → 作业以 container_stale 失败（界面先问玩家）
     ///   device：连着多台时装到哪台（同 install；不给 = 只连着一台）
     /// acceptDropped：同 install——玩家已确认手机上只在别的电脑装过的游戏这次带不上（作业层 container_would_drop）
-    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, accept: Set<String> = [], device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
+    /// mode：这次按「一键装到 iPhone」（install）/「导出自己签名安装」（export）走，nil = 按设置里的装法；sgradeUpgrade：「S 级优化升级」页发起，壳已是本版也重组装上
+    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, accept: Set<String> = [], mode: String? = nil, sgradeUpgrade: Bool = false, device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
         var extra: [String: Any] = acceptStale ? ["acceptStale": true] : [:]
         if acceptDropped { extra["acceptDropped"] = true }
         for key in accept { extra[key] = true }
         if let device { extra["device"] = device }
+        if let mode { extra["mode"] = mode }
+        if sgradeUpgrade { extra["sgradeUpgrade"] = true }
         return try await client.perform("installUpdate", extra: extra, events: events).result
     }
 

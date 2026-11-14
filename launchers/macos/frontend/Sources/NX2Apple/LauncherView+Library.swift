@@ -76,7 +76,10 @@ extension LauncherView {
                         // 包已出好：主按钮是装机 / 续签，重新出包退到次要
                         // 装过的款（续签 / 重装）：目标先设成当初装的那台，不换别的；要装到另一台在装机页改选
                         Button { model.targetInstalledDevice(of: game); installFor = game.id } label: {
-                            LauncherHeroActionLabel(title: txt(game.iphoneInstalledAt != nil && game.iphoneFree ? "library.hero.renew" : "library.hero.install"), symbol: "iphone")
+                            // 导出模式：主按钮是「导出，自己签名安装」（维护者 11-13：两路分开，导出路不写「装到 iPhone」）
+                            LauncherHeroActionLabel(title: model.installMode.mode == "export" ? txt("export.done.export")
+                                                    : txt(game.iphoneInstalledAt != nil && game.iphoneFree ? "library.hero.renew" : "library.hero.install"),
+                                                    symbol: model.installMode.mode == "export" ? "square.and.arrow.up" : "iphone")
                         }
                         .buttonStyle(.plain).keyboardShortcut(.return, modifiers: []).accessibilityIdentifier("hero.install")
                         heroCapsule(loc.t("s2arm.export.action"), symbol: "shippingbox", id: "hero.export", enabled: queueable) { model.exportFor = game.id }
@@ -141,6 +144,15 @@ extension LauncherView {
             HStack(spacing: 16) {
                 Text(loc.t("library.collection")).font(.manrope(28, .bold)).tracking(-0.6)
                 Spacer()
+                // S 级优化升级（v0.4.0）：已导出的游戏不用重出包就补上 S 级优化（SGradeUpgradeView）
+                Button { model.sgradeUpgradeOpen = true } label: {
+                    HStack(spacing: 6) {
+                        Image(nsImage: SGradeCardView.sGold).resizable().interpolation(.high).aspectRatio(contentMode: .fit).frame(width: 16, height: 16)
+                        Text(BackendText.launcherText("sgrade.upgrade.button", language: loc.lang == .zh ? "zh-Hans" : "en")).font(.manrope(12.5, .semibold))
+                    }
+                }
+                .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy || model.games.isEmpty)
+                .accessibilityIdentifier("library.sgradeUpgrade")
                 Button { model.refresh() } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 13, weight: .semibold))
                 }
@@ -161,6 +173,7 @@ extension LauncherView {
                                     .clipShape(RoundedRectangle(cornerRadius: 5))
                                     .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(
                                         game.id == heroID ? LauncherPalette.cream : .clear, lineWidth: 2))
+                                    .overlay(alignment: .topLeading) { if game.sgrade { SGradeBadge(size: max(24, cardWidth / 9)) } }   // 金色 S：这款有 S 级优化（v0.4.0）
                                     Text(game.name).font(.manrope(16, .semibold)).lineLimit(1)
                                     status(game)
                                     Capsule().fill(game.id == heroID ? LauncherPalette.cream : .clear)
