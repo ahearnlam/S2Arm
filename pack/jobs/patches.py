@@ -471,6 +471,7 @@ def match(c):
 def display_version(c, game):
     """这款解过包的显示版本号（共用解包目录 unpack.tsv 的 display_version，带更新的款是更新后的版本）；读不到 = ''。
     出包页「S 级优化」写明补丁对应哪个版本用（11-14 维护者：让玩家知道版本对上才打入）"""
+    from core import Failure
     try:
         from build import shared_dir
         for line in (shared_dir(c, game) / "extract/unpack.tsv").read_text(encoding="utf-8").splitlines():
