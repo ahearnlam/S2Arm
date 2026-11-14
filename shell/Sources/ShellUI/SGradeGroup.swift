@@ -8,6 +8,22 @@ import AppKit
 /// The S-grade block of a game's settings (11-13: community patches and cheats are the highlight of the beta, so they sit in one
 /// gold block, not two plain groups): the gold glass S (Resources/s-gold.png, the same art as the launchers' export card), a champagne
 /// to rose-gold title and border, and the patches and cheats as two sub-sections of switches.
+/// The gold S on a library cover (v0.4.0): this game has S-grade enhancements built in. Gold glass S on a dark rounded backing,
+/// readable on light and dark key art alike.
+struct SGradeBadge: View {
+    var size: CGFloat = 22
+    var body: some View {
+        SGradeGroup.sGold.resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+            .frame(width: size, height: size)
+            .padding(size * 0.14)
+            .background(RoundedRectangle(cornerRadius: size * 0.32).fill(Color.black.opacity(0.42)))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.32).strokeBorder(LinearGradient(colors: [SGradeGroup.goldHi.opacity(0.7), SGradeGroup.rose.opacity(0.5)],
+                                                                                              startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8))
+            .shadow(color: SGradeGroup.gold.opacity(0.55), radius: size * 0.3)
+            .accessibilityHidden(true)
+    }
+}
+
 struct SGradeGroup: View {
     let gameID: String
     let sections: [SettingSection]

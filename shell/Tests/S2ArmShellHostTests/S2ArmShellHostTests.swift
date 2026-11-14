@@ -22,6 +22,21 @@ import S2ArmShellBridge
     #expect(c.problems.count == 2)           // 重复 1 + 非法 id 1
 }
 
+// 封面金色 S（v0.4.0）：多款容器 Games/<游戏号>/cpatch.tsv 有表头以外的条目才亮；只有表头 / 没有表不亮；单款 App 读根目录的表。期望手写
+@Test func catalogueSGradeBadge() throws {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: base) }
+    for (id, text) in [("0100000000010000", "编号\nwsauto:a:w\n"), ("0100000000020000", "编号\n")] {
+        let d = base.appendingPathComponent("Games").appendingPathComponent(id)
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        try text.write(to: d.appendingPathComponent("cpatch.tsv"), atomically: true, encoding: .utf8)
+    }
+    let json = #"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"},{"title_id":"0100000000030000","name":"C"}]}"#
+    #expect(Catalogue.parse(Data(json.utf8), baseDirectory: base).tiles.map(\.sgrade) == [true, false, false])
+    try "编号\nfps:x\n".write(to: base.appendingPathComponent("cpatch.tsv"), atomically: true, encoding: .utf8)
+    #expect(Catalogue.parse(Data(#"{"schema":1,"games":[{"title_id":"0100000000030000","name":"C"}]}"#.utf8), baseDirectory: base).tiles.map(\.sgrade) == [true])
+}
+
 @Test func catalogueBadInputs() {
     let base = URL(fileURLWithPath: "/")
     #expect(Catalogue.parse(Data("not json".utf8), baseDirectory: base).tiles.isEmpty)
