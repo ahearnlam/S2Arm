@@ -809,9 +809,11 @@ class JobsTests(unittest.TestCase):
         du = collections.namedtuple("du", "total used free")
         with um.patch("shutil.disk_usage", return_value=du(0, 0, need)):
             library.check_pack_space(self.c, game)
-        with um.patch("shutil.disk_usage", return_value=du(0, 0, need - 1)):
-            with self.assertRaises(Failure) as e: library.check_pack_space(self.c, game)
-        self.assertIn(f"要 {need / 1e9:.0f} GB", str(e.exception)); self.assertIn(f"只剩 {(need - 1) / 1e9:.0f} GB", str(e.exception))
+        with um.patch("shutil.disk_usage", return_value=du(0, 0, need - 1)), um.patch.object(self.c, "diagnostic") as diag:
+            library.check_pack_space(self.c, game)   # 11-14 不许堵门：差 1 字节也不拦，只提示
+        msg = diag.call_args.args[0]
+        self.assertEqual((diag.call_args.kwargs.get("code"), diag.call_args.kwargs.get("severity")), ("disk_full", "warning"))
+        self.assertIn(f"要 {need / 1e9:.0f} GB", msg); self.assertIn(f"只剩 {(need - 1) / 1e9:.0f} GB", msg)
 
     def test_stage_sources_links_originals_in_place(self):
         # 原件原地只读（11-02）：出包原件目录里是指向原件的软链（按内容哈希命名、整合版同一文件列两次只链一次），不复制、不改原件；
@@ -1109,17 +1111,17 @@ class JobsTests(unittest.TestCase):
                 self.assertIn("未量化", budget["unknown"][0]["note"])
                 self.assertEqual(len(budget["volumes"]), 1)
 
-    def test_space_rejection_emits_budget_and_persists_in_job(self):
-        # 游戏库不够：先发 space 事件（enough=false）再报 disk_full；后续阶段事件不冲掉任务文件里的 space
+    def test_space_shortfall_emits_budget_warns_and_persists_in_job(self):
+        # 游戏库不够：发 space 事件（enough=false）并记一条 disk_full 警告、不拦（11-14 不许堵门）；后续阶段事件不冲掉任务文件里的 space
         import collections
         import unittest.mock as um
         base = dict(self.package("base"), size=1 << 30)
         game = self.game(packages=[base])
         du = collections.namedtuple("du", "total used free")
         with um.patch("shutil.disk_usage", return_value=du(0, 0, 5 << 30)):
-            with self.assertRaises(Failure) as e: library.check_pack_space(self.c, game)
-        self.assertEqual(e.exception.code, "disk_full")
-        self.assertIn("磁盘空间不够", str(e.exception))
+            library.check_pack_space(self.c, game)
+        [d] = [d for d in self.c.job["diagnostics"] if d["code"] == "disk_full"]
+        self.assertEqual(d["severity"], "warning"); self.assertIn("磁盘空间不够", d["summary"])
         event = self.space_events()[-1]
         self.assertFalse(event["space"]["volumes"][0]["enough"])
         self.assertEqual(event["space"]["volumes"][0]["needBytes"], (1 << 30) * 11 // 10 + 5_000_000_000)
@@ -1127,8 +1129,8 @@ class JobsTests(unittest.TestCase):
         job = json.loads(self.c.jobpath.read_text())
         self.assertEqual(job["space"], event["space"]); self.assertEqual(job["message"], "下一阶段")
 
-    def test_mac_prepare_space_rejection_keeps_previous_runtime(self):
-        # Mac 打包：空间不够在建缓存 / 解包之前就拦；上次成功的运行版本与 current 链接原样保留，也不发计划
+    def test_mac_prepare_space_estimate_does_not_stop(self):
+        # 11-14 不许堵门：Mac 打包预估空间不够不再在开头拦，记一条盘满警告、照常往下走（这里让往下第一步抛个记号，证明走到了）
         self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         import collections
         import unittest.mock as um
@@ -1139,15 +1141,15 @@ class JobsTests(unittest.TestCase):
         image.mkdir(parents=True); (image / "runtime").write_text("keep")
         self.c.r.update(gameId=game["id"])
         du = collections.namedtuple("du", "total used free")
-        with um.patch("shutil.disk_usage", return_value=du(0, 0, 1)), um.patch.object(self.c, "run") as run, \
-             um.patch.object(build, "digest") as dig:
-            with self.assertRaises(Failure) as e: build.prepare(self.c)
-        self.assertEqual(e.exception.code, "disk_full")
-        run.assert_not_called(); dig.assert_not_called()
-        self.assertFalse((layout.build_dir(self.c, game["id"])).exists())
-        self.assertEqual((image / "runtime").read_text(), "keep")   # 出包没开始，现有镜像不动
+        class Reached(Exception): pass
+        with um.patch("shutil.disk_usage", return_value=du(0, 0, 1)), um.patch.object(self.c, "run"), \
+             um.patch.object(self.c, "fonts_dir", side_effect=Reached):   # 空间预检之后的下一步就是取共享字体
+            with self.assertRaises(Reached): build.prepare(self.c)   # 过了空间预检，走到了下一步
+        warn = [d for d in self.c.job["diagnostics"] if d["code"] == "disk_full"]
+        self.assertEqual([d["severity"] for d in warn], ["warning"]); self.assertIn("这是预估，照常开工", warn[0]["summary"])
+        self.assertEqual((image / "runtime").read_text(), "keep")   # 现有镜像不动
         types = [json.loads(l)["type"] for l in self.c.events.read_text().splitlines()]
-        self.assertIn("space", types); self.assertNotIn("plan", types)
+        self.assertIn("space", types)
 
     def test_library_on_unplugged_disk_says_plug_it_in(self):
         # 游戏库在没插的外接盘上：报「磁盘没连上」并写出盘名；本机磁盘上标识不符仍是原提示
@@ -1913,17 +1915,19 @@ class JobsTests(unittest.TestCase):
                 core.direct_space_recheck(self.c, {name: dict(done=done, total=99084)}, now=now)
         step(0, 10.5, 45, 100.0)                         # 记起点
         step(3000, 11.5, 44, 111.0)                      # 不到 5%：不判
-        with self.assertRaises(Failure) as stop:
+        with patch.object(self.c, "diagnostic") as diag:   # 11-14 不许堵门：外推不够只提示、不停
             step(20000, 19.5, 36, 122.0)
-        self.assertEqual(stop.exception.code, "disk_full")
-        self.assertIn("还要再占约 39 GB", str(stop.exception)); self.assertIn("只剩 36 GB", str(stop.exception))
-        # 同卷别的作业写盘：卷从 45 GB 掉到 30 GB，但本款只多占 1 GB → 还需 1 ÷ 20000 × 79084 × 1.1 ≈ 4.3 GB < 30 GB，不误判
-        self.c._direct_space_marks = {}
-        step(0, 10.5, 45, 200.0); step(20000, 11.5, 30, 211.0)
-        self.c._direct_space_marks = {}
-        self.c.r["spaceOverride"] = True
+        [call] = diag.call_args_list
+        self.assertEqual((call.args[1], call.kwargs.get("severity")), ("disk_full", "warning"))
+        self.assertIn("还要再占约 39 GB", call.args[0]); self.assertIn("只剩 36 GB", call.args[0])
+        # 同卷别的作业写盘：卷从 45 GB 掉到 30 GB，但本款只多占 1 GB → 还需 1 ÷ 20000 × 79084 × 1.1 ≈ 4.3 GB < 30 GB，不误报
+        self.c._direct_space_marks = {}; self.c._direct_space_warned = False
         with patch.object(self.c, "diagnostic") as diag:
-            step(0, 10.5, 45, 300.0); step(20000, 19.5, 36, 311.0); step(30000, 24, 31, 322.0)   # 点过「仍然继续」：不停，只打一次黄
+            step(0, 10.5, 45, 200.0); step(20000, 11.5, 30, 211.0)
+        diag.assert_not_called()
+        self.c._direct_space_marks = {}; self.c._direct_space_warned = False
+        with patch.object(self.c, "diagnostic") as diag:
+            step(0, 10.5, 45, 300.0); step(20000, 19.5, 36, 311.0); step(30000, 24, 31, 322.0)   # 连着几次都不够：每单只打一次黄
         self.assertEqual([call.kwargs.get("severity") for call in diag.call_args_list], ["warning"])
 
     def test_direct_space_recheck_per_volume(self):
@@ -1941,9 +1945,10 @@ class JobsTests(unittest.TestCase):
                     patch.object(core.shutil, "disk_usage", side_effect=lambda path: DU(0, 0, free[path])):
                 core.direct_space_recheck(self.c, {name: dict(done=done, total=99084)}, now=now)
         step(0, 10.5, 5, 100.0)
-        with self.assertRaises(Failure) as stop:
+        with patch.object(self.c, "diagnostic") as diag:   # 11-14 不许堵门：只提示、不停
             step(20000, 10.5, 14, 111.0)
-        self.assertIn("工具缓存所在的盘只剩 30 GB", str(stop.exception)); self.assertIn("还要再占约 39 GB", str(stop.exception))
+        msg = diag.call_args.args[0]
+        self.assertIn("工具缓存所在的盘只剩 30 GB", msg); self.assertIn("还要再占约 39 GB", msg)
 
     def test_stage_progress_feeds_direct_space_recheck(self):
         import core

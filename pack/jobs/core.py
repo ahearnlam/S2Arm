@@ -117,14 +117,11 @@ def direct_space_recheck(context, counters, now=None):
         gb = lambda n: f"{n / 1e9:.0f} GB"
         head = (f"磁盘空间不够：编译着色器这一步（{name.split('·')[-1]}）照现在的进度还要再占约 {gb(need)}，"
                 f"{where}只剩 {gb(free)}（已完成 {c['done']} / {c['total']}，这段已用掉 {gb(spent)}）。")
-        if getattr(context, "r", {}).get("spaceOverride") is True:
-            if not getattr(context, "_direct_space_warned", False):
-                context._direct_space_warned = True
-                context.diagnostic(head + "已按你的选择仍然继续；中途真写满会停下报错，游戏原件和存档不受影响。", "disk_full", severity="warning")
-            return
-        message = head + "请腾出空间或把游戏库换到空间更大的盘后再试；也可以点「仍然继续」。"
-        context.diagnostic(message, "disk_full")
-        raise Failure(message, code="disk_full")
+        # 按进度外推只当提示、不拦（不许堵门，11-14 定）：每单只提示一次，照常编；中途真写满时写盘报 ENOSPC，那才停、归 disk_full
+        if not getattr(context, "_direct_space_warned", False):
+            context._direct_space_warned = True
+            context.diagnostic(head + "这是按进度估的，照常继续；中途真写满会停下报错，游戏原件和存档不受影响。", "disk_full", severity="warning")
+        return
 
 
 class Cancelled(Exception):
