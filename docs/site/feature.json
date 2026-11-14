@@ -20,7 +20,7 @@
       "kicker": {"zh-Hans": "S 级优化 · 老游戏也能用", "en": "S-grade · Games you already have"},
       "title": {"zh-Hans": "已经导出的游戏，不用重新出包", "en": "No need to export your games again"},
       "what": {"zh-Hans": "已经导出到 Mac 和 iPhone 上的游戏，**更新 S2Arm 后自动补上** S 级优化：满屏、帧率、金手指。", "en": "Games already on your Mac or iPhone **pick up S-grade after you update S2Arm**: full screen, frame rate and cheats."},
-      "how": {"zh-Hans": "Mac：下次打开这款就带上。iPhone：在 Mac 或 Windows 启动器里点**更新 iPhone 上的 S2Arm**（自己签名的点**导出新版 S2Arm**），只换程序，游戏不用重推。", "en": "Mac: picked up on the next launch. iPhone: click **Update S2Arm on iPhone** in the Mac or Windows launcher (self-signed: **Export the new S2Arm**). Games stay put."},
+      "how": {"zh-Hans": "Mac：游戏库顶部点**S 级优化升级**，Mac 和 iPhone 的游戏都在这升级。Windows：点**更新 iPhone 上的 S2Arm**。只换程序，存档不动。", "en": "Mac: click **S-grade upgrade** at the top of the library. Windows: click **Update S2Arm on iPhone**. Only the app is replaced; saves stay."},
       "where": {"zh-Hans": "Mac 和 iPhone 的游戏库里，封面左上角**亮起金色 S** 的就是已带上的；出包时取消了「出包时打入」的不亮。", "en": "In the Mac and iPhone libraries, a **gold S** at the top left of a cover means it has S-grade. Games exported with \"Build in when exporting\" unchecked don't light up."}
     },
     {
