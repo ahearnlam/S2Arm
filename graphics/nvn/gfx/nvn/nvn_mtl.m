@@ -16022,6 +16022,7 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     if (!v) { RED_ONCE(69, "present: cannot create a non-sRGB view of the sRGB swapchain texture (format %lu); presenting the decoded values", (unsigned long)src.pixelFormat); return src; }
     return v;
 }
+__attribute__((weak)) double s2a_cpatch_present_aspect(void) { return 0; }   // native runtime/src/cpatch.c: current aspect while an adaptive community widescreen patch is on; graphics unit tests without the host have none
 #include "nvn_present_fit.h"   // pf_crop_fit (present_now) / pf_viewport (both blits); plain C, tested by graphics/nvn/tests/t_present_fit.c
 static int present_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], BOOL flip) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
@@ -16040,8 +16041,8 @@ static int present_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTextu
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     // Keep the game picture's aspect ratio and center it, leaving black bars in the rest (no stretching when the screen ratio differs from the game's, e.g. iPhone about 19.5:9 versus the game's 16:9);
     // when the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border
-    double dw = dst.width, dh = dst.height;
-    pf_vp pv = pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
+    double dw = dst.width, dh = dst.height, ca = s2a_cpatch_present_aspect();   // 自适应画幅补丁开着：游戏按当前画幅画世界，16:9 尺寸的图拉满到这个画幅
+    pf_vp pv = ca > 0 ? pf_viewport(dw, dh, ca, 1) : pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -16070,8 +16071,8 @@ static int present_blit_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLT
         cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
     }
     present_pipeline(dst.pixelFormat);
-    double dw = dst.width, dh = dst.height;
-    pf_vp pv = pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
+    double dw = dst.width, dh = dst.height, ca = s2a_cpatch_present_aspect();   // 自适应画幅补丁开着：游戏按当前画幅画世界，16:9 尺寸的图拉满到这个画幅
+    pf_vp pv = ca > 0 ? pf_viewport(dw, dh, ca, 1) : pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     MTL4RenderPassDescriptor *rp = pass_desc();
     rp.colorAttachments[0].texture = dst;

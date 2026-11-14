@@ -157,11 +157,17 @@ module_t *module_of(const void *p) {
 // ---------- 改写器随行表 ----------
 static char g_main_build_id[40];
 const char *s2a_main_build_id(void) { return g_main_build_id; }
-// 金手指目录给 C#（services Cheats.cs）：有界面入口的宿主（ios/vpad_cheats.m 装载时）先登记，才回 <文档根>/cheats（s2a_docs.h 唯一取法）；
-//   没登记（Mac / 安卓，没有金手指界面）回空串，C# 就不起线程、不碰用户文稿夹。平台差异落在平台层登记这一步，共享代码不判平台
+// 金手指目录给 C#（services Cheats.cs）：有开关入口的宿主（iOS ios/vpad_cheats.m、Mac macos/front_mac.m 装载时）先登记，才回目录；
+//   没登记（安卓）回空串，C# 就不起线程。目录：起局方给了 S2A_CHEATS_DIR 就用它（Mac 启动器 pack/jobs/build.py = 这款游戏文件夹的 cheats/，
+//   与启动器「游戏设置 → 金手指」同一份），否则 <文档根>/cheats（s2a_docs.h 唯一取法；iOS）。平台差异落在平台层登记这一步，共享代码不判平台
 static _Atomic int g_cheats_host;
 void s2a_cheats_host_enable(void) { atomic_store(&g_cheats_host, 1); }
-const char *s2a_cheats_dir(void) { static char d[1024]; if (!atomic_load(&g_cheats_host)) return ""; s2a_docs_path(d, sizeof d, "cheats"); return d; }
+const char *s2a_cheats_dir(void) {
+    static char d[1024]; if (!atomic_load(&g_cheats_host)) return "";
+    const char *e = getenv("S2A_CHEATS_DIR");
+    if (e && *e) snprintf(d, sizeof d, "%s", e); else s2a_docs_path(d, sizeof d, "cheats");
+    return d;
+}
 uint64_t s2a_main_base(void) { return g_nmod ? (uint64_t)(uintptr_t)g_mod[0].base : 0; }   // 主程序（Horizon 序第一个模块）装载基址：金手指 Atmosphere「main」区（services Cheats.cs）
 // 同一表解析器读取目录流或已验证 APK 的借用字节；后者不落地、也不二次打开。
 struct loader_text {
@@ -977,9 +983,11 @@ static void ro_handoff(void) {
     LOG("nn::ro 交接：自动装载表 %u 个模块（RoModule::Initialize %s），交接全局写了 %u 处；懒绑定交接 %u 个模块（入口字段 +%#lx）", n, init5 ? "导出四参" : init2 ? "导出二参" : init6 ? "LoadModule 里的五参" : "没有，表留空", w, nlazy, (unsigned long)stub_off);
 }
 static uint64_t g_rtld_lookup_manual_slot;
+__attribute__((weak)) void s2a_nvos_trace_install(void) {}   // nvos_trace.c 强定义（诊断，只 Mac）；只链 loader.c 的单测用这个空的
 static void finish_modules(void) {
     for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]);
     ro_handoff();
+    s2a_nvos_trace_install();   // 诊断：S2A_NVOS_TRACE 设了才改道 sdk 的 NvOs 分配函数（nvos_trace.c，只 Mac）
     // rtld 职责：各模块的 nn::ro::detail::g_pLookupGlobalManualFunctionPointer（初值 0、无重定位）指到 rtld 的「手动装载模块查符号」槽。
     // 不装 rtld、也没有手动装载的模块：给一个宿主自有的槽，nn::ro 写进来的指针没人读（真机 rtld 只在解析手动模块时调它）
     for (int i = 0; i < g_nmod; i++) { uint64_t *p = module_sym(&g_mod[i], "_ZN2nn2ro6detail36g_pLookupGlobalManualFunctionPointerE"); if (p && !*p) *p = (uint64_t)&g_rtld_lookup_manual_slot; }

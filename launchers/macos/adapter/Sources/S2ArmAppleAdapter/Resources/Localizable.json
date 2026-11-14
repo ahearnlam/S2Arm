@@ -1,5 +1,9 @@
 [
  {
+  "source": "满屏补丁（按屏幕比例自动选）",
+  "en": "Full-screen patch (picked for your screen ratio)"
+ },
+ {
   "source": "开发中",
   "en": "In development"
  },
@@ -4576,14 +4580,6 @@
   "en": "Rewrite & prepare"
  },
  {
-  "source": "整理 iPhone 版程序与资源包",
-  "en": "Prepare the iPhone app and resources"
- },
- {
-  "source": "编出 iPhone / iPad 版程序、打好资源包；出完接着导出成未签名的 S2Arm.ipa 和这款的 .img，你用自签工具安装。",
-  "en": "Builds the iPhone / iPad app and packs the resources, then exports an unsigned S2Arm.ipa and this game's .img for you to install with your signing tool."
- },
- {
   "source": "编 App 与签名",
   "en": "Build app & sign"
  },
@@ -6200,10 +6196,6 @@
   "en": "Sign with your Apple ID"
  },
  {
-  "source": "把游戏资源推进 iPhone（只推变了的文件；第一次要几分钟）",
-  "en": "Sending game resources to iPhone (only changed files; the first time takes a few minutes)"
- },
- {
   "source": "把资源包推进 iPhone 并解开（只推变了的文件；第一次大游戏要几分钟）",
   "en": "Push the resource pack to the iPhone and unpack it (only changed files; a big game takes a few minutes the first time)"
  },
@@ -6960,14 +6952,6 @@
   "en": "{0} “{1}” is offline: plug it in with a cable, or unlock it on the same Wi-Fi as this computer, then try again."
  },
  {
-  "source": "要装的那台设备（编号末尾 {0}）这次没列出来，这台电脑现在连着 {1} 台：在装机页选其中一台再装。",
-  "en": "The chosen device (ID ending {0}) isn't listed right now; this computer is connected to {1} devices. Pick one of them on the install page and install again."
- },
- {
-  "source": "这台电脑的设备服务里没看到 iPhone / iPad：插上数据线并解锁手机，在手机上点「信任」，再试一次。",
-  "en": "This computer's device service doesn't see an iPhone or iPad: plug it in with a cable, unlock it, tap Trust on the device, then try again."
- },
- {
   "source": "要装的那台设备（编号末尾 {0}）现在不在线：插上数据线并解锁，或让它和这台电脑连同一个 Wi-Fi，再试一次。",
   "en": "The chosen device (ID ending {0}) is offline: plug it in and unlock it, or put it on the same Wi-Fi as this computer, then try again."
  },
@@ -7022,10 +7006,6 @@
  {
   "source": "等正在用游戏库的那个任务结束（或在任务列表里取消它）再重试；什么都没有改动。",
   "en": "Wait for the task that is using the library to finish (or cancel it in the task list), then try again. Nothing was changed."
- },
- {
-  "source": "这台电脑连不上 Impactor 签名要用的登录辅助服务器（mac-ani.jkcoxson.com，Impactor 内置、改不了），已自动重试过一次。检查这台电脑的网络：浏览器能打开这个地址就再点一次「装到 iPhone」；打不开就换个 DNS（如 223.5.5.5 或 1.1.1.1）或开 / 关代理后再装。手机、已装的 App 和存档都不受影响。",
-  "en": "This computer cannot reach the sign-in helper server Impactor needs for signing (mac-ani.jkcoxson.com, built into Impactor and not configurable); S2Arm already retried once. Check this computer's network: if a browser can open that address, click Install to iPhone again; if not, switch DNS (for example 223.5.5.5 or 1.1.1.1) or turn a proxy on or off, then install again. The iPhone, installed apps and saves are not affected."
  },
  {
   "source": "Apple ID 登录已过期，请重新登录后再装：在装机页点「打开 Impactor」→「设置」，选中你的 Apple ID 点「移除账号」，再点「添加账号」用同一个 Apple ID 重新登录（邮箱、密码、手机上的验证码，输入前切到英文输入法），然后回来再点一次「装到 iPhone」。密码只在 Impactor 里输，S2Arm 不经手。",
@@ -7088,10 +7068,6 @@
   "en": "Try starting it again. If it happens again, export a diagnostics package from Environment Check and attach it to a GitHub issue so we can fix the crash."
  },
  {
-  "source": "要装的那台（{0}）这次没列出来；这台电脑现在看得到：{1}——在装机页选其中一台再装。",
-  "en": "The chosen device ({0}) isn't listed right now. This computer can see: {1}. Pick one of them on the install page and install again."
- },
- {
   "source": "没找到要装的那台设备（{0}）：它还没和这台电脑配对过——插上数据线并解锁，在设备上点「信任」（配对过以后也可以连同一个 Wi-Fi 装）。",
   "en": "The chosen device ({0}) hasn't been paired with this computer yet: plug it in, unlock it and tap Trust on the device (after that it can also install over the same Wi-Fi)."
  },
@@ -7122,15 +7098,6 @@
  {
   "source": "重新打开 S2Arm 后点「重试」；还不行就导出诊断包发给我们。",
   "en": "Reopen S2Arm and tap Retry. If it still fails, export a diagnostics package and send it to us."
- },
-
- {
-  "source": "先把导出文件夹里这款的完整 .img（不带「着色器更新包」字样的那个）放进「放这里导入」，导好后再放更新包。",
-  "en": "Put this game's full .img from the export folder (the one without \"shader update\" in its name) into Import Here first, then add the update."
- },
- {
-  "source": "把电脑上这次导出的完整 .img 放进「放这里导入」重新导一遍（游戏版本换过，只换着色器套不上）。",
-  "en": "Put the full .img from this export on your computer into Import Here and import it again (the game version changed, so a shader-only update can't be applied)."
  },
  {
   "source": "检查文件是否拷完整，再打开 S2Arm。",
@@ -7167,22 +7134,6 @@
  {
   "source": "游戏库在 Mac OS 扩展（HFS+）格式的磁盘上：可以出包，但这种盘不能克隆，出包会多占一份资源包的空间。",
   "en": "The library is on a Mac OS Extended (HFS+) drive. Exporting works, but this drive can't clone files, so exports take an extra copy of the resources' space."
- },
- {
-  "source": "手机上有几款游戏这次放不进同一个 App。",
-  "en": "Some games on the phone can't go into the same app this time."
- },
- {
-  "source": "这台电脑上没有它们的 iPhone 版：{0}",
-  "en": "This computer has no iPhone build of: {0}"
- },
- {
-  "source": "它们是旧版 S2Arm 出的 iPhone 版，新版认不得，要重新「打 iPhone 包」：{0}",
-  "en": "Built for iPhone by an older S2Arm, which this version can't use. Run \"Build for iPhone\" again for: {0}"
- },
- {
-  "source": "确认继续的话，这次先不带它们照装，它们的存档和资源都留在手机上，之后给它们「打 iPhone 包」再装一次就回来。同意一次后，这台手机在这一版 S2Arm 上不再为它们问。",
-  "en": "Confirm to install without them this time. Their saves and resources stay on the phone, and they come back once you build them for iPhone and install again. After you agree once, this phone won't ask about them again on this S2Arm version."
  },
  {
   "source": "先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；也可以确认后这次先不带它们照装，它们的存档和资源留在手机上，重新出包再装就回来。",
@@ -7271,6 +7222,86 @@
  {
   "source": "进程卡在系统内核里还没退出（多为内存不够时等换页）；等它自行结束后再开，关掉其他占内存的程序可减少再次卡住。",
   "en": "The process is stuck in the system kernel and has not exited yet (usually waiting on paging when memory is short). Wait for it to end on its own before starting again; closing other memory-heavy apps makes it less likely to happen again."
+ },
+ {
+  "source": "本款满屏有已知问题，暂不可开。",
+  "en": "Full screen has a known problem in this game and can't be turned on yet."
+ },
+ {
+  "source": "已生效：上一局实测 {0} 帧",
+  "en": "Applied: {0} FPS measured last session"
+ },
+ {
+  "source": "已生效：上一局画面比例 {0}",
+  "en": "Applied: {0} picture last session"
+ },
+ {
+  "source": "没生效：补丁与这个版本的游戏不配套",
+  "en": "Not applied: doesn't match this version of the game"
+ },
+ {
+  "source": "开着，但上一局实测只有 {0} 帧",
+  "en": "On, but only {0} FPS measured last session"
+ },
+ {
+  "source": "已生效：上一局画面铺满",
+  "en": "Applied: the picture filled the screen last session"
+ },
+ {
+  "source": "开着，但上一局画面没铺满",
+  "en": "On, but the picture did not fill the screen last session"
+ },
+ {
+  "source": "整理 iPhone 版程序与资源包",
+  "en": "Prepare the iPhone app and resources"
+ },
+ {
+  "source": "编出 iPhone / iPad 版程序、打好资源包；出完接着导出成未签名的 S2Arm.ipa 和这款的 .img，你用自签工具安装。",
+  "en": "Builds the iPhone / iPad app and packs the resources, then exports an unsigned S2Arm.ipa and this game's .img for you to install with your signing tool."
+ },
+ {
+  "source": "把游戏资源推进 iPhone（只推变了的文件；第一次要几分钟）",
+  "en": "Sending game resources to iPhone (only changed files; the first time takes a few minutes)"
+ },
+ {
+  "source": "要装的那台设备（编号末尾 {0}）这次没列出来，这台电脑现在连着 {1} 台：在装机页选其中一台再装。",
+  "en": "The chosen device (ID ending {0}) isn't listed right now; this computer is connected to {1} devices. Pick one of them on the install page and install again."
+ },
+ {
+  "source": "这台电脑的设备服务里没看到 iPhone / iPad：插上数据线并解锁手机，在手机上点「信任」，再试一次。",
+  "en": "This computer's device service doesn't see an iPhone or iPad: plug it in with a cable, unlock it, tap Trust on the device, then try again."
+ },
+ {
+  "source": "这台电脑连不上 Impactor 签名要用的登录辅助服务器（mac-ani.jkcoxson.com，Impactor 内置、改不了），已自动重试过一次。检查这台电脑的网络：浏览器能打开这个地址就再点一次「装到 iPhone」；打不开就换个 DNS（如 223.5.5.5 或 1.1.1.1）或开 / 关代理后再装。手机、已装的 App 和存档都不受影响。",
+  "en": "This computer cannot reach the sign-in helper server Impactor needs for signing (mac-ani.jkcoxson.com, built into Impactor and not configurable); S2Arm already retried once. Check this computer's network: if a browser can open that address, click Install to iPhone again; if not, switch DNS (for example 223.5.5.5 or 1.1.1.1) or turn a proxy on or off, then install again. The iPhone, installed apps and saves are not affected."
+ },
+ {
+  "source": "要装的那台（{0}）这次没列出来；这台电脑现在看得到：{1}——在装机页选其中一台再装。",
+  "en": "The chosen device ({0}) isn't listed right now. This computer can see: {1}. Pick one of them on the install page and install again."
+ },
+ {
+  "source": "先把导出文件夹里这款的完整 .img（不带「着色器更新包」字样的那个）放进「放这里导入」，导好后再放更新包。",
+  "en": "Put this game's full .img from the export folder (the one without \"shader update\" in its name) into Import Here first, then add the update."
+ },
+ {
+  "source": "把电脑上这次导出的完整 .img 放进「放这里导入」重新导一遍（游戏版本换过，只换着色器套不上）。",
+  "en": "Put the full .img from this export on your computer into Import Here and import it again (the game version changed, so a shader-only update can't be applied)."
+ },
+ {
+  "source": "手机上有几款游戏这次放不进同一个 App。",
+  "en": "Some games on the phone can't go into the same app this time."
+ },
+ {
+  "source": "这台电脑上没有它们的 iPhone 版：{0}",
+  "en": "This computer has no iPhone build of: {0}"
+ },
+ {
+  "source": "它们是旧版 S2Arm 出的 iPhone 版，新版认不得，要重新「打 iPhone 包」：{0}",
+  "en": "Built for iPhone by an older S2Arm, which this version can't use. Run \"Build for iPhone\" again for: {0}"
+ },
+ {
+  "source": "确认继续的话，这次先不带它们照装，它们的存档和资源都留在手机上，之后给它们「打 iPhone 包」再装一次就回来。同意一次后，这台手机在这一版 S2Arm 上不再为它们问。",
+  "en": "Confirm to install without them this time. Their saves and resources stay on the phone, and they come back once you build them for iPhone and install again. After you agree once, this phone won't ask about them again on this S2Arm version."
  },
  {
   "source": "免费个人开发者团队签不了这个 App 申请的某项权限（例如「扩展虚拟寻址」）；更新 S2Arm 后重新安装（新版对免费团队只申请能签的权限），或在 Xcode 改用付费开发者团队。",

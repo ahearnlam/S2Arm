@@ -77,6 +77,13 @@ with tempfile.TemporaryDirectory() as t:
     ck('有 unpack.tsv → 取它的 title_id（大写）定来源目录（空目录：0 份）', r.returncode == 0 and '来源 0 份' in r.stdout)
     r, k6 = snap(p('k6'), p('root'), env=dict(env, S2A_PSO_SOURCES=p('m1', 'a.tsv') + ':' + p('m1', 'dev')))
     ck('S2A_PSO_SOURCES（冒号分隔）盖过缺省来源 → 与显式给来源逐字节同', r.returncode == 0 and k6 == k1)
+    # 补丁包管线种子（S2A_PSO_SOURCES_EXTRA，系统分隔符）：接在缺省来源 / S2A_PSO_SOURCES 之后；显式给来源时不接
+    r, k8 = snap(p('k8'), p('root'), env=dict(env, S2A_PSO_SOURCES=p('m1', 'a.tsv'), S2A_PSO_SOURCES_EXTRA=p('m1', 'dev')))
+    ck('S2A_PSO_SOURCES + 补丁包种子 → 顺序 a.tsv、dev/ = 与显式给来源逐字节同', r.returncode == 0 and k8 == k1)
+    r, k9 = snap(p('k9'), p('root'), env=dict(env, S2A_PSO_SOURCES_EXTRA=p('m1', 'a.tsv') + os.pathsep + p('m1', 'dev')))
+    ck('缺省来源（空目录）+ 补丁包种子两份 → 与显式给来源逐字节同', r.returncode == 0 and '来源 2 份' in r.stdout and k9 == k1)
+    r, k10 = snap(p('k10'), 'x', p('没有'), env=dict(env, S2A_PSO_SOURCES_EXTRA=p('m1', 'a.tsv')))
+    ck('显式给来源时不接补丁包种子（四张表只有表头）', r.returncode == 0 and all(data(k10[t]) == [] for t in TABLES))
     r, k7 = snap(p('k7'), 'x', p('没有'))
     ck('反证：没有任何来源 → 四张表只有表头', r.returncode == 0 and all(data(k7[t]) == [] for t in TABLES))
 # vk_spv（11-05，Vulkan 款出包不起局：设备首遇现编存下的游戏 SPIR-V 经快照翻进下一包离线库）。来源目录 v1/ 的 vk_spv/：A（文件名不对）、A 的同内容副本、

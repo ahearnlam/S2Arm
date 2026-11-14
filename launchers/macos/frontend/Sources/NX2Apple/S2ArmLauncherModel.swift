@@ -30,6 +30,8 @@ struct ExportRun: Equatable {
         var failureSummary: String?
         /// 出成了、但有阶段降级继续（v0.3.1，产物根 degrade.*.tsv 的「玩家提示」）：完成卡逐条显示
         var notes: [String] = []
+        /// 出包时自动配好的金手指 / 社区补丁（作业层 pack/jobs/patches.py boost：cheats / fps / widescreen / gfx 的条数）：完成页的 S 级加强动效
+        var boost: [String: Int] = [:]
     }
     let platforms: [ExportPlatform]
     /// 正在做的那个平台（platforms 的下标）。
@@ -154,6 +156,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var exportFor: String?
     /// 下游深度方案确认页（DownstreamConfirmSheet）：导出 iPhone 前弹，选完记下（downstreamChoice 作业）再接着导出这一单
     @Published var downstreamPromptFor: String?
+    /// 上次开着金手指 / 画面补丁时这款异常退出、已被关掉（作业层 pack/jobs/cheats.py note_crash / crashed）：开始游戏时通知一句（LaunchSettingsSheet.swift CrashPromptHost）
+    @Published var crashPrompt: CrashPrompt?
     var downstreamPending: (platforms: [ExportPlatform]?, deviceTarget: [String: Any]?, spaceOverride: Bool, location: String?)?
     /// 存放位置（游戏库结构 v3）：出包页下拉框的各项、上次用的位置号
     @Published var locations: [StorageLocation] = []
@@ -752,7 +756,8 @@ public final class S2ArmLauncherModel: ObservableObject {
                                                              appBytes: ((o["ipaBytes"] ?? o["outputBytes"]) as? NSNumber)?.int64Value,
                                                              packBytes: (o["packBytes"] as? NSNumber)?.int64Value,
                                                              suggestion: failure["suggestion"] as? String ?? "", failureSummary: failure["failureSummary"] as? String,
-                                                             notes: o["notes"] as? [String] ?? []))
+                                                             notes: o["notes"] as? [String] ?? [],
+                                                             boost: (o["boost"] as? [String: Any] ?? [:]).compactMapValues { ($0 as? NSNumber)?.intValue }))
                 // 装法是「导出，自己签名安装」：iPhone 包出好就接着导出（D-9ZF9，维护者实测：原先出完包停在完成页，导出要再点一次，文件夹里什么都没有）。
                 //   导出不连手机、不签名，没有副作用；排进 installAfterQueue，这次出包会话结束后由 pumpQueue 接着跑
                 if platform == .ios, state == .completed, self.installMode.mode == "export", !self.batchRunning, let gid = self.session?.gameID,
@@ -1046,6 +1051,25 @@ public final class S2ArmLauncherModel: ObservableObject {
     func play(_ game: GameSummary, uiLanguage: String?) {
         guard !busy, !cloudSyncing else { return }
         failAction(nil, game: nil)
+        // 崩了能恢复（11-13 维护者改定：开局前不问）：上次开着某几条时异常退出，作业层已当场关掉（pack/jobs/cheats.py note_crash）→
+        //   这次照常开局，同时弹一条通知说关了什么、想用去设置里再开；读不到记录照常开局
+        Task {
+            let names = (try? await crashedBeforePlay(game.id)) ?? []
+            if !names.isEmpty {
+                crashPrompt = CrashPrompt(game: game, uiLanguage: uiLanguage, names: names)
+                _ = try? await saveJob("communitySave", gameID: game.id, extra: ["crashAnswer": "ack"])
+            }
+            playChecked(game, uiLanguage: uiLanguage)
+        }
+    }
+
+    private func crashedBeforePlay(_ gameID: String) async throws -> [String] {
+        let result = try await saveJob("community", gameID: gameID, extra: [:])
+        return (result["crashed"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+    }
+
+    private func playChecked(_ game: GameSummary, uiLanguage: String?) {
+        guard !busy, !cloudSyncing else { return }
         // 不按前端的环境检查结果拦（剃刀 M4）：launch 作业自己校验运行文件与环境，缺什么回真实原因
         // 开了 iCloud 存档：先取回 / 处理冲突再开局（S2ArmLauncherModel+CloudSaves）；同步失败本地存档没动，照常开局、错误行写原因
         if cloudFolder != nil {
