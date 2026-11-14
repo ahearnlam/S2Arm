@@ -20,7 +20,7 @@
       "kicker": {"zh-Hans": "S 级优化 · 满屏与帧率", "en": "S-grade · Full screen and frame rate"},
       "title": {"zh-Hans": "画面铺满，帧率翻倍", "en": "Fill the screen, double the frame rate"},
       "what": {"zh-Hans": "**满屏补丁**按你的屏幕比例铺满，不留黑边、人物不变形；**帧率补丁**让 30 帧的游戏跑 60，高刷屏能到 120。", "en": "**Full-screen patches** fill any screen at its own aspect ratio on iPhone, iPad and Mac, without stretching; **frame-rate patches** take 30 fps games to 60, and up to 120 on high-refresh screens."},
-      "how": {"zh-Hans": "版本对得上的满屏、帧率补丁默认开着，帧率按屏幕自动挑最高一档。开着补丁闪退，下次打开会自动关掉那一项。", "en": "Matching full-screen and frame-rate patches are on by default; where there are several frame-rate levels, the highest your screen supports is picked automatically. If a patch crashes the game, the next launch turns that one off."},
+      "how": {"zh-Hans": "命中的满屏、帧率补丁默认开着（没有同版本满屏补丁会从别的版本移植），帧率自动挑最高一档。闪退了下次自动关掉那一项。", "en": "Matched full-screen and frame-rate patches are on by default (full screen is ported from another version of the game when yours has none); the highest frame-rate level your screen supports is picked automatically. If a patch crashes the game, the next launch turns that one off."},
       "where": {"zh-Hans": "想调档或关掉：iPhone / iPad 在游戏里点**左上角齿轮 → S 级优化**；Mac 在游戏库选中这款，点齿轮「**启动设置**」。", "en": "To change or turn one off: on iPhone / iPad, **top-left gear → S-grade** in the game; on Mac, select the game in the library and click the gear, **Launch settings**."}
     },
     {
