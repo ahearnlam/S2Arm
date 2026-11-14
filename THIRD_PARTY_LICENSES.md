@@ -73,6 +73,7 @@ S2Arm 本身以 Apache License 2.0 授权（仓库根目录 [LICENSE](LICENSE) �
 | .NET 运行时（linux-bionic） | 10.x | MIT | https://github.com/dotnet/runtime | 是（NativeAOT 静态编进单库） |
 | libopus / libvpx | 同上表 1.6.1 / 1.17.0 | BSD-3-Clause（附专利授权） | 按 sha256 取固定源码，不入库 | 是 |
 | Ryujinx 树、Ryujinx 子集、直连图形层等共用组件 | 同上表 | 同上表 | 同上表 | 是（安卓单库共用同一份托管代码与原生层） |
+| libadrenotools / liblinkernsbypass | Eden 分支 `8ba23b42d7` / liblinkernsbypass `aa3975893d`，经 BananaNative `3d43275` vendored | BSD-2-Clause（© 2021 Billy Laws）；`adreno_binder_compat.c` 来自 BananaNative（MIT） | https://github.com/bylaws/libadrenotools 、https://github.com/bylaws/liblinkernsbypass ；源码 `android/third_party/libadrenotools`，许可全文该目录 `LICENSE` 与 `lib/linkernsbypass/LICENSE` | 是（编成 `libadrenotools.so` / `libhook_impl.so` / `libmain_hook.so`；只在选择外挂驱动时加载。驱动二进制本身不进 APK、不入库） |
 
 ## 已经从出包路径拿掉的 GPL
 

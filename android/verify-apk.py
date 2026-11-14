@@ -28,6 +28,8 @@ LICENSE_MARKERS = [
     (b'libopus ', ['assets/licenses/opus-COPYING.txt']),                                      # BSD-3-Clause
     (b'WebM Project VP8 Decoder', ['assets/licenses/libvpx-LICENSE.txt',
                                    'assets/licenses/libvpx-PATENTS.txt']),                    # BSD-3-Clause + patent grant
+    (b'adrenotools-libvulkan', ['assets/licenses/libadrenotools-LICENSE.txt',
+                                'assets/licenses/liblinkernsbypass-LICENSE.txt']),           # BSD-2-Clause
 ]
 
 
@@ -43,8 +45,10 @@ def verify(path):
         if {'lib/arm64-v8a/libs2arm_android.so', 'lib/arm64-v8a/libs2a_capprobe.so'} - names or names - {
                 'lib/arm64-v8a/' + n for n in ('libs2arm_android.so', 'libs2a_capprobe.so',
                                                'libs2a_cs_probe.so', 'libs2a_cs.so',
-                                               'libssl.so', 'libcrypto.so', 'libs2arm_rewriter.so')}:
-            raise ValueError('APK must contain the arm64-v8a Android host and capprobe helper libraries, and only the declared NativeAOT / OpenSSL / preparation libraries')
+                                               'libssl.so', 'libcrypto.so', 'libs2arm_rewriter.so',
+                                               # 外挂 Vulkan 驱动：libadrenotools 与两个 hook 库（只在选择驱动时加载）
+                                               'libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so')}:
+            raise ValueError('APK must contain the arm64-v8a Android host and capprobe helper libraries, and only the declared NativeAOT / OpenSSL / preparation / custom-driver libraries')
         # Redistributed third-party code carries its license text. What the libraries contain decides
         # what is needed: the single-library build links the .NET runtime and the codecs into the host library.
         files = set(apk.namelist())

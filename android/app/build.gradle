@@ -200,10 +200,10 @@ android {
             arguments "-DS2A_ANDROID_VAMM_LAYOUT=${vammLayout}"
             arguments "-DS2A_ANDROID_REWRITER=${rewriterEnabled ? 'ON' : 'OFF'}"
             if (rewriterEnabled) {
-                targets 's2arm_android', 's2arm_rewriter'
+                targets 's2arm_android', 's2arm_rewriter', 'adrenotools', 'hook_impl', 'main_hook'
                 arguments "-DS2A_REWRITER_DEPS=${rewriterDeps}"
             } else {
-                targets 's2arm_android'
+                targets 's2arm_android', 'adrenotools', 'hook_impl', 'main_hook'
             }
             // cs/build.sh mode; "static" links the NativeAOT service layer into the host library
             arguments "-DS2A_CS_SERVICES=${System.getenv('S2ARM_ANDROID_CS_SERVICES') ?: '0'}"

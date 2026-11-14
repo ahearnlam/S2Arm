@@ -1,3 +1,4 @@
+#define _GNU_SOURCE 1   // Dl_info / dladdr（外挂驱动定位 hook 库目录）
 #include "direct_session.h"
 #include "direct_vk.h"
 #include "direct_choice.h"   // direct-vulkan.txt 的唯一解析、AUTO 判定与 attempt 标记（#274）
@@ -21,12 +22,16 @@ uint64_t s2a_android_nvn_present_count(void) {
 #if defined(S2A_ANDROID_GAME_RUNTIME)
 #include "s2a_hostapi.h"
 #include "runtime/vm/memory.h"
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 
 extern void *sw_xstack_wrap(const char *, void *);
@@ -94,6 +99,238 @@ static const struct s2a_wsi_api *window(void *token) {
     return same ? lease_api : NULL;
 }
 
+// ---------- 外挂 Vulkan 驱动（libadrenotools，BSD-2-Clause） ----------
+// 选择通道（按优先级）：
+//   1) 环境变量 S2A_VK_DRIVER（宿主测试 / 调试）
+//   2) 系统属性 debug.s2a.vk_driver（adb shell setprop；user 版设备上 untrusted_app 常读不到）
+//   3) <externalFilesDir>/gpu_drivers/selected.txt 第一行（adb push，最可靠）
+// 值是目录名（<filesDir>/gpu_drivers/<name>）或绝对路径。共享存储上的目录先复制进应用内部
+// 私有目录：adrenotools 要求驱动位于内部数据目录，/sdcard 上没有执行权限。
+// 没选驱动、或加载失败时返回 NULL，调用方照原路 dlopen("libvulkan.so")，系统驱动路径不变。
+#define S2A_GPU_DRIVER_MAX_FILES 256
+#define S2A_GPU_DRIVER_MAX_BYTES (512ull * 1024 * 1024)
+#define S2A_ADRENOTOOLS_DRIVER_CUSTOM 1   // third_party/libadrenotools/include/adrenotools/priv.h
+
+extern const char *s2a_android_gpu_driver_files_dir(void) __attribute__((weak));
+extern const char *s2a_android_gpu_driver_external_dir(void) __attribute__((weak));
+
+static const char *driver_dir_or_null(const char *dir) { return dir && dir[0] == '/' ? dir : NULL; }
+
+static int copy_file(const char *src, const char *dst) {
+    int in = open(src, O_RDONLY | O_CLOEXEC), out = -1;
+    if (in < 0) return -1;
+    out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    if (out < 0) { close(in); return -1; }
+    char buf[1 << 16];
+    int failed = 0;
+    for (;;) {
+        ssize_t n = read(in, buf, sizeof buf);
+        if (n == 0) break;
+        if (n < 0) { if (errno == EINTR) continue; failed = 1; break; }
+        for (ssize_t off = 0; off < n;) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w < 0) { if (errno == EINTR) continue; failed = 1; break; }
+            off += w;
+        }
+        if (failed) break;
+    }
+    close(in);
+    if (close(out) != 0) failed = 1;
+    return failed ? -1 : 0;
+}
+
+// 平铺复制（只取普通文件，最多 256 个 / 512 MB）；同名文件覆盖，失败时下次重试。
+static int stage_driver_dir(const char *src, const char *dst) {
+    DIR *dir = opendir(src);
+    if (!dir) return -1;
+    if (mkdir(dst, 0700) != 0 && errno != EEXIST) { closedir(dir); return -1; }
+    struct dirent *e;
+    int files = 0, result = 0;
+    unsigned long long total = 0;
+    while (!result && (e = readdir(dir))) {
+        if (e->d_name[0] == '.') continue;
+        if (++files > S2A_GPU_DRIVER_MAX_FILES) { result = -1; break; }
+        char from[PATH_MAX], to[PATH_MAX];
+        struct stat st;
+        if (snprintf(from, sizeof from, "%s/%s", src, e->d_name) >= (int)sizeof from ||
+            snprintf(to, sizeof to, "%s/%s", dst, e->d_name) >= (int)sizeof to) { result = -1; break; }
+        if (stat(from, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        total += (unsigned long long)st.st_size;
+        if (total > S2A_GPU_DRIVER_MAX_BYTES) { result = -1; break; }
+        result = copy_file(from, to);
+    }
+    closedir(dir);
+    return result;
+}
+
+// meta.json 的 libraryName（只有一个键，不做完整 JSON 解析；目录分隔符一律拒绝）。
+static int meta_library(const char *dir, char *out, size_t cap) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/meta.json", dir) >= (int)sizeof path) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    char buf[8192];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    const char *key = strstr(buf, "\"libraryName\"");
+    if (!key) return -1;
+    const char *colon = strchr(key + 13, ':');
+    if (!colon) return -1;
+    const char *begin = strchr(colon, '"');
+    if (!begin) return -1;
+    const char *end = strchr(begin + 1, '"');
+    if (!end || end == begin + 1 || (size_t)(end - begin - 1) >= cap) return -1;
+    memcpy(out, begin + 1, (size_t)(end - begin - 1));
+    out[end - begin - 1] = 0;
+    return strchr(out, '/') || strchr(out, '\\') ? -1 : 0;
+}
+
+// 选择值：环境变量 > 系统属性 > 外部私有目录的 selected.txt。
+static int driver_selection(char *out, size_t cap, const char **how) {
+    const char *env = getenv("S2A_VK_DRIVER");
+    if (env && *env) {
+        if (strlen(env) >= cap) return -1;
+        snprintf(out, cap, "%s", env);
+        *how = "环境变量 S2A_VK_DRIVER";
+        return 0;
+    }
+    char prop[PROP_VALUE_MAX];
+    if (__system_property_get("debug.s2a.vk_driver", prop) > 0 && prop[0]) {
+        if (strlen(prop) >= cap) return -1;
+        snprintf(out, cap, "%s", prop);
+        *how = "系统属性 debug.s2a.vk_driver";
+        return 0;
+    }
+    const char *ext = driver_dir_or_null(s2a_android_gpu_driver_external_dir ? s2a_android_gpu_driver_external_dir() : NULL);
+    if (!ext) return -1;
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/gpu_drivers/selected.txt", ext) >= (int)sizeof path) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    char line[PATH_MAX];
+    size_t n = fread(line, 1, sizeof line - 1, f);
+    fclose(f);
+    line[n] = 0;
+    char *p = line, *end;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    end = p + strlen(p);
+    while (end > p && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) *--end = 0;
+    if (!*p || strlen(p) >= cap) return -1;
+    snprintf(out, cap, "%s", p);
+    *how = "外部目录 selected.txt";
+    return 0;
+}
+
+// hook 库（libhook_impl.so / libmain_hook.so）与 libs2arm_android.so 同目录；extractNativeLibs=false
+// 时这个目录是 "<base.apk>!/lib/arm64-v8a"，linker 认 zip 路径（与 BananaNative 默认一致）。
+// 开发运行库从 files/ 装载时 dladdr 给的目录里没有 hook：退到 capprobe 的包内装载 spec
+// （bridge.cpp 设的 <sourceDir>!/lib/arm64-v8a/libs2a_capprobe.so）。
+static int hook_dir_from_self(char *out, size_t cap) {
+    Dl_info info;
+    if (dladdr((void *)(uintptr_t)&hook_dir_from_self, &info) && info.dli_fname) {
+        const char *slash = strrchr(info.dli_fname, '/');
+        if (slash) {
+            size_t n = (size_t)(slash - info.dli_fname);
+            if (n > 0 && n < cap) {
+                memcpy(out, info.dli_fname, n);
+                out[n] = 0;
+                char probe[PATH_MAX];
+                if (strstr(out, "!/") ||
+                    (snprintf(probe, sizeof probe, "%s/libhook_impl.so", out) < (int)sizeof probe && access(probe, F_OK) == 0))
+                    return 0;
+            }
+        }
+    }
+    const char *helper = getenv("S2A_CAPPROBE_HELPER");
+    if (helper && strstr(helper, "!/")) {
+        const char *slash = strrchr(helper, '/');
+        if (slash) {
+            size_t n = (size_t)(slash - helper);
+            if (n > 0 && n < cap) {
+                memcpy(out, helper, n);
+                out[n] = 0;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+// 选了驱动才调用：返回 libadrenotools 打开的系统 loader handle；没选 / 失败返回 NULL。
+static void *custom_driver_open(const char *state_dir) {
+    char selection[PATH_MAX];
+    const char *how = "";
+    if (driver_selection(selection, sizeof selection, &how)) return NULL;
+    const char *files = driver_dir_or_null(s2a_android_gpu_driver_files_dir ? s2a_android_gpu_driver_files_dir() : NULL);
+    char dir[PATH_MAX];
+    if (selection[0] == '/') {
+        if (strlen(selection) >= sizeof dir) { fprintf(stderr, "[vk-direct] 自定义驱动：路径过长：%s\n", selection); return NULL; }
+        snprintf(dir, sizeof dir, "%s", selection);
+    } else {
+        if (!files) { fprintf(stderr, "[vk-direct] 自定义驱动：没有应用内部目录，无法解析 %s\n", selection); return NULL; }
+        if (snprintf(dir, sizeof dir, "%s/gpu_drivers/%s", files, selection) >= (int)sizeof dir) {
+            fprintf(stderr, "[vk-direct] 自定义驱动：路径过长：%s\n", selection);
+            return NULL;
+        }
+    }
+    // 共享存储没有执行权限：adrenotools 要求驱动在应用内部资料目录，先复制过去。
+    if (!strncmp(dir, "/sdcard/", 8) || !strncmp(dir, "/storage/", 9) || !strncmp(dir, "/mnt/", 5)) {
+        if (!files) { fprintf(stderr, "[vk-direct] 自定义驱动：%s 在共享存储，但没有内部目录可复制\n", dir); return NULL; }
+        const char *base = strrchr(dir, '/');
+        base = base && base[1] ? base + 1 : "driver";
+        char staged[PATH_MAX], staged_lib[PATH_MAX], library[128];
+        struct stat st;
+        if (snprintf(staged, sizeof staged, "%s/gpu_drivers/%s", files, base) >= (int)sizeof staged ||
+            meta_library(dir, library, sizeof library) != 0 ||
+            snprintf(staged_lib, sizeof staged_lib, "%s/%s", staged, library) >= (int)sizeof staged_lib) {
+            fprintf(stderr, "[vk-direct] 自定义驱动：%s 不像驱动目录（meta.json/libraryName）\n", dir);
+            return NULL;
+        }
+        if (stat(staged_lib, &st) != 0 && stage_driver_dir(dir, staged) != 0) {
+            fprintf(stderr, "[vk-direct] 自定义驱动：复制 %s → %s 失败（errno=%d）\n", dir, staged, errno);
+            return NULL;
+        }
+        snprintf(dir, sizeof dir, "%s", staged);
+    }
+    char library[128], lib[PATH_MAX], hooks[PATH_MAX], driver_dir[PATH_MAX + 1];
+    if (meta_library(dir, library, sizeof library) != 0) {
+        fprintf(stderr, "[vk-direct] 自定义驱动：%s/meta.json 没有可用的 libraryName\n", dir);
+        return NULL;
+    }
+    struct stat st;
+    if (snprintf(lib, sizeof lib, "%s/%s", dir, library) >= (int)sizeof lib || stat(lib, &st) != 0 || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "[vk-direct] 自定义驱动：%s/%s 不存在\n", dir, library);
+        return NULL;
+    }
+    if (hook_dir_from_self(hooks, sizeof hooks) != 0) {
+        fprintf(stderr, "[vk-direct] 自定义驱动：无法定位 libs2arm_android.so 所在目录（hook 库）\n");
+        return NULL;
+    }
+    void *adrenotools = dlopen("libadrenotools.so", RTLD_NOW | RTLD_LOCAL);
+    typedef void *(*open_libvulkan_fn)(int, int, const char *, const char *, const char *, const char *, const char *, void **);
+    open_libvulkan_fn open_vk = adrenotools ? (open_libvulkan_fn)dlsym(adrenotools, "adrenotools_open_libvulkan") : NULL;
+    if (!open_vk) {
+        fprintf(stderr, "[vk-direct] 自定义驱动：libadrenotools.so 不可用（%s），回落系统驱动\n",
+                adrenotools ? "缺少 adrenotools_open_libvulkan" : dlerror());
+        return NULL;
+    }
+    size_t dl = strlen(dir);
+    if (snprintf(driver_dir, sizeof driver_dir, "%s%s", dir, dl && dir[dl - 1] == '/' ? "" : "/") >= (int)sizeof driver_dir) {
+        fprintf(stderr, "[vk-direct] 自定义驱动：路径过长：%s\n", dir);
+        return NULL;
+    }
+    void *handle = open_vk(RTLD_NOW | RTLD_LOCAL, S2A_ADRENOTOOLS_DRIVER_CUSTOM, state_dir, hooks,
+                           driver_dir, library, NULL, NULL);
+    if (!handle) {
+        fprintf(stderr, "[vk-direct] 自定义驱动：adrenotools 加载 %s%s 失败（hooks 在 %s；logcat 看 adrenotools/hook_impl），回落系统驱动\n",
+                driver_dir, library, hooks);
+        return NULL;
+    }
+    fprintf(stderr, "[vk-direct] 自定义驱动已加载：%s%s（来源 %s；hooks 在 %s）\n", driver_dir, library, how, hooks);
+    return handle;
+}
+
 // choice：S2A_VK_CHOICE_GENERIC / DIRECT（手动）/ AUTO（冷启动准备时按包与上局状态判，direct_choice.h）
 int s2a_android_vk_select(int direct) {
     if (direct != S2A_VK_CHOICE_GENERIC && direct != S2A_VK_CHOICE_DIRECT && direct != S2A_VK_CHOICE_AUTO) return EINVAL;
@@ -140,7 +377,8 @@ int s2a_android_vk_session_prepare(const struct s2a_wsi_api *api, const char *ga
         return 0;
     }
     lease_api = api;
-    loader = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    loader = custom_driver_open(state_dir);   // 没选驱动 / 失败 → NULL，下面照原路走系统 loader
+    if (!loader) loader = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     if (!loader) result = ENOENT;
     else {
         struct s2a_direct_vk_host h = {(PFN_vkGetInstanceProcAddr)symbol("vkGetInstanceProcAddr"),

@@ -409,6 +409,10 @@ public class MainActivity extends Activity
             NativeBridge.load(library, app.sourceDir, app.splitSourceDirs, app.nativeLibraryDir);
             configureRedLogDir();
             configureDiagDir();
+            java.io.File externalFiles = getExternalFilesDir(null);
+            int gpuDriverRc = NativeBridge.configureGpuDriver(getFilesDir().getAbsolutePath(),
+                externalFiles == null ? "" : externalFiles.getAbsolutePath());
+            if (gpuDriverRc != 0) Log.w("S2Arm", "自定义驱动目录不可用（errno=" + gpuDriverRc + "）");
             try {
                 int frameLogRc = NativeBridge.configureFrameLogDir(getFilesDir().getAbsolutePath());
                 if (frameLogRc != 0) Log.w("S2Arm", "frame-log 目录不可用（errno=" + frameLogRc + "）");
