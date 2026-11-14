@@ -20,8 +20,8 @@
       "kicker": {"zh-Hans": "S 级优化 · 老游戏也能用", "en": "S-grade · Games you already have"},
       "title": {"zh-Hans": "已经导出的游戏，不用重新出包", "en": "No need to export your games again"},
       "what": {"zh-Hans": "已经导出到 Mac 和 iPhone 上的游戏，**更新 S2Arm 后自动补上** S 级优化：满屏、帧率、金手指。", "en": "Games already on your Mac or iPhone **pick up S-grade after you update S2Arm**: full screen, frame rate and cheats."},
-      "how": {"zh-Hans": "Mac：游戏库顶部点**S 级优化升级**，Mac 和 iPhone 的游戏都在这升级。Windows：点**更新 iPhone 上的 S2Arm**。只换程序，存档不动。", "en": "Mac: click **S-grade upgrade** at the top of the library. Windows: click **Update S2Arm on iPhone**. Only the app is replaced; saves stay."},
-      "where": {"zh-Hans": "Mac 和 iPhone 的游戏库里，封面左上角**亮起金色 S** 的就是已带上的；出包时取消了「出包时打入」的不亮。", "en": "In the Mac and iPhone libraries, a **gold S** at the top left of a cover means it has S-grade. Games exported with \"Build in when exporting\" unchecked don't light up."}
+      "how": {"zh-Hans": "Mac / Windows：游戏库顶部点**S 级优化升级**，电脑和 iPhone 上的老游戏都在这升级。只换程序，存档不动。", "en": "Mac / Windows: click **S-grade upgrade** at the top of the library to upgrade games on the computer and on iPhone. Only the app is replaced; saves stay."},
+      "where": {"zh-Hans": "Mac、Windows 和 iPhone 的游戏库里，封面左上角**亮起金色 S** 的就是已带上的；出包时取消了「出包时打入」的不亮。", "en": "In the Mac, Windows and iPhone libraries, a **gold S** at the top left of a cover means it has S-grade. Games exported with \"Build in when exporting\" unchecked don't light up."}
     },
     {
       "image": {"zh-Hans": "feature/sgrade-2.jpg", "en": "feature/sgrade-2-en.jpg"},
@@ -37,7 +37,7 @@
       "title": {"zh-Hans": "金手指，进游戏逐条打开", "en": "Cheats, one switch at a time"},
       "what": {"zh-Hans": "社区整理好的**金手指**，按你的游戏版本自动配好，出包时一起打进去。", "en": "Community **cheats** matched to your game's version are built in when you export."},
       "how": {"zh-Hans": "打进去后**默认关**。想用哪条就打开哪条，约 1 秒生效，不用重启游戏。", "en": "They start **off**. Turn on the ones you want; each takes effect in about a second, no restart."},
-      "where": {"zh-Hans": "iPhone / iPad：游戏里点**左上角齿轮 → S 级优化 → 金手指**。Mac：游戏库选中这款，点齿轮「**启动设置**」。", "en": "iPhone / iPad: in the game, **top-left gear → S-grade → Cheats**. Mac: select the game in the library and click the gear, **Launch settings**."}
+      "where": {"zh-Hans": "iPhone / iPad：游戏里点**左上角齿轮 → S 级优化 → 金手指**。Mac：游戏库选中这款，点齿轮「**启动设置**」。Windows：这款游戏菜单里的「**金手指…**」。", "en": "iPhone / iPad: in the game, **top-left gear → S-grade → Cheats**. Mac: select the game in the library and click the gear, **Launch settings**. Windows: **Cheats…** in the game's menu."}
     }
   ]
 }
