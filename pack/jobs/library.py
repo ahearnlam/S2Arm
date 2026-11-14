@@ -1028,6 +1028,11 @@ def inspect(c, source, icon_dir, keyfile=None, *, source_id=None):
             raise Failure("缺少内容对应的票据或标题密钥，请检查源文件是否完整。", code="ticket_missing") from None
         if any(line.startswith("【原因 keys_missing】") for line in lines):
             raise Failure("现有 prod.keys 缺少读取此文件所需的密钥。", code="keys_outdated") from None
+        # 读取器自己给了确定原因（「【原因 hash_mismatch】源文件数据哈希校验不过…换一份原版完整的文件」等，pack/nx_unpack Inspect.cs / Program.cs）：
+        #   照它的原话报，不再落到「文件不完整、缺票据或密钥不匹配」三选一的猜测（#1008：本体哈希校验不过，玩家被指去查密钥）
+        reason = next((line.split("】", 1)[1].strip() for line in lines if line.startswith("【原因 ") and "】" in line and line.split("】", 1)[1].strip()), "")
+        if reason:
+            raise Failure("无法读取游戏内容：" + reason, code="content_unreadable") from None
         if any("could not be decrypted" in line or "Check keys" in line for line in lines):
             raise Failure(KEYS_CANNOT_DECRYPT, code="content_unreadable") from None
         raise
@@ -1898,9 +1903,20 @@ def catalog(c):
         prune_jobs(c.private, jobs=c.jobpath.parent)
         marker.parent.mkdir(parents=True, exist_ok=True)   # catalog 是只读探测、不落自己的记录（剃刀 H4）：日志目录不一定已被本作业建出来
         marker.touch()
-    records = sorted((p for p in c.jobpath.parent.glob("*.json") if p != c.jobpath and not p.name.endswith(".request.json")),
+    # 数据目录在 exFAT 等非 APFS 盘上搬过时，每条记录旁有一份 ._<名>.json 附属文件（非 UTF-8 元数据）：按 os_junk 跳过；
+    #   单条记录读不出只记一行、跳过这一条，不拖垮整个游戏库刷新（#1010，同 #911 设备记录）
+    records = sorted((p for p in c.jobpath.parent.glob("*.json")
+                      if p != c.jobpath and not p.name.endswith(".request.json") and not layout.os_junk(p.name)),
                      key=_mtime, reverse=True)[:JOB_LIST_LIMIT]
-    jobs = [r for r in (read(p) for p in records) if isinstance(r, dict)]
+    jobs = []
+    for p in records:
+        try:
+            r = read(p)
+        except (OSError, ValueError) as e:   # UnicodeDecodeError / JSONDecodeError 都是 ValueError
+            print(f"[s2a] 任务记录 {p.name} 读不出，跳过：{type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        if isinstance(r, dict):
+            jobs.append(r)
     try:   # 「更新 iPhone 上的 S2Arm」：各台手机的设备记录里壳比本版旧的（只读本机记录，不连手机，install.phone_updates）
         import install
         phone_updates = install.phone_updates(c)
