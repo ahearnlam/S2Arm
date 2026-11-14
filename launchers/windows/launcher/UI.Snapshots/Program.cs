@@ -112,7 +112,12 @@ var featureNode = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Co
 featureNode["kind"] = "feature";
 foreach (var pageNode in featureNode["pages"]!.AsArray())
 {
-    pageNode!["image"] = Path.Combine(site, pageNode["image"]!.GetValue<string>());
+    // 同 updater.py feature_spotlight：image 给成 {zh-Hans, en} 绝对路径，英文缺了用中文
+    var raw = pageNode!["image"]!;
+    string Abs(string rel) => Path.Combine(site, rel);
+    var zhImg = raw is System.Text.Json.Nodes.JsonObject o1 ? Abs(o1["zh-Hans"]!.GetValue<string>()) : Abs(raw.GetValue<string>());
+    var enRel = raw is System.Text.Json.Nodes.JsonObject o2 && o2["en"] is { } e ? Abs(e.GetValue<string>()) : null;
+    pageNode["image"] = new System.Text.Json.Nodes.JsonObject { ["zh-Hans"] = zhImg, ["en"] = enRel is not null && File.Exists(enRel) ? enRel : zhImg };
     pageNode["layout"] = pageNode["title"] is null ? "poster" : "detail";   // 同 updater.py feature_spotlight：只有图 = 海报页
 }
 var featurePopup = JsonDocument.Parse(featureNode.ToJsonString()).RootElement.Clone();

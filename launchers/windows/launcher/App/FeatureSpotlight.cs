@@ -50,7 +50,11 @@ public sealed partial class EnvironmentWindow
 
     private Control FeatureImage(JsonElement page)
     {
-        var path = page.TryGetProperty("image", out var img) ? img.GetString() ?? "" : "";
+        // 图跟界面语言走：updater.py 给 {zh-Hans, en}（英文缺了已退回中文）；旧格式单个路径照用
+        var path = !page.TryGetProperty("image", out var img) ? ""
+            : img.ValueKind == JsonValueKind.Object ? (language == "en" && img.TryGetProperty("en", out var en) ? en.GetString() : null)
+                ?? (img.TryGetProperty("zh-Hans", out var zh) ? zh.GetString() ?? "" : "")
+            : img.GetString() ?? "";
         if (path.Length > 0 && !featureImages.ContainsKey(path))
         {
             try { featureImages[path] = new Bitmap(path); }

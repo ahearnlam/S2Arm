@@ -422,7 +422,8 @@ class FeatureTests(unittest.TestCase):
     def test_pages_need_both_languages_and_an_existing_image(self):
         f = self.spot()
         self.assertEqual((f["kind"], f["id"], len(f["pages"])), ("feature", "v0.4.0-x", 1))   # 第二页图不在：丢掉
-        self.assertEqual(f["pages"][0]["image"], str((self.root / "site/feature/a.jpg").resolve()))
+        a = str((self.root / "site/feature/a.jpg").resolve())
+        self.assertEqual(f["pages"][0]["image"], {"zh-Hans": a, "en": a})   # 只写一个路径：两种语言同图
         self.assertEqual(f["pages"][0]["layout"], "detail")
         self.write(pages=[{"image": "feature/a.jpg", **{k: {"zh-Hans": "中"} for k in updater.FEATURE_TEXTS}}])
         self.assertIsNone(self.spot())   # 缺英文：这页不要，一页不剩不弹
@@ -432,6 +433,17 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual([p["layout"] for p in self.spot()["pages"]], ["poster", "detail"])   # 只有图 = 海报页
         self.write(pages=[{"image": "../private/x.jpg", **{k: self.T for k in updater.FEATURE_TEXTS}}])
         self.assertIsNone(self.spot())   # 图只认 docs/site 里面的
+
+    def test_image_follows_ui_language(self):
+        (self.root / "site/feature/a_en.jpg").write_bytes(b"jpg")
+        page = {**{k: self.T for k in updater.FEATURE_TEXTS}}
+        self.write(pages=[dict(page, image={"zh-Hans": "feature/a.jpg", "en": "feature/a_en.jpg"}),
+                          dict(page, image={"zh-Hans": "feature/a.jpg", "en": "feature/none.jpg"}),
+                          dict(page, image={"en": "feature/a_en.jpg"})])
+        site = (self.root / "site/feature").resolve()
+        imgs = [p["image"] for p in self.spot()["pages"]]
+        self.assertEqual(imgs, [{"zh-Hans": str(site / "a.jpg"), "en": str(site / "a_en.jpg")},
+                                {"zh-Hans": str(site / "a.jpg"), "en": str(site / "a.jpg")}])   # 英文图不在：用中文；没有中文图：这页不要
 
     def test_version_platform_and_withdraw(self):
         self.assertIsNone(self.spot("0.3.10"))                     # 功能还没进这一版：热修不带大窗

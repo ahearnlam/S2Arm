@@ -314,7 +314,7 @@ def _bilingual(value):
 
 
 def feature_spotlight(platform, current, path=None, withdrawn=()):
-    """docs/site/feature.json → 这一期新功能大窗 {id, badge, url?, pages:[…]}；不弹 → None。每页两种版式（通用多页轮播，两端照 layout 画）：
+    """docs/site/feature.json → 这一期新功能大窗 {id, badge, url?, pages:[…]}，每页 image = {zh-Hans, en} 绝对路径；不弹 → None。每页两种版式（通用多页轮播，两端照 layout 画）：
       poster = 只写 image：一张图铺满大窗（首页海报）；detail = image + kicker / title / what / how / where（各中英两份）：上大图、下说明。
     不弹的情形：文件没有 / 格式不对 / 不给本平台 / 本机版本低于 minVersion（功能还没进这一版，热修不能先把大窗带出去）/ 官网 notice.json 的 featureWithdrawn 列了这一期。
     图不在、或说明页的文字缺一项 / 中英缺一，这一页不要；一页都不剩就不弹。"""
@@ -336,19 +336,28 @@ def feature_spotlight(platform, current, path=None, withdrawn=()):
     mine = re.match(r"v?(\d+)\.(\d+)\.(\d+)", (current or "").strip())
     if floor is None or not mine or tuple(int(n) for n in mine.groups()) < floor:
         return None
+    def picture(rel):   # 相对 docs/site 的图 → 绝对路径；不在 docs/site 里或文件不在 → None
+        if not isinstance(rel, str):
+            return None
+        image = (path.parent / rel).resolve()
+        return str(image) if path.parent.resolve() in image.parents and image.is_file() else None
     pages = []
     for row in data.get("pages") or []:
-        if not isinstance(row, dict) or not isinstance(row.get("image"), str):
+        if not isinstance(row, dict):
             continue
-        image = (path.parent / row["image"]).resolve()
-        if path.parent.resolve() not in image.parents or not image.is_file():
+        # 图跟界面语言走（11-14 维护者：海报和启动器语言要一致）：image 写一个路径 = 两种语言同图；写 {zh-Hans, en} = 各用各的，英文缺了用中文
+        raw = row.get("image")
+        raw = raw if isinstance(raw, dict) else {"zh-Hans": raw}
+        zh = picture(raw.get("zh-Hans"))
+        if not zh:
             continue
+        image = {"zh-Hans": zh, "en": picture(raw.get("en")) or zh}
         if not any(key in row for key in FEATURE_TEXTS):   # 海报页：只有一张图，铺满大窗
-            pages.append({"layout": "poster", "image": str(image)})
+            pages.append({"layout": "poster", "image": image})
             continue
         texts = {key: _bilingual(row.get(key)) for key in FEATURE_TEXTS}
         if None not in texts.values():   # 说明页：大图 + 标题 + 是什么 / 怎么用 / 在哪用
-            pages.append(dict(texts, layout="detail", image=str(image)))
+            pages.append(dict(texts, layout="detail", image=image))
     if not pages:
         return None
     out = {"kind": "feature", "id": ident, "badge": _bilingual(data.get("badge")) or {"zh-Hans": "新功能", "en": "New"}, "pages": pages}

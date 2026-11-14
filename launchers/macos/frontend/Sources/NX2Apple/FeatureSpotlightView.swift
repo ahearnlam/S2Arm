@@ -109,11 +109,17 @@ struct FeatureSpotlightView: View {
     }
 
     @ViewBuilder private func picture(_ page: [String: Any]) -> some View {
-        if let path = page["image"] as? String, let image = NSImage(contentsOfFile: path) {
+        if let path = imagePath(page), let image = NSImage(contentsOfFile: path) {
             Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
         } else {
             LauncherPalette.background
         }
+    }
+
+    /// 这一页的图跟界面语言走：updater.py 给 {zh-Hans, en}（英文缺了已退回中文）；旧格式单个路径照用
+    private func imagePath(_ page: [String: Any]) -> String? {
+        if let paths = page["image"] as? [String: Any] { return (language == "en" ? paths["en"] as? String : nil) ?? paths["zh-Hans"] as? String }
+        return page["image"] as? String
     }
 
     private var badges: some View {
