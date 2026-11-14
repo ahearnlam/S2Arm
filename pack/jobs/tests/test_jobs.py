@@ -1789,6 +1789,29 @@ class JobsTests(unittest.TestCase):
         library.sweep_trash(self.c)
         self.assertEqual(list((self.c.library / library.TRASH).iterdir()), [])
 
+    def test_delete_with_saves_on_exfat_skips_appledouble_that_left_with_its_file(self):
+        # 诊断#3d03f4：exFAT 上有存档的款逐项挪进 .s2a-trash，挪走 banner.jpg 时系统连带挪走 ._banner.jpg，列表里还挂着它 →
+        #   原先 rename 报 ENOENT、整单「删不掉 ._banner.jpg」job_failed。期望（手写）：删除完成、清单去掉这款、存档保留、游戏目录里只剩 saves
+        package = self.package(); game = self.game(packages=[package]); self.catalogue([game])
+        gdir = layout.game_dir(self.c, game["id"])
+        (gdir / "banner.jpg").write_bytes(b"j"); (gdir / "._banner.jpg").write_bytes(b"a")
+        save = gdir / "saves" / "s.dat"; save.parent.mkdir(parents=True); save.write_text("keep")
+        real = os.rename
+        def rename(src, dst):   # 照 exFAT：数据文件挪走，它的 AppleDouble 附属文件跟着走
+            real(src, dst)
+            side = Path(src).with_name("._" + Path(src).name)
+            if side.exists():
+                real(side, Path(dst).with_name("._" + Path(dst).name))
+        self.c.r["gameId"] = game["id"]
+        listdir = Path.iterdir
+        def iterdir(d):   # 让 banner.jpg 先于 ._banner.jpg 挪（真盘上的列目录顺序不保证，这里固定成会出事的那种）
+            return iter(sorted(listdir(d), key=lambda q: q.name.startswith("._")))
+        with unittest.mock.patch.object(library.os, "rename", rename), unittest.mock.patch.object(Path, "iterdir", iterdir):
+            library.delete(self.c)
+        self.assertEqual([g["id"] for g in self.c.catalog()["games"]], [])
+        self.assertEqual(save.read_text(), "keep")
+        self.assertEqual(sorted(i.name for i in gdir.iterdir()), ["saves"])
+
     def test_delete_also_drops_game_from_library_container(self):
         # 期望（#227，游戏库结构 v3）：删 A → 各台手机记录（devices/<设备>.json）里摘掉 A，B 与其余字段原样；没装 A 的那台记录不动；
         #   不装机、不碰默认位置根的 S2Arm.ipa（下次给那台装机时现组的容器就不再带 A）
