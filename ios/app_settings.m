@@ -10,6 +10,7 @@ int s2a_fps_cap_reason(void) __attribute__((weak_import));
 #import "vpad.h"
 #import "vpad_settings.h"
 #import "cpatch_settings.h"
+#include "native.h"   // LOG
 #include "s2a_pad.h"   // 手柄按键排布（自动 / Switch / Xbox）的取值解析，同齿轮菜单
 // 弱链接[lab]：s2a_cpatch_fps_pick（runtime/src/cpatch.c：局中切帧率档，下一帧生效；输入工作台不链原生核，取不到就只记、下次进游戏生效）
 void s2a_cpatch_fps_pick(int target) __attribute__((weak_import));
@@ -185,7 +186,8 @@ static UILabel *textLabel(UIFontTextStyle style) {
 }
 - (void)developerPress:(UILongPressGestureRecognizer *)press { if (press.state == UIGestureRecognizerStateBegan) [self openDeveloper]; }
 - (void)openDeveloper {
-    if (self.navigationController.topViewController != self) return;
+    if (self.navigationController.topViewController != self) { LOG("设置页：开发者页没开（最上层不是设置页）"); return; }
+    LOG("设置页：打开开发者页");
     S2ASettingsPane *page = [S2ASettingsPane new]; page.owner = self; page.groups = @[@2]; page.title = S2AL(@"settings.group.dev");
     page.view.backgroundColor = UIColor.systemGroupedBackgroundColor; page.navigationItem.rightBarButtonItem = self.navigationItem.rightBarButtonItem;
     [self.navigationController pushViewController:page animated:YES];
@@ -194,6 +196,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     static BOOL once; const char *e = getenv("S2A_SETTINGS_DEV");
+    if (e) LOG("设置页：测试开关 S2A_SETTINGS_DEV=%s（once=%d）", e, once);
     if (!once && e && !strcmp(e, "1")) { once = YES; [self openDeveloper]; }
 }
 - (void)refresh {
