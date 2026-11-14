@@ -590,7 +590,7 @@ namespace Ryujinx.Audio.Backends.Apple
                 return;
             }
 
-            Console.Error.WriteLine($"[声] 输出 #{_diag.Index}：设备缓冲请求 {frames} 帧，设备实给 {granted} 帧 ≈ {granted * 1000.0 / RequestedSampleRate:F1} ms（设备级：整机对这个设备的 IO 粒度都变小）");
+            Console.Error.WriteLine($"[声] 输出 #{_diag.Index}：设备缓冲请求 {frames} 帧，设备实给 {granted} 帧 ≈ {granted * 1000.0 / RequestedSampleRate:F1} ms（只作用于本进程，其他 App 不受影响）");
         }
 
         // S2Arm: the device side of DeviceBufferPump: pool buffer i is _audioQueueBuffers[i]
