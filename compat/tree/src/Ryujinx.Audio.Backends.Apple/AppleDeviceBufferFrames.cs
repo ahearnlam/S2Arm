@@ -11,12 +11,12 @@ namespace Ryujinx.Audio.Backends.Apple   // 平台例外：Apple 后端平台实
     //
     // Contract (S2A_AUDIO_BUFFER_FRAMES, opt-in; unset keeps the current behaviour):
     //   valid   - a multiple of 16 in [16, 512]: requested on the queue's device at every queue creation (start and
-    //             stall rebuild). The property is device-global on macOS (every client of that device gets the finer
-    //             IO granularity, not just this app) — that is inherent to kAudioDevicePropertyBufferFrameSize.
+    //             stall rebuild). Measured 11-14 on macOS: the value is per client process — another process still
+    //             reads the device default (512) while ours holds 32, and nothing is left behind when our process exits.
     //   unset / invalid - request nothing (the current behaviour; invalid values get a 【红】 line and fall back).
-    // The Mac shell's "声音" menu (macos/front_mac.m) offers 6 entries — 512 (default) / 256 / 128 / 64 / 32 / 16 —
-    // where the 512 (default) entry clears the setting (unset = request nothing, the current behaviour) and the other
-    // five write their value; the wider 16-step domain here is defensive for hand-edited env values.
+    // Player choice: Mac per-game launch settings "Audio latency" (launchers/shared/game_settings.v1.json audioLatency:
+    // Standard = unset / Low = 128 / Lowest = 32), turned into this variable at launch by pack/jobs/community.py launch_env;
+    // the wider 16-step domain here is defensive for hand-edited env values.
     internal static class AppleDeviceBufferFrames
     {
         public const int Min = 16;

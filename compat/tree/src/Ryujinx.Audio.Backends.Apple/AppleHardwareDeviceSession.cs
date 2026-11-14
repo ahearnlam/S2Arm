@@ -537,8 +537,9 @@ namespace Ryujinx.Audio.Backends.Apple
         //   （Mac 内置扬声器 512 帧 ≈ 10.7 ms @48k），这一个 IO 周期就是出声延迟的地板；本机实测设备收 16 帧
         //   （≈ 0.33 ms，合法范围 15–4096）声音干净，交还节奏变密、audren 链路的延迟随之下降（PlaybackCredit
         //   按实测 burst 自适应，不用改）。建队与自愈重建都走这里（路由切走后旧请求留在旧设备上，下次建队重新请求）。
-        //   注意：该属性是设备级——整机对这个设备的 IO 粒度都变小（其他 App 也一样），kAudioDevicePropertyBufferFrameSize
-        //   的固有语义，不是本后端能收窄的。失败（读设备号 / 设 / 读回）按设备默认继续（【红】记录，行为同旧）。
+        //   11-14 实测：这个值按进程算——我们持有 32 帧时别的进程读到的仍是设备默认 512，我们退出也不留改动，不影响其他 App。
+        //   代价只在本进程：IO 周期变短、CPU 占用上升，机器忙时可能爆音（启动设置「声音延迟」的说明照此写）。
+        //   失败（读设备号 / 设 / 读回）按设备默认继续（【红】记录，行为同旧）。
         //   仅 macOS：iOS 没有 HAL 设备属性（IO 缓冲走 AVAudioSession 的 S2A_AUDIO_IO20 通道）。
         private void S2AApplyDeviceBufferFrames()
         {

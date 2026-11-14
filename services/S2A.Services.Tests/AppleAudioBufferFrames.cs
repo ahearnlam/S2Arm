@@ -38,14 +38,14 @@ namespace S2A.Services.Tests
             Check("kAudioHardwarePropertyDefaultOutputDevice = 'dOut'", kAudioHardwarePropertyDefaultOutputDevice == Fcc("dOut"), $"0x{kAudioHardwarePropertyDefaultOutputDevice:X8}");
             Check("kAudioObjectSystemObject = 1", kAudioObjectSystemObject == 1);
 
-            // ② 合法域：16 的倍数、16–512（与 Mac 壳菜单一致：16…512 步进 16 共 31 档）
+            // ② 合法域：16 的倍数、16–512（启动设置「声音延迟」只用 128 / 32 两档，见 game_settings.v1.json audioLatency）
             Check("下限 / 上限合法（16、512）", AppleDeviceBufferFrames.IsValid(16) && AppleDeviceBufferFrames.IsValid(512));
             Check("中间倍数合法（48、256、496）", AppleDeviceBufferFrames.IsValid(48) && AppleDeviceBufferFrames.IsValid(256) && AppleDeviceBufferFrames.IsValid(496));
             Check("越界不合法（0、15、513）", !AppleDeviceBufferFrames.IsValid(0) && !AppleDeviceBufferFrames.IsValid(15) && !AppleDeviceBufferFrames.IsValid(513));
             Check("非 16 倍数 / 负数不合法（17、100、-16）", !AppleDeviceBufferFrames.IsValid(17) && !AppleDeviceBufferFrames.IsValid(100) && !AppleDeviceBufferFrames.IsValid(-16));
             bool allValid = true;
             for (int f = AppleDeviceBufferFrames.Min; f <= AppleDeviceBufferFrames.Max; f += AppleDeviceBufferFrames.Step) allValid &= AppleDeviceBufferFrames.IsValid(f);
-            Check("合法域内 16 步进全合法（防御手改环境值；菜单只列 512/256/128/64/32/16 六档）", allValid);
+            Check("合法域内 16 步进全合法（防御手改环境值；启动设置只给标准 / 128 / 32）", allValid);
 
             // ③ 解析：没设 = 0（不请求，现状）；合法值原样；不合法回落 0 并打【红】
             string old = Environment.GetEnvironmentVariable("S2A_AUDIO_BUFFER_FRAMES");

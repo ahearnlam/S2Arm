@@ -72,6 +72,17 @@ class CommunityTests(unittest.TestCase):
         self.c.r = {"gameId": GID, "settings": {"language": "Klingon"}}
         with self.assertRaises(Failure): community.save(self.c)
 
+    def test_audio_latency(self):
+        # 声音延迟（11-14 维护者收 PR #1066 进启动设置）：标准不设变量（设备默认）；低 / 最低 = 请求设备 IO 缓冲 128 / 32 帧；不在表里的值拒收
+        self.assertNotIn("S2A_AUDIO_BUFFER_FRAMES", community.launch_env(self.c, GID))
+        for v, frames in (("low", "128"), ("lowest", "32")):
+            self.c.r = {"gameId": GID, "settings": {"audioLatency": v}}; community.save(self.c)
+            self.assertEqual(community.launch_env(self.c, GID)["S2A_AUDIO_BUFFER_FRAMES"], frames)
+        self.c.r = {"gameId": GID, "settings": {"audioLatency": "standard"}}; community.save(self.c)
+        self.assertNotIn("S2A_AUDIO_BUFFER_FRAMES", community.launch_env(self.c, GID))
+        self.c.r = {"gameId": GID, "settings": {"audioLatency": "16"}}
+        with self.assertRaises(Failure): community.save(self.c)
+
     def test_game_language_ios_same_as_table(self):
         # 游戏语言 iOS 下拉（ios/settings.m s2a_ios_game_languages、ios/app_settings.m 的标签）与定义表 language 的 options 同值同序、条数相同；
         #   每个值都是宿主 SystemLanguage 枚举名（compat/tree/.../SystemLanguage.cs）、iOS 平台在表里声明了
@@ -173,7 +184,7 @@ class MacDisplayTests(unittest.TestCase):
     def test_every_mac_item_of_the_table_is_on_the_page(self):
         # 定义表里 platforms 含 mac 的 bool / choice 项 = enhance fps60 widescreen docked rumble rumbleLevel motion hud（11-13 widenForce 并进 widescreen）
         self.caps()
-        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "fpsPick", "widescreen", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "pauseUnfocused", "diagRun"]))
+        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "fpsPick", "widescreen", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "pauseUnfocused", "audioLatency", "diagRun"]))
 
     def test_fps_pick_level(self):
         # 帧率档位（11-13）：包里帧率补丁（编号 fps:）目标帧率两档以上才出；选具体档 → S2A_FPS_PICK=档，选自动（"0"）不写；表外取值拒收
