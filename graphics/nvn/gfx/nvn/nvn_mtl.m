@@ -3176,6 +3176,12 @@ static unsigned g_up_seq;
 // not fit after that continues in fresh blocks of UP_BLOCK_SIZE as before
 #define UP_SLOT_BLOCK (4u * 1024u * 1024u)
 static __strong id<MTLBuffer> g_up_slot_blk[3]; static unsigned g_up_cur_slot;
+// Deswizzle parameter cells (Metal 4 has no setBytes): 64 bytes each, cut from a 64 KB shared block. Read only by the upload batch that recorded them, so they live like that batch's staging:
+//   each slot has its own block, reused once up_begin has waited for the slot's previous batch; a block filled within a batch goes to g_up_keep and is retired when the batch has run (up_flush).
+//   It used to be one block for all batches, replaced when full and released by defer_obj_release, i.e. after the next replay submission: that says nothing about the upload batches still
+//   reading it (Metal 4 orders neither their completion against it nor a block shared by several batches), and a released block leaves the residency set — two player reports (Mac and iPad,
+//   both GPU address faults right after a run of first texture uploads) match it
+static __strong id<MTLBuffer> g_up_slot_pblk[3]; static id<MTLBuffer> g_up_pblock; static size_t g_up_pblock_off;
 typedef struct {
     __unsafe_unretained id<MTLBuffer> src;
     size_t off, row, image;
@@ -3236,6 +3242,7 @@ static void up_flush(void) {
     // open submission does not reach until it ends, so batches flushed at UP_KEEP_CAP inside one submission still kept every block (a frame replay grew past 37 GB)
     NSMutableArray *kept = g_up_keep.count ? [g_up_keep mutableCopy] : [NSMutableArray array];
     if (g_up_block && g_up_block != g_up_slot_blk[slot]) [kept addObject:g_up_block];   // the slot's own block stays (UP_SLOT_BLOCK)
+    if (g_up_pblock && g_up_pblock != g_up_slot_pblk[slot]) [kept addObject:g_up_pblock];   // likewise the parameter block (the slot's own stays)
     id o = fb_new();
     atomic_fetch_add(&g_up_pending, 1);
     fb_add(o, ^(id<MTL4CommitFeedback> f) {
@@ -3257,6 +3264,7 @@ static void up_flush(void) {
     if (g_m3) rec_commit_m3(cb, o, nil, 0, 0);
     else { [cb endCommandBuffer]; rec_commit_upload(cb, o); }
     g_up_cb = nil; g_up_block = nil; g_up_block_off = g_up_block_size = 0;   // the block and the kept staging are retired by the upload's completion above
+    g_up_pblock = nil; g_up_pblock_off = 0;   // the next batch starts on its slot's parameter block
     [g_up_keep removeAllObjects]; g_up_keep_bytes = 0;
     up_diag();
     g_nup_blits = 0; g_nup_decs = 0;
@@ -3334,14 +3342,20 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
     return g_up_block;
 }
 
-// Deswizzle parameter blocks: 64 bytes per cell, cut sequentially from a 64 KB shared-storage block; a full block is replaced by a new one, and the old block is released lazily by fence
-static id<MTLBuffer> g_up_pblock; static size_t g_up_pblock_off;
-static id<MTLBuffer> up_param_alloc(size_t *off) {
-    if (!g_up_pblock || g_up_pblock_off + 64 > g_up_pblock.length) {
-        if (g_up_pblock) defer_obj_release(g_up_pblock);
-        g_up_pblock = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared];
-        if (!g_up_pblock) MDIE("failed to create the deswizzle parameter block");
-        res_add(g_up_pblock); g_up_pblock_off = 0;
+static id<MTLBuffer> up_pblock_new(void) {
+    id<MTLBuffer> b = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared];
+    if (!b) MDIE("failed to create the deswizzle parameter block");
+    res_add(b); return b;
+}
+static id<MTLBuffer> up_param_alloc(size_t *off) {   // inside an open upload batch (up_begin); see g_up_slot_pblk
+    if (!g_up_pblock) {
+        __strong id<MTLBuffer> *sb = &g_up_slot_pblk[g_up_cur_slot];
+        if (!*sb) *sb = up_pblock_new();
+        g_up_pblock = *sb; g_up_pblock_off = 0;
+    }
+    if (g_up_pblock_off + 64 > g_up_pblock.length) {
+        if (g_up_pblock != g_up_slot_pblk[g_up_cur_slot]) up_keep_add(g_up_pblock);   // cells of this batch only: retired when the batch has run
+        g_up_pblock = up_pblock_new(); g_up_pblock_off = 0;
     }
     *off = g_up_pblock_off; g_up_pblock_off += 64;
     return g_up_pblock;
@@ -15516,7 +15530,7 @@ static void nvn_mem_detail(unsigned long long frame) {
         pthread_mutex_lock(&g_deferred_mu);
         for (NvDeferredRelease *d in g_deferred) if (d->object) [snap[MU_DEFERRED] addObject:d->object];
         pthread_mutex_unlock(&g_deferred_mu);
-        for (int i = 0; i < 3; i++) if (g_up_slot_blk[i]) [snap[MU_UPLOAD] addObject:g_up_slot_blk[i]];
+        for (int i = 0; i < 3; i++) { if (g_up_slot_blk[i]) [snap[MU_UPLOAD] addObject:g_up_slot_blk[i]]; if (g_up_slot_pblk[i]) [snap[MU_UPLOAD] addObject:g_up_slot_pblk[i]]; }
         if (g_up_block) [snap[MU_UPLOAD] addObject:g_up_block];
         for (id b in g_up_keep) if (b) [snap[MU_UPLOAD] addObject:b];
         for (NvArena *a in g_arenas) if (a->buf) [snap[MU_ARENAS] addObject:a->buf];
