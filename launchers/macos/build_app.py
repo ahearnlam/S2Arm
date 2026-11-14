@@ -11,7 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
-from bundle_engine import bundle
+from bundle_engine import bundle, seal_runtime
 from runtime_audit import verify_minimum_macos, verify_portable_runtime
 import runtime_sources
 from bundle_runtime import TOOLS, runtime_deps_fingerprint
@@ -222,6 +222,7 @@ def main():
         subprocess.run([os.sys.executable, str(ROOT / "launchers/macos/bundle_runtime.py")], env=env, check=True)
     verify_portable_runtime(runtime)
     shutil.copytree(runtime, resources / "Runtime", symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    seal_runtime(resources)   # 预编 .pyc 签进包 + 内置 Python 关写字节码：运行时谁调都写不进包（Engine 在 bundle 里写清单前预编）
     bundle(resources / "Engine", args.developer_dir)
     bundle_shell(resources / "Engine/engine.json", resources / "Shell", env)
     info = dict(**frontend_layout.info_identity(front), CFBundlePackageType="APPL",
