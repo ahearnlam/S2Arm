@@ -197,8 +197,9 @@ public sealed partial class EnvironmentWindow
         else if (page == "phoneupdate") contentBody.Children.Add(Card(PhoneUpdateCard()));   // 更新手机上的 S2Arm（InstallModePage.cs）
         else RenderInstall(contentBody);
 
-        // 底部操作栏
-        var bottomBar = RenderBottomBar();
+        // 底部操作栏：出包选择页、装机页左上角已有同去游戏库的「← 游戏库」，不再在底栏重复一个（11-14 体验梳理）；
+        //   进度页（停止 / 回游戏库）与手机更新页（没有别的返回入口）照旧
+        var bottomBar = page is "build" or "install" ? null : RenderBottomBar();
 
         // 出包 / 进度 / 装机页没有游戏库页那条顶栏：胶囊放在这些页顶部，在哪页都找得回装机（#308）；装机进度事件只刷新胶囊这一格
         Control? top = PhonePill() is null ? null
