@@ -301,23 +301,49 @@ def resolve_path(path):
         absolute = Path(os.path.abspath(path))
         if not absolute.anchor or absolute.anchor.startswith("\\\\"):
             raise
-        current = Path(absolute.anchor)
-        for part in absolute.parts[1:]:
-            current /= part
-            try:
-                info = current.lstat()
-            except FileNotFoundError:
-                break
-            except OSError:
-                raise error
-            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
-                raise error
+        try:
+            linked = _links_on_path(absolute)
+        except OSError:
+            raise error
+        if linked:
+            raise error
         return absolute
 
 
+def _links_on_path(absolute):
+    """从盘根往下逐级 lstat 现存的各级：有符号链接 / junction（重解析点）→ True；读不了的一级抛 OSError（由调用方决定怎么报）"""
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return False
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+            return True
+    return False
+
+
+def _letter_drive(path):
+    return len(path.drive) == 2 and path.drive[1] == ":"
+
+
 def resolve_library_path(path):
-    """Resolve a selected library root, including mounted volumes with unsupported final-path queries."""
-    return resolve_path(path)
+    """玩家选的游戏库根：存、显示、往下拼路径都用玩家写的样子。
+    Windows 映射网络驱动器（Z: 盘 → NAS 共享）经 resolve 会被换成 UNC 内网地址：库根写进索引、回给前端显示的就成了「\\\\192.168.x.x\\…」，
+    玩家看到盘符被换掉（11-14 维护者转 NAS 玩家）。所以盘符写法解析成 UNC 时保留盘符（路上没有符号链接 / junction 才留，有就照解析结果）；
+    别的情况同 resolve_path。判「是不是同一位置 / 越不越界」一律两边都过 resolve_path 再比（contained），不拿这里的结果直接和解析过的路径比"""
+    resolved = resolve_path(path)
+    if not _windows():
+        return resolved
+    absolute = Path(os.path.abspath(Path(path).expanduser()))
+    if _letter_drive(absolute) and not _letter_drive(resolved):
+        try:
+            if not _links_on_path(absolute):
+                return absolute
+        except OSError:
+            pass
+    return resolved
 
 
 def contained(root, path):

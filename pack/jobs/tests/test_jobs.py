@@ -164,6 +164,33 @@ class JobsTests(unittest.TestCase):
                 core.resolve_path(self.root / "library")
         self.assertIs(caught.exception, error)
 
+    @unittest.skipUnless(os.name == "nt", "盘符 / UNC 只有 Windows 有（Windows 实机上跑）")
+    def test_library_keeps_mapped_drive_letter(self):
+        # 映射网络驱动器（Z: → \\NAS\share）：Path.resolve 换成内网地址。库根保留玩家选的盘符写法（存、显示、拼路径），
+        #   判越界照样按解析结果比；路上有 junction 时不保留（没法确认它指哪）
+        import core
+        real = Path(os.path.realpath(self.root)) / "nas-library"
+        (real / "games").mkdir(parents=True)
+        unc = Path(r"\\nas\share\nas-library")
+        resolve = Path.resolve
+
+        def as_unc(path, *args, **kwargs):
+            path = Path(os.path.abspath(path))
+            if path == real or real in path.parents:
+                return unc / path.relative_to(real)
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", as_unc):
+            self.assertEqual(core.resolve_library_path(real), real)
+            self.assertEqual(core.resolve_path(real), unc)
+            self.assertEqual(core.contained(real, real / "games"), unc / "games")
+            context = Context(dict(self.request, taskId=str(uuid.uuid4()), privateRoot=str(self.root / "private-nas"), library=str(real)))
+            self.assertEqual(context.library, real)
+            target = real / "elsewhere"
+            target.mkdir()
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(real / "junction"), str(target)], check=True, capture_output=True)
+            self.assertEqual(core.resolve_library_path(real / "junction"), unc / "junction")
+
     def catalogue(self, games):
         atomic(self.c.library / "catalog.json", dict(schema=1, games=games))
 
