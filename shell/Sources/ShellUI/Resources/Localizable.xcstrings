@@ -13851,12 +13851,12 @@
         }
       }
     },
-    "In a game: **top-left gear → S-grade → Cheats**, then switch on the ones you want. Each takes effect in about a second.": {
+    "In a game: **top-left gear → S-grade enhancements → Cheats**, then switch on the ones you want. Each takes effect in about a second.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "In a game: **top-left gear → S-grade → Cheats**, then switch on the ones you want. Each takes effect in about a second."
+            "value": "In a game: **top-left gear → S-grade enhancements → Cheats**, then switch on the ones you want. Each takes effect in about a second."
           }
         },
         "zh-Hans": {
