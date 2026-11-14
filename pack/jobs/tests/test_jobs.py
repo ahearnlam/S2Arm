@@ -994,6 +994,19 @@ class JobsTests(unittest.TestCase):
         with zipfile.ZipFile(destination) as archive:
             self.assertIn("manifest.json", archive.namelist())
 
+    def test_direct_check_cli_never_blocks(self):
+        # 不许堵门（11-14，诊断 D-QDK9）：开工前空间预估不够只提示、不拦。期望手写：预估不够 → 退 0、打一行【黄】带原句与「照常开编」；
+        #   够 → 退 0、不打字；复核自己抛异常 → 退 2（direct_lib.sh 记黄照编）
+        import space_rule, contextlib, io
+        for why, rc, want in (("磁盘空间不足：直连库预计还要 15.0 GB", 0, "【黄】磁盘空间不足：直连库预计还要 15.0 GB：这是预估，照常开编"), (None, 0, "")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                got = space_rule.cli(["direct-check", "r", "c", "o"], check=lambda *a, w=why: w)
+            self.assertEqual(got, rc); self.assertTrue(out.getvalue().startswith(want) if want else out.getvalue() == "", out.getvalue())
+        def boom(*a): raise OSError("x")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(space_rule.cli(["direct-check", "r", "c", "o"], check=boom), 2)
+
     def test_direct_check_counts_existing_cache_and_volume(self):
         # 直连阶段开工前复核（pack/jobs/space_rule.py direct_check）与出包预检同一规则：游戏内容（romfs + exefs + aoc）≥ 3e9 → 15e9、小于 → 5e9；
         #   已有的同款直连缓存扣掉；期望按 library.py 的两档常量手算
