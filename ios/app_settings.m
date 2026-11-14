@@ -188,8 +188,20 @@ static UILabel *textLabel(UIFontTextStyle style) {
 - (void)openDeveloper {
     if (self.navigationController.topViewController != self) { LOG("设置页：开发者页没开（最上层不是设置页）"); return; }
     LOG("设置页：打开开发者页");
-    S2ASettingsPane *page = [S2ASettingsPane new]; page.owner = self; page.groups = @[@2]; page.title = S2AL(@"settings.group.dev");
-    page.view.backgroundColor = UIColor.systemGroupedBackgroundColor; page.navigationItem.rightBarButtonItem = self.navigationItem.rightBarButtonItem;
+    // 和主页面同一种底：系统材质铺满，表格最宽 620 居中、放在安全区里（不铺到导航栏下面）
+    S2ASettingsPane *pane = [S2ASettingsPane new]; pane.owner = self; pane.groups = @[@2];
+    UIViewController *page = [UIViewController new]; page.title = S2AL(@"settings.group.dev");
+    UIVisualEffectView *material = [[UIVisualEffectView alloc] initWithEffect:UIAccessibilityIsReduceTransparencyEnabled() ? nil : [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    material.backgroundColor = UIAccessibilityIsReduceTransparencyEnabled() ? UIColor.systemGroupedBackgroundColor : UIColor.clearColor;
+    material.frame = page.view.bounds; material.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [page.view addSubview:material];
+    [page addChildViewController:pane]; pane.view.translatesAutoresizingMaskIntoConstraints = NO; [page.view addSubview:pane.view]; [pane didMoveToParentViewController:page];
+    UILayoutGuide *safe = page.view.safeAreaLayoutGuide;
+    NSLayoutConstraint *fill = [pane.view.widthAnchor constraintEqualToAnchor:safe.widthAnchor]; fill.priority = UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[[pane.view.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor], [pane.view.widthAnchor constraintLessThanOrEqualToConstant:620], fill,
+        [pane.view.topAnchor constraintEqualToAnchor:safe.topAnchor], [pane.view.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor]]];
+    // 「完成」另建一个（同一个按钮对象挂在两页的导航条上，返回键会被挤到右边）
+    page.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:S2AL(@"common.done") style:UIBarButtonItemStyleDone target:self action:@selector(done)];
     [self.navigationController pushViewController:page animated:YES];
 }
 // 测试开关（真机自动化长按不了标题；同 diag.m S2A_OPEN_SETTINGS，环境变量只有 devicectl / Xcode 起 App 能给，玩家碰不到）：S2A_SETTINGS_DEV=1 一打开就进「开发者」页
@@ -207,7 +219,8 @@ static UILabel *textLabel(UIFontTextStyle style) {
         if ([cell.contentView viewWithTag:100] && [(UISlider *)[cell.contentView viewWithTag:100] isTracking]) return;
     }
     [_left.tableView reloadData]; [_right.tableView reloadData];
-    if ([self.navigationController.topViewController isKindOfClass:S2ASettingsPane.class]) [((S2ASettingsPane *)self.navigationController.topViewController).tableView reloadData];
+    for (UIViewController *child in self.navigationController.topViewController.childViewControllers)   // 开发者页开着时一起刷
+        if (child != _left && child != _right && [child isKindOfClass:S2ASettingsPane.class]) [((S2ASettingsPane *)child).tableView reloadData];
 }
 - (void)showError:(NSString *)message {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"settings.error.title") message:message preferredStyle:UIAlertControllerStyleAlert];
