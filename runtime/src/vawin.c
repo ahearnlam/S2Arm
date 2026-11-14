@@ -96,7 +96,9 @@ static const char *tier_why(int on, int low, uint64_t seen, int died) {
          : low ? "池大于剩余、物理内存也装不下池 + 宿主估计：照样开（能玩下去优先），提示玩家内存可能不够"
          : on ? "池大于剩余、物理内存装得下：开" : "池不大于剩余：装得下、保持匿名内存";
 }
+static int g_low_tier;   // 这一局判在「物理内存也装不下」那档（s2a_guest_file_carve 只在这档挖物理映射区）
 static void low_ram_notice(uint64_t phys, uint64_t need) {
+    g_low_tier = 1;
     LOG("【黄】客体内存：这台设备物理内存 %llu MB，装不下这款要的约 %llu MB（池 + 宿主估计），照样开局；可能卡顿或被系统结束", (unsigned long long)(phys >> 20), (unsigned long long)(need >> 20));
     void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_ios_low_ram_notice"); if (f) f();   // ios/app.m：游戏内提示条；单测 / 安卓没有
 }
@@ -412,7 +414,7 @@ int s2a_guest_map_fixed(uint64_t a, uint64_t len) {
 //   11-13 Duo 正式游戏实测窗口脏页约 1.3 GB，最脏的 4 段里两段在别名区（各 130–185 MB）。放在文件里，物理内存小的机器（iPad 7.5 GB）脏页超回写阈值后
 //   这些每帧都被改写的页会被反复刷盘（那台 iPad 文件后备局每 10 秒写 2–3 GB）。别名区保持匿名：热页不进文件，只有游戏堆走文件后备。
 //   代价是这段的常驻页计进进程实占（Duo 正式游戏约 1.0–1.7 GB），iPad 档单进程上限 8 GB 装得下。下面两个口子按它分段：在这段里一律当「不在文件里」
-//   （svc_mem.c 的懒清零与还页就走匿名那套）。S2A_GUEST_FILE_CARVE=0 不挖（对照用）
+//   （svc_mem.c 的懒清零与还页就走匿名那套）。S2A_GUEST_FILE_CARVE=0 不挖、=1 强制挖（对照用）；缺省只在「物理内存也装不下」那档挖
 static uint64_t g_anon_lo, g_anon_hi;
 static int in_anon(uint64_t a, uint64_t n) { return g_anon_hi > g_anon_lo && a < g_anon_hi && a + n > g_anon_lo; }
 // 布局定下别名区后调（svc_mem.c，那时这段还没放开过）：与窗口的交集按宿主页向内取整，逐块确认仍是不可访问的保留（没有内容）才换成匿名占位
@@ -420,6 +422,9 @@ void s2a_guest_file_carve(uint64_t a, uint64_t n) {
     if (g_gfd < 0 || !n) return;
     const char *e = getenv("S2A_GUEST_FILE_CARVE");
     if (e && *e == '0') { LOG("客体内存文件后备：物理映射区照旧进文件（S2A_GUEST_FILE_CARVE=0，对照用）"); return; }
+    // 只在「物理内存也装不下」那档挖（11-13 维护者定）：大内存机（Duo 11.5 GB）文件后备本来不风暴，挖了反而让物理映射区约 1.7 GB 计进实占、抬高切后台时的底线。
+    //   S2A_GUEST_FILE_CARVE=1 强制挖（在大内存机上量改后读数用）
+    if (!(e && *e == '1') && !g_low_tier) { LOG("客体内存文件后备：物理映射区照旧进文件（物理内存装得下，不会被反复刷盘；只在内存不够那档改成匿名）"); return; }
     const uint64_t pg = 0x4000;
     uint64_t lo = a > g_base ? a : g_base, hi = a + n < g_base + g_size ? a + n : g_base + g_size;
     lo = (lo + pg - 1) & ~(pg - 1); hi &= ~(pg - 1);

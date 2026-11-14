@@ -45,7 +45,9 @@ int main(void) {
         s2a_guest_file_carve((uint64_t)(uintptr_t)q, 16u << 20);
         CHECK(s2a_guest_in_file((uint64_t)(uintptr_t)q, 0x4000) == 1, "⑥ 已放开过的段拒挖：照旧在文件里");
         s2a_guest_file_carve(C, CN);
-        CHECK(s2a_guest_in_file(C, 0x4000) == 0 && s2a_guest_in_file(C + CN - 0x4000, 0x4000) == 0, "⑥ 挖回的段首尾都不在文件里");
+        CHECK(s2a_guest_in_file(C, 0x4000) == 1, "⑥ 缺省（不是「物理内存也装不下」那档）不挖：照旧在文件里");
+        setenv("S2A_GUEST_FILE_CARVE", "1", 1); s2a_guest_file_carve(C, CN);
+        CHECK(s2a_guest_in_file(C, 0x4000) == 0 && s2a_guest_in_file(C + CN - 0x4000, 0x4000) == 0, "⑥ S2A_GUEST_FILE_CARVE=1 强制挖：挖回的段首尾都不在文件里");
         CHECK(s2a_guest_in_file(C - 0x4000, 0x4000) == 1 && s2a_guest_in_file(C + CN, 0x4000) == 1, "⑥ 紧挨着的段外照旧在文件里");
         CHECK(s2a_guest_zero(C, 0x4000) == 0, "⑥ 挖回的段还页不打洞（回 0，调用方换匿名占位）");
         uint8_t *c = (uint8_t *)(uintptr_t)C; size_t M = 64u << 20;
