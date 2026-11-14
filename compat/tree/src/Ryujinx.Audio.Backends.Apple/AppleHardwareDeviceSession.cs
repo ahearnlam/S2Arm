@@ -489,6 +489,10 @@ namespace Ryujinx.Audio.Backends.Apple
                 return result;
             }
 
+            // S2Arm (11-14 设备缓冲): 设备 IO 缓冲是出声延迟的地板——建队（起会话与自愈重建共用）先请求它，
+            //   再挂布局 / 分配缓冲。失败按原样继续（见 S2AApplyDeviceBufferFrames）
+            S2AApplyDeviceBufferFrames();
+
             // S2Arm（#189）：6 声道队列声明 5.1 布局（起会话与重建共用这条路径）：不声明时系统隐式 6→2 只复制
             //   FL/FR，中置（对白）与环绕整段丢失；真 5.1 设备声明后按布局直通。设置失败按无布局继续（打出【红】，
             //   行为同旧），真 5.1 设备探建时已验过布局可用。显式下混的队列是 2 声道（折叠已在前），不设布局
@@ -526,6 +530,66 @@ namespace Ryujinx.Audio.Backends.Apple
             Volatile.Write(ref _bufferSlots, bufferSlots);
 
             return 0;
+        }
+
+        // S2Arm (11-14 设备缓冲)：S2A_AUDIO_BUFFER_FRAMES = 16 的倍数（16–512）时，把输出设备的
+        //   kAudioDevicePropertyBufferFrameSize 请求成这个值。上游从不请求，设备回落自己的默认 IO 周期
+        //   （Mac 内置扬声器 512 帧 ≈ 10.7 ms @48k），这一个 IO 周期就是出声延迟的地板；本机实测设备收 16 帧
+        //   （≈ 0.33 ms，合法范围 15–4096）声音干净，交还节奏变密、audren 链路的延迟随之下降（PlaybackCredit
+        //   按实测 burst 自适应，不用改）。建队与自愈重建都走这里（路由切走后旧请求留在旧设备上，下次建队重新请求）。
+        //   注意：该属性是设备级——整机对这个设备的 IO 粒度都变小（其他 App 也一样），kAudioDevicePropertyBufferFrameSize
+        //   的固有语义，不是本后端能收窄的。失败（读设备号 / 设 / 读回）按设备默认继续（【红】记录，行为同旧）。
+        //   仅 macOS：iOS 没有 HAL 设备属性（IO 缓冲走 AVAudioSession 的 S2A_AUDIO_IO20 通道）。
+        private void S2AApplyDeviceBufferFrames()
+        {
+            if (!OperatingSystem.IsMacOS())
+            {
+                return;
+            }
+
+            int frames = AppleDeviceBufferFrames.FromEnvironment();
+
+            if (frames == 0)
+            {
+                return;
+            }
+
+            // 设备号：队列不选设备，AudioQueueNewOutput 缺省绑系统默认输出设备（'dOut'）。本机 macOS 26 实测
+            //   队列侧 kAudioQueueProperty_CurrentDevice（'aqcd'）读不出（-66683），从 AudioObject 系统对象取
+            AudioObjectPropertyAddress defaultOut = new()
+            {
+                Selector = kAudioHardwarePropertyDefaultOutputDevice,
+                Scope = kAudioObjectPropertyScopeGlobal,
+                Element = kAudioObjectPropertyElementMain
+            };
+            uint device = 0;
+            uint deviceSize = sizeof(uint);
+
+            if (AudioObjectGetPropertyData(kAudioObjectSystemObject, ref defaultOut, 0, nint.Zero, ref deviceSize, ref device) != 0 || device == 0)
+            {
+                Console.Error.WriteLine($"[声] 【红】输出 #{_diag.Index}：读默认输出设备号失败，设备缓冲 {frames} 帧没请求（按设备默认继续）");
+                return;
+            }
+
+            AudioObjectPropertyAddress address = new()
+            {
+                Selector = kAudioDevicePropertyBufferFrameSize,
+                Scope = kAudioObjectPropertyScopeGlobal,
+                Element = kAudioObjectPropertyElementMain
+            };
+            uint requested = (uint)frames;
+            int setRc = AudioObjectSetPropertyData(device, ref address, 0, nint.Zero, sizeof(uint), ref requested);
+            uint granted = 0;
+            uint readSize = sizeof(uint);
+            int getRc = AudioObjectGetPropertyData(device, ref address, 0, nint.Zero, ref readSize, ref granted);
+
+            if (setRc != 0 || getRc != 0 || granted == 0)
+            {
+                Console.Error.WriteLine($"[声] 【红】输出 #{_diag.Index}：设备缓冲请求 {frames} 帧失败（set rc={setRc}、读回 rc={getRc}、值 {granted}）：按设备默认继续");
+                return;
+            }
+
+            Console.Error.WriteLine($"[声] 输出 #{_diag.Index}：设备缓冲请求 {frames} 帧，设备实给 {granted} 帧 ≈ {granted * 1000.0 / RequestedSampleRate:F1} ms（设备级：整机对这个设备的 IO 粒度都变小）");
         }
 
         // S2Arm: the device side of DeviceBufferPump: pool buffer i is _audioQueueBuffers[i]

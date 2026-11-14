@@ -19,6 +19,7 @@ __attribute__((constructor)) static void cheats_register_host(void) { void (*f)(
 #include "ns2_controller.h"
 #include "hid_pad.h"
 #include "ns2_relay.h"
+#include "audio_buffer.h"   // 音频设备缓冲帧数的壳侧口径（s2a_buffer_frames_*，11-14 设备缓冲）
 #include <stdatomic.h>
 #include <stdint.h>
 #include <math.h>
@@ -1639,6 +1640,18 @@ static NSString *lan_warning(void) {
 - (NSView *)hitTest:(NSPoint)point { NSView *v = [super hitTest:point]; return [v isKindOfClass:NSButton.class] ? v : nil; }
 @end
 
+// ---- 音频设备缓冲（11-14 设备缓冲）----
+// 玩家口径与合法域在 macos/audio_buffer.h（单测 t_mac_audio_buf.c）：S2A_AUDIO_BUFFER_FRAMES = 16 的倍数（16–512），
+//   没设 / 不合法 = 0 = 跟随系统。C# 音频后端建队时对输出设备请求这个值（AppleHardwareDeviceSession.S2AApplyDeviceBufferFrames）。
+//   Mac 每局一个进程、C# 运行时先于本前端初始化（host_main.c：S2A_Init → 起游戏线程 → s2a_front_run）：菜单里选了
+//   只落 NSUserDefaults + 本进程 setenv（本局自愈重建队列时就能吃到）；下一局由构造期这里转回环境变量。
+//   显式环境变量优先（setenv 第三参 0，同 envfile.c / settings.m 口径）：开发 / 单测给的不覆盖。
+static NSString * const S2AMacAudioBufferFramesKey = @"S2AAudioBufferFrames";   // defaults 键（0 / 没设 = 默认）
+__attribute__((constructor)) static void s2a_mac_audio_buffer_env(void) {
+    NSInteger v = [NSUserDefaults.standardUserDefaults integerForKey:S2AMacAudioBufferFramesKey];
+    if (v > 0 && s2a_buffer_frames_valid((int)v)) { char b[12]; snprintf(b, sizeof b, "%ld", (long)v); setenv("S2A_AUDIO_BUFFER_FRAMES", b, 0); }
+}
+
 @interface S2AMacDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate>
 @property(strong) NSWindow *window;
 @property(strong) NSTimer *timer, *promptTimer;
@@ -1669,6 +1682,29 @@ static __weak S2AMacDelegate *g_delegate;
     s2a_pad_set_rumble_pair(session, pair);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{ s2a_pad_stop_rumble(session); });
+}
+// 菜单「声音 → 设备缓冲」（tag = 帧数）：落 defaults + 本进程 setenv / unsetenv。512（默认）档 = 清键 + 清环境
+//   （回到上游行为：不请求，设备给默认——内置扬声器就是 512 帧）；16–256 档落值。本局的队列不重建（看门狗自愈
+//   才重建，重建走 CreateQueue 照环境变量重新请求），常规生效时点是下一局起局——横幅说明
+- (void)setAudioBufferFrames:(NSMenuItem *)sender {
+    int v = (int)sender.tag;
+    if (v > 0 && v < 512) [NSUserDefaults.standardUserDefaults setInteger:v forKey:S2AMacAudioBufferFramesKey];
+    else [NSUserDefaults.standardUserDefaults removeObjectForKey:S2AMacAudioBufferFramesKey];
+    if (v > 0 && v < 512) {
+        char b[12]; snprintf(b, sizeof b, "%d", v);
+        setenv("S2A_AUDIO_BUFFER_FRAMES", b, 1);
+        fprintf(stderr, "[s2a] 菜单：音频设备缓冲 = %d 帧（下一局生效；本局自愈重建队列时同样请求）\n", v);
+    } else {   // 512（默认）与兜底 0：回到上游行为——不请求
+        unsetenv("S2A_AUDIO_BUFFER_FRAMES");
+        fprintf(stderr, "[s2a] 菜单：音频设备缓冲 = 默认（不请求，设备给默认）\n");
+    }
+    int zh = s2a_ui_zh();
+    NSString *body = (v > 0 && v < 512)
+        ? (zh ? [NSString stringWithFormat:@"设备缓冲 %d 帧，下次启动游戏后生效。", v]
+              : [NSString stringWithFormat:@"Device buffer %d frames; applies on next game launch.", v])
+        : (zh ? @"设备缓冲：默认（不请求，设备给默认），下次启动游戏后生效。"
+              : @"Device buffer: default (not requested, the device default applies); applies on next game launch.");
+    [self.banner showTitle:zh ? @"声音" : @"Sound" body:body accept:nil decline:nil seconds:8];
 }
 - (void)pollPrompt {
     ns2_status controller = s2a_mac_ns2_status();
@@ -1727,6 +1763,8 @@ static __weak S2AMacDelegate *g_delegate;
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (item.action == @selector(toggleFullScreenItem:))
         item.title = window_fullscreen(self.window) ? (s2a_ui_zh() ? @"退出全屏幕" : @"Exit Full Screen") : (s2a_ui_zh() ? @"进入全屏幕" : @"Enter Full Screen");
+    if (item.action == @selector(setAudioBufferFrames:))   // 菜单每次打开时按环境变量现算勾选（没设 = 默认档 512；显式环境给的值也如实反映）
+        item.state = (int)item.tag == s2a_buffer_frames_effective(getenv("S2A_AUDIO_BUFFER_FRAMES")) ? NSControlStateValueOn : NSControlStateValueOff;
     return YES;
 }
 - (void)windowWillEnterFullScreen:(NSNotification *)note { (void)note; self.windowedFrame = self.window.frame; }
@@ -1828,7 +1866,23 @@ void s2a_front_run(void (*guest_main)(void)) {
         fullScreen.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand; fullScreen.target = delegate;
         NSMenuItem *escHint = [viewMenu addItemWithTitle:s2a_ui_zh() ? @"全屏时 Esc 退出（Esc 映射了游戏按键时按住 1 秒）" : @"In full screen, Esc exits (hold 1 s if Esc is mapped to a game button)" action:NULL keyEquivalent:@""];
         escHint.enabled = NO;
-        viewRoot.submenu = viewMenu; [menu addItem:viewRoot]; app.mainMenu = menu;
+        viewRoot.submenu = viewMenu; [menu addItem:viewRoot];
+        // 「声音」菜单（11-14 设备缓冲）：设备 IO 缓冲帧数下拉。上游从不请求，设备回落默认 512 帧（≈10.7 ms），
+        //   这一个 IO 周期是出声延迟的地板；玩家在 6 档里选（512 默认 / 256 / 128 / 64 / 32 / 16——16 的倍数里
+        //   取 2 的幂，档位多了难挑），下一局建队时请求（设备级属性：整机对这个设备的 IO 粒度都变小，
+        //   CPU 占用随之上升）。勾选照环境变量现算（validateMenuItem；没设 = 默认档 512）
+        NSMenuItem *audioRoot = [NSMenuItem new]; NSMenu *audioMenu = [[NSMenu alloc] initWithTitle:s2a_ui_zh() ? @"声音" : @"Sound"];
+        NSMenuItem *abHint = [audioMenu addItemWithTitle:s2a_ui_zh() ? @"设备缓冲帧数：小 = 延迟低、CPU 高；下次启动游戏生效" : @"Device buffer (frames): lower = less latency, higher CPU; applies on next game launch" action:NULL keyEquivalent:@""];
+        abHint.enabled = NO;
+        [audioMenu addItem:NSMenuItem.separatorItem];
+        for (const int *f = (const int[]){512, 256, 128, 64, 32, 16}, *end = f + 6; f < end; f++) {
+            NSString *title = *f == 512
+                ? (s2a_ui_zh() ? @"512（默认）" : @"512 (default)")
+                : (s2a_ui_zh() ? [NSString stringWithFormat:@"%d 帧", *f] : [NSString stringWithFormat:@"%d frames", *f]);
+            NSMenuItem *it = [audioMenu addItemWithTitle:title action:@selector(setAudioBufferFrames:) keyEquivalent:@""];
+            it.target = delegate; it.tag = *f;
+        }
+        audioRoot.submenu = audioMenu; [menu addItem:audioRoot]; app.mainMenu = menu;
         NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1280, 720)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
             backing:NSBackingStoreBuffered defer:NO];
