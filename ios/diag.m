@@ -6,7 +6,7 @@
 //       manifest.json、logs/host.log + logs/host-<起局时刻>.log（本局 + 机上归档的最近 9 局；单份超 8 MB 只留头 2 MB + 尾 6 MB）、
 //       logs/frames.tsv、logs/threads.txt、logs/unpack.log（有就放）、metrickit/*.json（MetricKit 崩溃 / 卡顿诊断原样 JSON）、
 //       shaders/*（现编着色器的输入：编到一半进程没了留下的 .inflight.*、翻译器报错留下的 .fail.*，有就放）、
-//       diagrun/*.png（诊断局的出图与颜色目标，总量 ≤ 20 MB）。
+//       diagrun/*.png（诊断局的出图与颜色目标，总量 ≤ 20 MB）、pso/<程序号>.tsv（本机管线记录，只有着色器键，总量 ≤ 8 MB）。
 //   脱敏：App 数据目录 / 安装目录换成 <APP> / <BUNDLE>，设备名、UDID 去掉；存档（bis/user/save）、资源包、密钥都不放。
 //   交出（11-13 起）：入口②③④是「上传给开发者」——传到 diag.s2arm.com，玩家拿到短码、只复制短码；上传失败退回系统分享面板（AirDrop / 存到文件 / 微信）。
 //         入口①仍直接弹分享面板。包同时留在 Documents/diag/（只留最近 3 个，Mac 前端「拉回诊断」能拉到）。
@@ -242,6 +242,28 @@ static NSURL *build_zip(NSUInteger cap, BOOL slim, NSString **err) {
             NSString *rel = [NSString stringWithFormat:@"diagrun/%@_%@", file_safe(e[0]), f];
             [fm createDirectoryAtPath:[W stringByAppendingPathComponent:@"diagrun"] withIntermediateDirectories:YES attributes:nil error:nil];
             if ([fm copyItemAtPath:src toPath:[W stringByAppendingPathComponent:rel] error:nil]) { [files addObject:@{@"path": rel, @"bytes": @(n), @"truncated": @NO}]; used += n; }
+        } }
+    // 本机管线记录（11-13 维护者：玩家上传的诊断收进随包种子；取件 diag_pickup.py harvest_pso 收进众包 zc_crowd.tsv）：多款容器各款 games/<号>/wire/<号>/pso_user.tsv、
+    //   单款包 wire/<号>/pso_user.tsv（nvn_mtl.m pso_user_path），原样放 pso/<号>.tsv——只有着色器键与管线状态的十六进制，不含个人信息、不过脱敏。
+    //   单份超过 4 MB 跳过、合计至多 8 MB；同一款只放一份（多款容器那份优先）
+    {   NSMutableArray *srcs = [NSMutableArray array];
+        NSString *G = [D stringByAppendingPathComponent:@"games"], *Wd = [D stringByAppendingPathComponent:@"wire"];
+        for (NSString *gid in [[fm contentsOfDirectoryAtPath:G error:nil] sortedArrayUsingSelector:@selector(compare:)])
+            [srcs addObject:@[gid, [[[[G stringByAppendingPathComponent:gid] stringByAppendingPathComponent:@"wire"] stringByAppendingPathComponent:gid] stringByAppendingPathComponent:@"pso_user.tsv"]]];
+        for (NSString *gid in [[fm contentsOfDirectoryAtPath:Wd error:nil] sortedArrayUsingSelector:@selector(compare:)])
+            [srcs addObject:@[gid, [[Wd stringByAppendingPathComponent:gid] stringByAppendingPathComponent:@"pso_user.tsv"]]];
+        NSCharacterSet *notHex = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789ABCDEF"] invertedSet];
+        NSMutableSet *seen = [NSMutableSet set]; unsigned long long used = 0;
+        for (NSArray *e in srcs) {
+            NSString *gid = [e[0] uppercaseString];
+            if (gid.length != 16 || [gid rangeOfCharacterFromSet:notHex].location != NSNotFound || [seen containsObject:gid]) continue;
+            NSDictionary *at = [fm attributesOfItemAtPath:e[1] error:nil];
+            if (![at.fileType isEqualToString:NSFileTypeRegular]) continue;   // 不跟链接
+            unsigned long long n = at.fileSize;
+            if (!n || n > (4ull << 20) || used + n > (8ull << 20)) continue;
+            NSString *rel = [NSString stringWithFormat:@"pso/%@.tsv", gid];
+            [fm createDirectoryAtPath:[W stringByAppendingPathComponent:@"pso"] withIntermediateDirectories:YES attributes:nil error:nil];
+            if ([fm copyItemAtPath:e[1] toPath:[W stringByAppendingPathComponent:rel] error:nil]) { [files addObject:@{@"path": rel, @"bytes": @(n), @"truncated": @NO}]; used += n; [seen addObject:gid]; }
         } }
     if (copyFailed) {
         [fm removeItemAtPath:W error:nil];

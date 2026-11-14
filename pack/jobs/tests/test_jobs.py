@@ -298,6 +298,16 @@ class JobsTests(unittest.TestCase):
             with um.patch.object(self.c, "run", fake("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")):
                 with self.assertRaises(Failure) as e: library.inspect(self.c, self.root / "a.xci", self.root, keys)
                 self.assertIs(str(e.exception), library.KEYS_CANNOT_DECRYPT)
+            # #1008：读取器给了确定原因（哈希校验不过）→ 照原话报，不落三选一猜测。期望手写：原话前加「无法读取游戏内容：」、码 content_unreadable
+            hash_line = "【原因 hash_mismatch】源文件数据哈希校验不过（ResultFsNonRealDataVerificationFailed (2002-4604): Hash error!）：文件被改过（如合进改版资源的整合版）或损坏，换一份原版完整的文件"
+            def fake2(*msgs):
+                def run(args, log=None, env=None, cwd=None, on_line=None):
+                    for m in msgs: on_line(m)
+                    raise Failure("S2Arm 工具退出，当前阶段未完成。")
+                return run
+            with um.patch.object(self.c, "run", fake2("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.", hash_line)):
+                with self.assertRaises(Failure) as e: library.inspect(self.c, self.root / "a.xci", self.root, keys)
+                self.assertEqual((str(e.exception), e.exception.code), ("无法读取游戏内容：" + hash_line.split("】", 1)[1], "content_unreadable"))
             with um.patch.object(self.c, "run", fake("Unhandled exception: disk full")):
                 with self.assertRaises(Failure) as e: library.inspect(self.c, self.root / "a.xci", self.root, keys)
                 self.assertEqual(str(e.exception), "S2Arm 工具退出，当前阶段未完成。")
@@ -917,6 +927,25 @@ class JobsTests(unittest.TestCase):
             self.assertIn("logs/t1-degrade.log", archive.namelist())
             self.assertEqual(json.loads(archive.read("manifest.json"))["degrade_summary"], {"t1": {"rewrite/x18": 30, "direct/lazy": 5}})
 
+    def test_diagnostics_carries_pipeline_records(self):
+        # 本机管线记录（11-13 维护者：诊断收进众包种子）：游戏库里各款 temp/<号>/wire/<号>/pso_user.tsv 原样进 pso/<号>.tsv；没跑过（没这份）的不放；
+        #   空文件、超过 4 MB 的、链接都不放。期望按规则手写
+        import zipfile
+        A, B, C, D = "0100AAAA00000000", "0100BBBB00000000", "0100CCCC00000000", "0100DDDD00000000"
+        atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id=g, name=g) for g in (A, B, C, D)]))
+        def rec(g, data):
+            f = self.c.library / "temp" / g / "wire" / g / "pso_user.tsv"; f.parent.mkdir(parents=True, exist_ok=True); f.write_bytes(data); return f
+        rec(A, b"S\t0123456789abcdef_b\t1\nC\t1111222233334444_b\n")
+        rec(C, b"")
+        rec(D, b"x" * ((4 << 20) + 1))
+        destination = self.root / "diag-pso.zip"; destination.unlink(missing_ok=True); self.c.r["path"] = str(destination)
+        library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            names = sorted(n for n in archive.namelist() if n.startswith("pso/"))
+            self.assertEqual(names, [f"pso/{A}.tsv"])
+            self.assertEqual(archive.read(f"pso/{A}.tsv"), b"S\t0123456789abcdef_b\t1\nC\t1111222233334444_b\n")
+            self.assertIn(f"pso/{A}.tsv", json.loads(archive.read("manifest.json"))["files"])
+
     def test_diagnostics_player_note(self):
         # 故障报修的可选文本框（11-13 维护者）：请求带 note 就原样（去首尾空白）进 manifest.json 的 note，收件服务与 iOS 同字段；不填 / 空白不写
         import zipfile
@@ -928,6 +957,24 @@ class JobsTests(unittest.TestCase):
             library.diagnostics(self.c)
             with zipfile.ZipFile(destination) as archive:
                 self.assertEqual(json.loads(archive.read("manifest.json")).get("note"), expect)
+
+    def test_diagnostics_names_the_game(self):
+        # 11-14 诊断#e68047：Mac / Windows 诊断包 manifest 没有 game.title_id，报告程序号成了「-」，不同游戏的停帧被并成一单。
+        #   只认导出请求带的游戏号（启动器「故障报修」传玩家选中的那款）；没带就不写——任务记录里最近玩的那款也不拿来猜
+        import zipfile
+        jobs = self.c.jobpath.parent; jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "mid.json").write_text(json.dumps({"id": "mid", "operation": "play", "state": "completed", "gameId": "0100F2C0115B6000"}), encoding="utf-8")
+        def game_of():
+            destination = self.root / "diag-game.zip"; destination.unlink(missing_ok=True); self.c.r["path"] = str(destination)
+            library.diagnostics(self.c)
+            with zipfile.ZipFile(destination) as archive:
+                return json.loads(archive.read("manifest.json")).get("game")
+        for given, expect in ((None, None), ("", None), ("not-a-title", None), ("0400a3a01ee4c000", {"title_id": "0400A3A01EE4C000"})):
+            self.c.r.pop("gameId", None)
+            if given is not None:
+                self.c.r["gameId"] = given
+            self.assertEqual(game_of(), expect, given)
+        self.c.r.pop("gameId", None)
 
     def test_diagnostics_export_to_volume_whose_new_files_change_inode(self):
         # exFAT / FAT（macOS 驱动）：新文件写入数据、分到存储后 inode 号会变（本机 exFAT 镜像实测：mkstemp 后 18446744073709404714，写完 32987）。
@@ -1240,6 +1287,19 @@ class JobsTests(unittest.TestCase):
         output = library.catalog(self.c)
         self.assertEqual([j.get("id") for j in output["jobs"]], ["older"])
         self.assertTrue(all("state" in j for j in output["jobs"]))
+
+    def test_catalogue_skips_exfat_sidecars_and_unreadable_job_records(self):
+        # #1010：数据目录在 exFAT 上搬过，每条记录旁多一份 ._<名>.json（AppleDouble，头 00 05 16 07，非 UTF-8）；
+        #   原先 read() 抛 UnicodeDecodeError，整个游戏库刷新失败。附属文件跳过；正常名字但读不出的那一条也只跳过它自己
+        self.catalogue([self.game(packages=[self.package()])])
+        jobs = self.c.jobpath.parent
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "older.json").write_text(json.dumps({"id": "older", "operation": "build", "state": "failed"}), encoding="utf-8")
+        junk = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        \x81\xb0\x8d\x90"
+        (jobs / "._older.json").write_bytes(junk)
+        (jobs / "broken.json").write_bytes(junk)
+        output = library.catalog(self.c)
+        self.assertEqual([j.get("id") for j in output["jobs"]], ["older"])
 
     def test_catalogue_returns_only_newest_job_records(self):
         # 11-07：任务目录 1.5 万条记录时 catalog 整份读 + 回传 7 MB；只回最新 JOB_LIST_LIMIT 条（按修改时间）
@@ -2030,6 +2090,27 @@ class JobsTests(unittest.TestCase):
             self.assertTrue(m["pulledAt"]); self.assertEqual(m["devices"][0]["model"], "iPhone 17 Pro Max"); self.assertEqual(m["devices"][0]["os"], "27.3")
             self.assertNotIn("合成甲", json.dumps(m, ensure_ascii=False)); self.assertNotIn("U1", json.dumps(m))   # 不记设备名、设备号
             self.assertEqual(m["files"], 3); self.assertTrue(any(x.endswith("diag/blob.bin") for x in m["skipped"]))
+
+    def test_diagnostics_collect_recent_mac_crash_reports(self):
+        """诊断#43f7d3：宿主起局 1 秒内 SIGTRAP、没走到写日志，包里没现场。导出时收本机 ~/Library/Logs/DiagnosticReports 里我们进程的 .ips。
+        期望手写：收 s2arm-host / S2ArmApple 近 7 天的两份（脱敏）；8 天前的、别的 App 的不收；超 4 MB 的跳过并写名字；manifest 计数对"""
+        import unittest.mock as um, os, sys, time as t
+        rep = self.root / "DiagnosticReports"; rep.mkdir()
+        (rep / "s2arm-host-2026-11-14-101500.ips").write_text('{"exception": "EXC_BREAKPOINT", "path": "/Users/Synthetic/x", "mail": "synth@example.invalid"}')
+        (rep / "S2ArmApple-2026-11-14-101600.ips").write_text('{"app": "launcher"}')
+        old = rep / "s2arm-host-2026-11-01-090000.ips"; old.write_text("old"); os.utime(old, (t.time() - 8 * 86400, t.time() - 8 * 86400))
+        (rep / "Finder-2026-11-14-101700.ips").write_text("other app")
+        big = rep / "s2arm-host-2026-11-14-101800.ips"; big.write_bytes(b"x" * (library.MAC_CRASH_FILE_LIMIT + 1))
+        destination = self.root / "diagnostics.zip"; self.c.r["path"] = str(destination)
+        with um.patch.object(library, "MAC_CRASH_DIR", rep), um.patch.object(sys, "platform", "darwin"):
+            library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            crash = sorted(n for n in archive.namelist() if n.startswith("mac_crash/"))
+            self.assertEqual(crash, ["mac_crash/S2ArmApple-2026-11-14-101600.ips", "mac_crash/s2arm-host-2026-11-14-101500.ips"])
+            text = archive.read("mac_crash/s2arm-host-2026-11-14-101500.ips").decode()
+            self.assertIn("EXC_BREAKPOINT", text); self.assertNotIn("synth@example.invalid", text); self.assertNotIn("/Users/Synthetic", text)
+            m = json.loads(archive.read("manifest.json"))["mac_crash_reports"]
+            self.assertEqual((m["found"], m["files"], m["skipped"]), (3, 2, ["s2arm-host-2026-11-14-101800.ips"]))
 
     def test_diagnostic_manifest_and_every_member_are_redacted_without_truncation(self):
         import platform

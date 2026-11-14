@@ -405,7 +405,7 @@ public sealed partial class EnvironmentWindow
     private async Task ExportDiagnosticsAsync()
     {
         if (connectedFolder is null || libraryId is null || libraryBusy) return;
-        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = T("game.diag"), SuggestedFileName = $"S2Arm-{(language == "en" ? "diag" : "诊断")}-{DateTime.Now:MMdd-HHmm}.zip", DefaultExtension = "zip" });
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = T("diag.upload.export"), SuggestedFileName = $"S2Arm-{(language == "en" ? "diag" : "诊断")}-{DateTime.Now:MMdd-HHmm}.zip", DefaultExtension = "zip" });
         if (file?.TryGetLocalPath() is not { } output) return;
         var front = BeginJob(JobKind.Library); librarySummary = "library.working"; Render();
         try
