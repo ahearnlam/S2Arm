@@ -22,11 +22,13 @@ uint64_t s2a_android_nvn_present_count(void) {
 #if defined(S2A_ANDROID_GAME_RUNTIME)
 #include "s2a_hostapi.h"
 #include "runtime/vm/memory.h"
+#include <android/log.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,6 +115,26 @@ static const struct s2a_wsi_api *window(void *token) {
 
 extern const char *s2a_android_gpu_driver_files_dir(void) __attribute__((weak));
 extern const char *s2a_android_gpu_driver_external_dir(void) __attribute__((weak));
+
+// 探针/选择过程的可靠日志：stderr 在 loadRuntime 早期不进 logcat，所以同时写 logcat 与
+// <external>/gpu_drivers/probe-result.txt（adb pull 可读）。只在有选择/探针时写。
+static void driver_log(const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "[vk-direct] %s\n", buf);
+    __android_log_print(ANDROID_LOG_INFO, "S2Arm", "[vk-direct] %s", buf);
+    const char *ext = s2a_android_gpu_driver_external_dir ? s2a_android_gpu_driver_external_dir() : NULL;
+    if (ext && ext[0] == '/') {
+        char path[PATH_MAX];
+        if (snprintf(path, sizeof path, "%s/gpu_drivers/probe-result.txt", ext) < (int)sizeof path) {
+            FILE *f = fopen(path, "a");
+            if (f) { fprintf(f, "%s\n", buf); fclose(f); }
+        }
+    }
+}
 
 static const char *driver_dir_or_null(const char *dir) { return dir && dir[0] == '/' ? dir : NULL; }
 
@@ -270,8 +292,10 @@ static void *custom_driver_open(const char *state_dir) {
     const char *how = "";
     if (driver_selection(selection, sizeof selection, &how)) {
         fprintf(stderr, "[vk-direct] 驱动选择：未设置\n");
+        driver_log("选择：未设置");
         return NULL;
     }
+    driver_log("选择=%s（来源 %s）", selection, how);
     const char *files = driver_dir_or_null(s2a_android_gpu_driver_files_dir ? s2a_android_gpu_driver_files_dir() : NULL);
     char dir[PATH_MAX];
     if (selection[0] == '/') {
@@ -303,6 +327,7 @@ static void *custom_driver_open(const char *state_dir) {
         }
         snprintf(dir, sizeof dir, "%s", staged);
     }
+    driver_log("加载目录=%s", dir);
     char library[128], lib[PATH_MAX], hooks[PATH_MAX], driver_dir[PATH_MAX + 1];
     if (meta_library(dir, library, sizeof library) != 0) {
         fprintf(stderr, "[vk-direct] 自定义驱动：%s/meta.json 没有可用的 libraryName\n", dir);
@@ -317,7 +342,9 @@ static void *custom_driver_open(const char *state_dir) {
         fprintf(stderr, "[vk-direct] 自定义驱动：无法定位 libs2arm_android.so 所在目录（hook 库）\n");
         return NULL;
     }
+    driver_log("库=%s；hooks=%s", library, hooks);
     void *adrenotools = dlopen("libadrenotools.so", RTLD_NOW | RTLD_LOCAL);
+    driver_log("libadrenotools=%s", adrenotools ? "ok" : dlerror());
     typedef void *(*open_libvulkan_fn)(int, int, const char *, const char *, const char *, const char *, const char *, void **);
     open_libvulkan_fn open_vk = adrenotools ? (open_libvulkan_fn)dlsym(adrenotools, "adrenotools_open_libvulkan") : NULL;
     if (!open_vk) {
@@ -338,6 +365,7 @@ static void *custom_driver_open(const char *state_dir) {
         return NULL;
     }
     fprintf(stderr, "[vk-direct] 自定义驱动已加载：%s%s（来源 %s；hooks 在 %s）\n", driver_dir, library, how, hooks);
+    driver_log("adrenotools_open_libvulkan=ok");
     g_custom_loader = handle;
     return handle;
 }
@@ -345,7 +373,9 @@ static void *custom_driver_open(const char *state_dir) {
 // 隔离探针：只通过 adrenotools 打开驱动、建一个实例、枚举物理设备并打印驱动身份。
 // 不改渲染路径；只用来回答“这个驱动包在 S2Arm 里能不能被 adrenotools 加载”。
 int s2a_android_vk_probe_driver(void) {
+    driver_log("探针开始");
     void *loader = custom_driver_open(NULL);
+    driver_log("探针 loader=%p", loader);
     if (!loader) return -1;
     PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)dlsym(loader, "vkGetInstanceProcAddr");
     if (!gipa) {
@@ -369,6 +399,7 @@ int s2a_android_vk_probe_driver(void) {
     info.pApplicationInfo = &app;
     VkInstance instance = VK_NULL_HANDLE;
     VkResult result = create(&info, NULL, &instance);
+    driver_log("探针 vkCreateInstance=%d", result);
     if (result != VK_SUCCESS) {
         fprintf(stderr, "[vk-direct] 驱动探针：vkCreateInstance 失败 VkResult=%d\n", result);
         return -1;
@@ -379,6 +410,7 @@ int s2a_android_vk_probe_driver(void) {
     if (enumerate) enumerate(instance, &count, NULL);
     if (!enumerate || count == 0) {
         fprintf(stderr, "[vk-direct] 驱动探针：0 个物理设备\n");
+        driver_log("探针 0 个物理设备");
         PFN_vkDestroyInstance destroy = (PFN_vkDestroyInstance)gipa(instance, "vkDestroyInstance");
         if (destroy) destroy(instance, NULL);
         return -1;
@@ -406,7 +438,7 @@ int s2a_android_vk_probe_driver(void) {
             snprintf(driver, sizeof driver, "%s", dp.driverName);
             snprintf(driver_info, sizeof driver_info, "%s", dp.driverInfo);
         }
-        fprintf(stderr, "[vk-direct] 驱动探针：设备 %u/%u：%s | driver=%s（%s）| api=%u.%u.%u vendor=0x%04x device=0x%04x\n",
+        driver_log("探针设备 %u/%u：%s | driver=%s（%s）| api=%u.%u.%u vendor=0x%04x device=0x%04x",
                 i + 1, count, props.deviceName, driver, driver_info,
                 VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
                 VK_VERSION_PATCH(props.apiVersion), props.vendorID, props.deviceID);
