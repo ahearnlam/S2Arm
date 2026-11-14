@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -279,8 +280,43 @@ def atomic(path, value):
         tmp.unlink(missing_ok=True)
 
 
+def resolve_path(path):
+    """Resolve a path while keeping Windows ERROR_UNRECOGNIZED_VOLUME (1005) volumes usable.
+
+    Some mounted volumes allow normal file I/O but reject GetFinalPathNameByHandle. In that case,
+    use an absolute lexical path only after checking existing components for symlinks/junctions;
+    without real-path data, containment checks must not follow a reparse point unchecked.
+    """
+    path = Path(path).expanduser()
+    try:
+        return path.resolve()
+    except OSError as error:
+        if os.name != "nt" or getattr(error, "winerror", None) != 1005:
+            raise
+        absolute = Path(os.path.abspath(path))
+        if not absolute.anchor or absolute.anchor.startswith("\\\\"):
+            raise
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current /= part
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                break
+            except OSError:
+                raise error
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+                raise error
+        return absolute
+
+
+def resolve_library_path(path):
+    """Resolve a selected library root, including mounted volumes with unsupported final-path queries."""
+    return resolve_path(path)
+
+
 def contained(root, path):
-    root, path = Path(root).resolve(), Path(path).resolve()
+    root, path = resolve_path(root), resolve_path(path)
     if path == root or root not in path.parents:
         raise Failure("操作路径不属于托管目录。")
     return path
@@ -457,7 +493,7 @@ def default_home(private, library=None):
             locations = []
         library = locations[0].get("path") if locations and isinstance(locations[0], dict) else None
     if library:
-        root = Path(library).expanduser().resolve()
+        root = resolve_library_path(library)
         if (root / LIBRARY_MARKER).is_file():
             return root
     return private
@@ -545,7 +581,7 @@ class Context:
         self.private.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.private, 0o700)
         self.engine = Path(request.get("engineDir") or ".").expanduser().resolve()
-        self.library = Path(request.get("library") or self.private / "unconfigured").expanduser().resolve()
+        self.library = resolve_library_path(request.get("library") or self.private / "unconfigured")
         import layout
         self.library = layout.relocate_default(self.private, self.library)   # 旧默认库（私有目录里的）已搬到 ~/S2Arm：照新位置用（游戏库结构 P3）
         self.logs = logs_root(self.private)   # 本任务的日志与任务记录（logs/jobs/）：固定在私有目录（剃刀 H6）

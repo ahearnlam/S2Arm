@@ -83,6 +83,86 @@ class JobsTests(unittest.TestCase):
         self.redirect.__exit__(None, None, None)
         self.tmp.cleanup()
 
+    def test_context_accepts_readable_windows_volume_when_final_path_query_is_unsupported(self):
+        import core
+        mounted = self.root / "mounted-library"
+        child = mounted / "games" / "one"
+        child.mkdir(parents=True)
+        (mounted / ".s2arm-library.json").write_text(json.dumps({"schema": 1, "id": "test-library"}), encoding="utf-8")
+        (child / "payload.bin").write_bytes(b"DATA")
+        request = dict(self.request, taskId=str(uuid.uuid4()), privateRoot=str(self.root / "private-mounted"), library=str(mounted), libraryId="test-library")
+        resolve = Path.resolve
+
+        def resolve_with_volume_error(path, *args, **kwargs):
+            if path == mounted or mounted in path.parents:
+                error = OSError(22, "filesystem final-path query unsupported")
+                error.winerror = 1005
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(core.os, "name", "nt"), patch.object(Path, "resolve", resolve_with_volume_error):
+            context = Context(request)
+            context.require_library()
+            contained = core.contained(mounted, child)
+            self.assertEqual(core.default_home(context.private, context.library), Path(os.path.abspath(mounted)))
+            self.assertEqual(layout.require_in_location(context, child), Path(os.path.abspath(child)))
+            build.validate_files(context, mounted, {"games/one/payload.bin": [4, ""]})
+        self.assertEqual(context.library, Path(os.path.abspath(mounted)))
+        self.assertEqual(contained, Path(os.path.abspath(child)))
+        self.assertTrue((context.logs / "jobs" / (context.task + ".json")).is_file())
+
+    def test_context_does_not_hide_other_library_path_resolution_errors(self):
+        import core
+        mounted = self.root / "denied-library"
+        mounted.mkdir()
+        request = dict(self.request, taskId=str(uuid.uuid4()), privateRoot=str(self.root / "private-denied"), library=str(mounted))
+        resolve = Path.resolve
+
+        def resolve_with_access_error(path, *args, **kwargs):
+            if path == mounted:
+                error = OSError(5, "access denied")
+                error.winerror = 5
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(core.os, "name", "nt"), patch.object(Path, "resolve", resolve_with_access_error):
+            with self.assertRaises(OSError) as caught:
+                Context(request)
+        self.assertEqual(caught.exception.winerror, 5)
+
+    def test_resolve_path_does_not_fall_back_across_reparse_points(self):
+        import core
+        mounted = self.root / "reparse-library"
+        mounted.mkdir()
+        resolve = Path.resolve
+        lstat = Path.lstat
+
+        def resolve_with_volume_error(path, *args, **kwargs):
+            if path == mounted:
+                error = OSError(22, "filesystem final-path query unsupported")
+                error.winerror = 1005
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        def lstat_with_reparse(path, *args, **kwargs):
+            if path == mounted:
+                return type("Stat", (), {"st_mode": stat.S_IFDIR, "st_file_attributes": 0x400})()
+            return lstat(path, *args, **kwargs)
+
+        with patch.object(core.os, "name", "nt"), patch.object(Path, "resolve", resolve_with_volume_error), patch.object(Path, "lstat", lstat_with_reparse):
+            with self.assertRaises(OSError) as caught:
+                core.resolve_path(mounted)
+        self.assertEqual(caught.exception.winerror, 1005)
+
+    def test_resolve_path_does_not_fall_back_off_windows(self):
+        import core
+        error = OSError(22, "filesystem final-path query unsupported")
+        error.winerror = 1005
+        with patch.object(core.os, "name", "posix"), patch.object(Path, "resolve", side_effect=error):
+            with self.assertRaises(OSError) as caught:
+                core.resolve_path(self.root / "library")
+        self.assertIs(caught.exception, error)
+
     def catalogue(self, games):
         atomic(self.c.library / "catalog.json", dict(schema=1, games=games))
 

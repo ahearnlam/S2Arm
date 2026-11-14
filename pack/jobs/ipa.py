@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
-from core import Failure, contained, display_version, read, release_version
+from core import Failure, contained, display_version, read, release_version, resolve_path
 import layout
 
 
@@ -344,7 +344,7 @@ def _build(c):
     if res.get("ok") is False:
         raise oneclick_failure(events, getattr(c, "milestone", None) if getattr(c, "milestone", None) != before_milestone else None, ipa_log, refresh_log=refresh_log, refresh_before=refresh_before)
     ipa = Path(res.get("ipa") or "")
-    if not res.get("ok") or not res.get("ipa") or not ipa.is_file() or ipa.resolve().parent != out.resolve():
+    if not res.get("ok") or not res.get("ipa") or not ipa.is_file() or resolve_path(ipa).parent != resolve_path(out):
         raise Failure("一键出包结束了，但没报告本轮交付的 IPA（或文件不在输出目录），请查看日志。", code="package_failed")
     ms.record(c, size_gb, gameId=gid)
     # 追加内容没解出（pack/stages/aoc.sh 记产物根 aoc.log，oneclick 结果事件 aoc_missing）：本体照常出、不挡，但走同一条警告，完成页画「完成（有警告）」（审计 P1-74）
@@ -528,7 +528,7 @@ def product_root(c, gid):
     from build import oneclick_kuan
     out = layout.ios_work(c, gid, create=False)
     r = out / "work/pkg/product" if os.name == "nt" else out / "roots" / (oneclick_kuan(c, gid) + "@现行")   # Windows：win_oneclick 的工作根（现行各项联接 + 直连库，oneclick_win.product）
-    return r.resolve() if (r / "main.npdm").is_file() else None
+    return resolve_path(r) if (r / "main.npdm").is_file() else None
 
 
 def usable_kit(c, gid, sid, failed=()):
@@ -540,10 +540,10 @@ def usable_kit(c, gid, sid, failed=()):
         return None
     ios = layout.game_info(c, gid).get("ios") or {}
     if ios.get("shellId") == sid:
-        return kit.resolve()
+        return resolve_path(kit)
     want = host_update.engine_compat(c)
     have = dict(hostAbi=ios.get("hostAbi", 1), dmshChain=ios.get("dmshChain", host_update.LEGACY_CHAIN))
-    return kit.resolve() if want and have == want and sid not in failed else None
+    return resolve_path(kit) if want and have == want and sid not in failed else None
 
 
 CONTAINER_DIGEST_KEY = "S2AContainerDigest"   # Info.plist：这份容器 App 的内容摘要（#845 装机跳过签名安装：install.same_app 经 s2a-devpush app-attr 读手机上的同一个键）

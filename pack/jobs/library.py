@@ -23,7 +23,7 @@ import time
 import uuid
 import zipfile
 from errors import explain
-from core import Failure, atomic, contained, digest, prune_jobs, read, task_of_log
+from core import Failure, atomic, contained, digest, prune_jobs, read, resolve_path, task_of_log
 import toolchain
 import winproc
 import filelock
@@ -763,7 +763,7 @@ def _source_locked(c, source):
 
 def move_library(c, source):
     """把现有游戏库搬到 c.library（空文件夹）：同盘改名、跨盘拷完校验再换，任何一步失败都回到搬之前。旧位置的内容在新位置就位之后才删"""
-    source = Path(source).resolve()
+    source = resolve_path(source)
     info = read(source / ".s2arm-library.json", None)
     if not isinstance(info, dict) or not info.get("id"):
         raise Failure("原来的位置不是可搬的游戏库。", code="library_move_failed")
@@ -898,7 +898,7 @@ def _setup(c):
     if c.library == Path(c.library.anchor) or c.library == Path.home() or c.library == c.engine:
         raise Failure("请选择独立的游戏库文件夹，不能直接用整个盘或用户文件夹。")
     install = c.r.get("installDir")
-    if install and (_within(c.library, Path(install).resolve()) or _within(Path(install).resolve(), c.library)):
+    if install and (_within(c.library, resolve_path(install)) or _within(resolve_path(install), c.library)):
         raise Failure("游戏库不能放在 S2Arm 启动器自己的文件夹里，也不能包含它（升级时这个文件夹会整个替换，库会被一起删掉）：换一个文件夹。")
     if c.r.get("freeDefault") and _occupied(c.library):
         c.library = next((n for n in (c.library.with_name(f"{c.library.name} Library" + (f" {i}" if i > 1 else "")) for i in range(1, 10))
@@ -930,7 +930,7 @@ def _setup(c):
             raise Failure(FOREIGN_MESSAGE, code="library_folder_not_empty")
         source = c.r.get("moveFrom")
         if source:   # 搬过来的东西和这里已有的重名会盖掉玩家的文件：物理上不能做，说清是哪个
-            clash = [b.name for _, b in _move_pairs(c, Path(source).resolve()) if b.exists() or b.is_symlink()]
+            clash = [b.name for _, b in _move_pairs(c, resolve_path(source)) if b.exists() or b.is_symlink()]
             if clash:
                 raise Failure(f"这个文件夹里已有和游戏库里同名的「{'、'.join(clash[:3])}」，搬过来会盖掉它们：换一个文件夹，或者先把它们挪走。文件都没动。",
                               code="library_move_failed")
@@ -1666,7 +1666,7 @@ def import_games(c):
         try:
             if path.exists():
                 wait_readable(c, [path])
-            found_files, found_extracts, errors = scan_import(c, path if partial else path.resolve(), partial=partial)
+            found_files, found_extracts, errors = scan_import(c, path if partial else resolve_path(path), partial=partial)
             files.extend(found_files)
             extracts.extend(found_extracts)
             for source in found_files:
@@ -2151,7 +2151,11 @@ def _prune_roots(c, d):
     """产物根只留现行（*@现行 及其指向）与 RomFS 共享存储，清旧版本 → 清了几项。
     RomFS 共享存储：现行指向其中的身份，删了现行就断；没人指向的旧身份由下次提交清（pack/roots.sh root_romfs_sweep）"""
     links = list(d.glob("*@现行"))
-    current = {q.name for q in links} | {q.resolve().name for q in links if _is_link(q)}
+    current = {q.name for q in links}
+    for q in links:
+        if _is_link(q):
+            target = Path(os.readlink(q))
+            current.add(resolve_path(target if target.is_absolute() else q.parent / target).name)
     n = 0
     for q in d.iterdir():
         if q.name not in current and q.name != ".romfs_store":
@@ -2810,7 +2814,7 @@ def diagnostics(c):
         except (OSError, ValueError, plistlib.InvalidFileException):
             return {"error": "启动器 Info.plist 无法读取"}
 
-    destination = Path(c.r["path"]).expanduser().resolve()
+    destination = resolve_path(Path(c.r["path"]).expanduser())
     if c.private == destination or c.private in destination.parents or c.library == destination or c.library in destination.parents:
         raise Failure("诊断包请选择应用数据和游戏库以外的位置。")
     descriptors = []
