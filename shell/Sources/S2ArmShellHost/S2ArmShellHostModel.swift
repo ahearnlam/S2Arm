@@ -125,6 +125,7 @@ public final class S2ArmShellHostModel {
         //   S2A_SHELL_PLAY=<游戏号> 起来 2 秒后替人点这款的 Play（走同一条 requestPlay → C 出口；截图局别带 S2A_AUTOPLAY=1：没有视觉驾驶员时自动玩家判卡住、优雅退出）
         let env = ProcessInfo.processInfo.environment
         guideOpen = !stores.app.bool(forKey: Self.guideSeenKey) && env["S2A_SHELL_PLAY"] == nil && env["S2A_SHELL_OPEN_LAYOUT_EDITOR"] == nil
+        if env["S2A_SHELL_GUIDE"] == "1" { guideOpen = true }   // 测试开关：看过也强制弹一次（真机截图验证排版用；同上，只有 devicectl / Xcode 起 App 能给）
         if let id = env["S2A_SHELL_OPEN_LAYOUT_EDITOR"], allGames.contains(where: { $0.id == id }) {
             editingLayout = id; NSLog("S2Arm 游戏库：S2A_SHELL_OPEN_LAYOUT_EDITOR 直接开 %@ 的调整位置页", id)
         }
