@@ -106,6 +106,8 @@ static const struct s2a_wsi_api *window(void *token) {
 //   1) 环境变量 S2A_VK_DRIVER（宿主测试 / 调试）
 //   2) 系统属性 debug.s2a.vk_driver（adb shell setprop；user 版设备上 untrusted_app 常读不到）
 //   3) <externalFilesDir>/gpu_drivers/selected.txt 第一行（adb push，最可靠）
+// 发布包里玩家只能走第二支的界面选驱动；上面三条（环境变量 / debug.s2a.vk_driver / selected.txt）
+// 都是开发入口，只有 adb 或调试环境写得进去，不算玩家路径。
 // 值是目录名（<filesDir>/gpu_drivers/<name>）或绝对路径。共享存储上的目录先复制进应用内部
 // 私有目录：adrenotools 要求驱动位于内部数据目录，/sdcard 上没有执行权限。
 // 没选驱动、或加载失败时返回 NULL，调用方照原路 dlopen("libvulkan.so")，系统驱动路径不变。
@@ -132,6 +134,25 @@ static void driver_log(const char *fmt, ...) {
         if (snprintf(path, sizeof path, "%s/gpu_drivers/probe-result.txt", ext) < (int)sizeof path) {
             FILE *f = fopen(path, "a");
             if (f) { fprintf(f, "%s\n", buf); fclose(f); }
+        }
+    }
+}
+
+// 回落系统驱动必须留一条红级（玩家与维护方在 logcat 只看【红】）；stderr 与 probe-result.txt 通道保留。
+static void driver_log_red(const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "[vk-direct] %s\n", buf);
+    __android_log_print(ANDROID_LOG_ERROR, "S2Arm", "【红】nvk driver: %s", buf);
+    const char *ext = s2a_android_gpu_driver_external_dir ? s2a_android_gpu_driver_external_dir() : NULL;
+    if (ext && ext[0] == '/') {
+        char path[PATH_MAX];
+        if (snprintf(path, sizeof path, "%s/gpu_drivers/probe-result.txt", ext) < (int)sizeof path) {
+            FILE *f = fopen(path, "a");
+            if (f) { fprintf(f, "【红】%s\n", buf); fclose(f); }
         }
     }
 }
@@ -225,6 +246,7 @@ static int meta_library(const char *dir, char *out, size_t cap) {
 }
 
 // 选择值：环境变量 > 系统属性 > 外部私有目录的 selected.txt。
+// 来源口径：发布包里玩家只能走第二支的界面选驱动；这三条都是开发入口，只有 adb / 调试环境写得进去。
 static int driver_selection(char *out, size_t cap, const char **how) {
     const char *env = getenv("S2A_VK_DRIVER");
     if (env && *env) {
@@ -320,18 +342,19 @@ static void *custom_driver_open(const char *state_dir) {
     const char *files = driver_dir_or_null(s2a_android_gpu_driver_files_dir ? s2a_android_gpu_driver_files_dir() : NULL);
     char dir[PATH_MAX];
     if (selection[0] == '/') {
-        if (strlen(selection) >= sizeof dir) { fprintf(stderr, "[vk-direct] 自定义驱动：路径过长：%s\n", selection); return NULL; }
+        if (strlen(selection) >= sizeof dir) { fprintf(stderr, "[vk-direct] 自定义驱动：路径过长：%s\n", selection); driver_log_red("驱动加载失败：路径过长（来源 %s）；回落系统驱动", how); return NULL; }
         snprintf(dir, sizeof dir, "%s", selection);
     } else {
-        if (!files) { fprintf(stderr, "[vk-direct] 自定义驱动：没有应用内部目录，无法解析 %s\n", selection); return NULL; }
+        if (!files) { fprintf(stderr, "[vk-direct] 自定义驱动：没有应用内部目录，无法解析 %s\n", selection); driver_log_red("驱动加载失败：没有应用内部目录（来源 %s）；回落系统驱动", how); return NULL; }
         if (snprintf(dir, sizeof dir, "%s/gpu_drivers/%s", files, selection) >= (int)sizeof dir) {
             fprintf(stderr, "[vk-direct] 自定义驱动：路径过长：%s\n", selection);
+            driver_log_red("驱动加载失败：路径过长（来源 %s）；回落系统驱动", how);
             return NULL;
         }
     }
     // 共享存储没有执行权限：adrenotools 要求驱动在应用内部资料目录，先复制过去。
     if (!strncmp(dir, "/sdcard/", 8) || !strncmp(dir, "/storage/", 9) || !strncmp(dir, "/mnt/", 5)) {
-        if (!files) { fprintf(stderr, "[vk-direct] 自定义驱动：%s 在共享存储，但没有内部目录可复制\n", dir); driver_log("没有内部目录可复制"); return NULL; }
+        if (!files) { fprintf(stderr, "[vk-direct] 自定义驱动：%s 在共享存储，但没有内部目录可复制\n", dir); driver_log("没有内部目录可复制"); driver_log_red("驱动加载失败：共享存储驱动没有内部目录可复制（来源 %s）；回落系统驱动", how); return NULL; }
         const char *base = strrchr(dir, '/');
         base = base && base[1] ? base + 1 : "driver";
         char staged[PATH_MAX], staged_lib[PATH_MAX], library[128];
@@ -341,11 +364,14 @@ static void *custom_driver_open(const char *state_dir) {
             snprintf(staged_lib, sizeof staged_lib, "%s/%s", staged, library) >= (int)sizeof staged_lib) {
             fprintf(stderr, "[vk-direct] 自定义驱动：%s 不像驱动目录（meta.json/libraryName）\n", dir);
             driver_log("外部驱动目录不可用（meta.json/libraryName）");
+            driver_log_red("驱动加载失败：%s 不像驱动目录（meta.json/libraryName；来源 %s）；回落系统驱动", dir, how);
             return NULL;
         }
         if (stat(staged_lib, &st) != 0 && stage_driver_dir(dir, staged) != 0) {
-            fprintf(stderr, "[vk-direct] 自定义驱动：复制 %s → %s 失败（errno=%d）\n", dir, staged, errno);
-            driver_log("复制到内部失败（errno=%d）", errno);
+            int copy_errno = errno;
+            fprintf(stderr, "[vk-direct] 自定义驱动：复制 %s → %s 失败（errno=%d）\n", dir, staged, copy_errno);
+            driver_log("复制到内部失败（errno=%d）", copy_errno);
+            driver_log_red("驱动加载失败：复制到内部失败（errno=%d；来源 %s）；回落系统驱动", copy_errno, how);
             return NULL;
         }
         snprintf(dir, sizeof dir, "%s", staged);
@@ -354,15 +380,18 @@ static void *custom_driver_open(const char *state_dir) {
     char library[128], lib[PATH_MAX], hooks[PATH_MAX], driver_dir[PATH_MAX + 1];
     if (meta_library(dir, library, sizeof library) != 0) {
         fprintf(stderr, "[vk-direct] 自定义驱动：%s/meta.json 没有可用的 libraryName\n", dir);
+        driver_log_red("驱动加载失败：%s/meta.json 没有可用的 libraryName（来源 %s）；回落系统驱动", dir, how);
         return NULL;
     }
     struct stat st;
     if (snprintf(lib, sizeof lib, "%s/%s", dir, library) >= (int)sizeof lib || stat(lib, &st) != 0 || !S_ISREG(st.st_mode)) {
         fprintf(stderr, "[vk-direct] 自定义驱动：%s/%s 不存在\n", dir, library);
+        driver_log_red("驱动加载失败：%s/%s 不存在（来源 %s）；回落系统驱动", dir, library, how);
         return NULL;
     }
     if (hook_dir_from_self(hooks, sizeof hooks) != 0) {
         fprintf(stderr, "[vk-direct] 自定义驱动：无法定位 libs2arm_android.so 所在目录（hook 库）\n");
+        driver_log_red("驱动加载失败：无法定位 hook 库目录（来源 %s）；回落系统驱动", how);
         return NULL;
     }
     driver_log("库=%s；hooks=%s", library, hooks);
@@ -371,13 +400,16 @@ static void *custom_driver_open(const char *state_dir) {
     typedef void *(*open_libvulkan_fn)(int, int, const char *, const char *, const char *, const char *, const char *, void **);
     open_libvulkan_fn open_vk = adrenotools ? (open_libvulkan_fn)dlsym(adrenotools, "adrenotools_open_libvulkan") : NULL;
     if (!open_vk) {
-        fprintf(stderr, "[vk-direct] 自定义驱动：libadrenotools.so 不可用（%s），回落系统驱动\n",
-                adrenotools ? "缺少 adrenotools_open_libvulkan" : dlerror());
+        const char *why_open = adrenotools ? "缺少 adrenotools_open_libvulkan" : dlerror();
+        if (!why_open) why_open = "(dlerror 为空)";
+        fprintf(stderr, "[vk-direct] 自定义驱动：libadrenotools.so 不可用（%s），回落系统驱动\n", why_open);
+        driver_log_red("驱动加载失败：libadrenotools.so 不可用（%s；来源 %s）；回落系统驱动", why_open, how);
         return NULL;
     }
     size_t dl = strlen(dir);
     if (snprintf(driver_dir, sizeof driver_dir, "%s%s", dir, dl && dir[dl - 1] == '/' ? "" : "/") >= (int)sizeof driver_dir) {
         fprintf(stderr, "[vk-direct] 自定义驱动：路径过长：%s\n", dir);
+        driver_log_red("驱动加载失败：路径过长（来源 %s）；回落系统驱动", how);
         return NULL;
     }
     void *handle = open_vk(RTLD_NOW | RTLD_LOCAL, S2A_ADRENOTOOLS_DRIVER_CUSTOM, state_dir, hooks,
@@ -385,6 +417,8 @@ static void *custom_driver_open(const char *state_dir) {
     if (!handle) {
         fprintf(stderr, "[vk-direct] 自定义驱动：adrenotools 加载 %s%s 失败（hooks 在 %s；logcat 看 adrenotools/hook_impl），回落系统驱动\n",
                 driver_dir, library, hooks);
+        driver_log_red("驱动加载失败：adrenotools 加载 %s%s 失败（hooks 在 %s；来源 %s）；回落系统驱动",
+                       driver_dir, library, hooks, how);
         return NULL;
     }
     fprintf(stderr, "[vk-direct] 自定义驱动已加载：%s%s（来源 %s；hooks 在 %s）\n", driver_dir, library, how, hooks);
