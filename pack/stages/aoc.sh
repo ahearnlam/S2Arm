@@ -93,7 +93,7 @@ aoc_cp() {
   local clone_err copy_err
   clone_err=$(_root_cp "$@" 2>&1) && return 0
   [ "$(uname -s)" = Darwin ] || { printf '%s\n' "$clone_err" >&2; return 1; }
-  if copy_err=$(cp -X "$@" 2>&1); then
+  if copy_err=$(cp -X "$@" 2>&1 || exit $?); then
     echo "【黄】${G:-?} 追加内容：克隆复制失败，已改用普通复制：$(printf '%s' "$clone_err" | tr '\n' ' ')"
     return 0
   fi
