@@ -33,7 +33,7 @@ UIDocumentPickerViewController *s2a_cheats_import_picker(void) {
 
 @interface S2ACheatFile : NSObject
 @property (nonatomic, copy) NSString *file; @property (nonatomic, copy) NSArray<NSString *> *names; @property (nonatomic) BOOL bad;
-// 面板上逐行画的东西（11-13 jhz「排版很乱」）：分组标题（社区约定的 20000000 段，ios/cheats_parse.m folder 1）画成不带开关的小标题、按层级缩进，
+// 面板上逐行画的东西（11-13 ç»´æ¤è「排版很乱」）：分组标题（社区约定的 20000000 段，ios/cheats_parse.m folder 1）画成不带开关的小标题、按层级缩进，
 //   分组结束（folder 2）不画；其余是开关行。names 仍只装开关条目（开关键 / 状态查找用）
 @property (nonatomic, copy) NSArray<NSDictionary *> *rows;   // {name, header: BOOL, depth}
 @property (nonatomic, copy) NSSet<NSString *> *fixed;   // 写死地址的条目（ios/cheats_parse.m fixed_address）：条目下标「地址写死，可能不生效」
@@ -178,7 +178,7 @@ static NSString *cheat_status_text(NSString *st) {
     NSString *detail = on ? (st && ![st isEqual:@"关"] ? cheat_status_text(st) : S2AL(@"cheats.status.pending")) : nil;
     if ([f.fixed containsObject:name]) detail = detail ? [NSString stringWithFormat:@"%@ · %@", detail, S2AL(@"cheats.fixedAddress")] : S2AL(@"cheats.fixedAddress");
     cell.detailTextLabel.text = detail; cell.detailTextLabel.numberOfLines = 0;
-    // 生效了（读数值的条目「生效中」、编进游戏的「生效中（编进游戏）」）都写绿色「已生效」（11-13 jhz：原来的字像还在等）
+    // 生效了（读数值的条目「生效中」、编进游戏的「生效中（编进游戏）」）都写绿色「已生效」（11-13 ç»´æ¤è：原来的字像还在等）
     cell.detailTextLabel.textColor = on && ([st isEqual:@"生效中"] || [st isEqual:@"生效中（编进游戏）"]) ? UIColor.systemGreenColor : UIColor.secondaryLabelColor;
     UISwitch *sw = [UISwitch new]; sw.on = on; sw.accessibilityIdentifier = key;
     [sw addTarget:self action:@selector(toggled:) forControlEvents:UIControlEventValueChanged]; cell.accessoryView = sw;

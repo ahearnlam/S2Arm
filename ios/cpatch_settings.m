@@ -73,7 +73,7 @@ BOOL s2a_ios_cpatch_result_ok(NSArray<NSString *> *st);   // ios/game_options.m
     NSString *tag = it.defaultOn ? S2AL(@"cpatch.tag.verified") : S2AL(@"cpatch.tag.unverified");
     cell.detailTextLabel.text = [NSString stringWithFormat:S2AL(@"cpatch.item.detail"), it.name, tag, lic, it.followsFps60 ? S2AL(@"cpatch.item.followsFps") : it.followsFullscreen ? S2AL(@"cpatch.item.followsFullscreen") : @""];
     NSArray<NSString *> *st = s2a_ios_cpatch_status_for(nil)[it.ident];
-    NSString *res = s2a_ios_cpatch_result(st);   // 这一局装载时的实际结果（runtime/src/cpatch.c）：没生效写原因、量到效果写实测；生效了写绿色（11-13 jhz）
+    NSString *res = s2a_ios_cpatch_result(st);   // 这一局装载时的实际结果（runtime/src/cpatch.c）：没生效写原因、量到效果写实测；生效了写绿色（11-13 ç»´æ¤è）
     if (res) {
         NSMutableAttributedString *d = [[NSMutableAttributedString alloc] initWithString:[cell.detailTextLabel.text stringByAppendingString:@"\n"]
                                                                                attributes:@{NSForegroundColorAttributeName: UIColor.secondaryLabelColor}];
@@ -81,7 +81,7 @@ BOOL s2a_ios_cpatch_result_ok(NSArray<NSString *> *st);   // ios/game_options.m
         cell.detailTextLabel.attributedText = d;
     }
     sw.accessibilityLabel = it.title; sw.accessibilityIdentifier = [@"cpatch.item." stringByAppendingString:it.ident];
-    // 跟随设置页「60 帧」/「满屏」开关的项（11-13 jhz「排版乱」：原来画成按不动的灰开关）：右边不放开关，写现在是开还是关
+    // 跟随设置页「60 帧」/「满屏」开关的项（11-13 ç»´æ¤è「排版乱」：原来画成按不动的灰开关）：右边不放开关，写现在是开还是关
     if (it.followsFps60 || it.followsFullscreen) {
         BOOL on = it.followsFps60; if (on) on = s2a_ios_fps60_on(); else s2a_ios_fullscreen_state(nil, &on);
         UILabel *state = [UILabel new]; state.text = on ? S2AL(@"cpatch.state.on") : S2AL(@"cpatch.state.off");

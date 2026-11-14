@@ -22,7 +22,7 @@ UIImage *s2a_sgrade_image(void) {
 static UIColor *gradient_text_color(CGSize size) {
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size];
     UIImage *g = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        // 浅色界面（设置页跟系统外观）用深一档的金：原来的香槟金在浅底上发白看不清（11-13 jhz 截图）
+        // 浅色界面（设置页跟系统外观）用深一档的金：原来的香槟金在浅底上发白看不清（11-13 ç»´æ¤è 截图）
         BOOL light = UITraitCollection.currentTraitCollection.userInterfaceStyle != UIUserInterfaceStyleDark;
         NSArray *cs = light ? @[(id)rgb(0.62, 0.42, 0.10).CGColor, (id)rgb(0.72, 0.50, 0.16).CGColor, (id)rgb(0.72, 0.36, 0.26).CGColor]
                             : @[(id)rgb(1, 0.92, 0.70).CGColor, (id)rgb(0.93, 0.77, 0.42).CGColor, (id)rgb(0.93, 0.62, 0.52).CGColor];
