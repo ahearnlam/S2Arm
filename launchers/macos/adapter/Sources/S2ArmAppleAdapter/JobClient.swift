@@ -255,12 +255,13 @@ public final class JobClient {
         return result?["messages"] is [Any] ? result : nil
     }
 
-    /// 玩家关掉了：update = 「有新版」那版（以后再说），after = 「这版更新了什么」那版，notice = 看过的最新一条公告号
-    public func inboxSeen(update: String? = nil, after: String? = nil, notice: String? = nil) async {
+    /// 玩家关掉了：update = 「有新版」那版（以后再说），after = 「这版更新了什么」那版，notice = 看过的最新一条公告号，feature = 看过的新功能大窗期号
+    public func inboxSeen(update: String? = nil, after: String? = nil, notice: String? = nil, feature: String? = nil) async {
         var command = ["inbox-seen", "--private-root", environment.privateRoot.path]
         if let update { command += ["--update", update] }
         if let after { command += ["--after", after] }
         if let notice { command += ["--notice", notice] }
+        if let feature { command += ["--feature", feature] }
         _ = await runUpdater(command)
     }
 
