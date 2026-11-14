@@ -179,6 +179,10 @@ SaveP("win_04_export_success", () => Navigate(pack, "progress"));
 // 降级继续（v0.3.1）：出成了，完成卡下方逐条列作业层给的玩家提示
 SetW(pack, "packNotes", (object?)new List<string> { "这款有 27 处用了兼容写法，个别场景可能不稳定，遇到请反馈", "3 支着色器首次遇到时现编，开头可能稍卡" });
 SaveP("win_04b_export_success_notes", () => Navigate(pack, "progress"));
+// S 级加强横幅 + 补丁打入结果（v0.4.0，同 Mac）：注入作业层 boost（条数 + applied / failed）
+SetW(pack, "packBoost", (JsonElement?)JsonDocument.Parse("""{"cheats":12,"fps":1,"widescreen":1,"applied":[{"cat":"widescreen","name":"满屏 21:9"},{"cat":"fps","name":"60 FPS"}],"failed":[{"cat":"gfx","name":"阴影质量","why":"result.why.mismatch"}]}""").RootElement.Clone());
+SaveP("win_04c_export_success_sgrade", () => Navigate(pack, "progress"));
+SetW(pack, "packBoost", null);
 SetW(pack, "packNotes", (object?)new List<string>());
 
 // 两路（维护者 11-13：出包页起分两路）：导出模式的进度页最后一步是「整理 iPhone 版程序与资源包」、完成页主按钮与说明照导出写
@@ -340,6 +344,35 @@ SetW(pack, "catalog", new LibraryCatalog([atDefault, elsewhere], true, "密钥�
 SetW(pack, "librarySummary", "library.completed"); SetW(pack, "libraryDiagnostics", "");
 pack.Height = 2100;   // 设置页最长：装机方式 + 环境检查 + 运行路径都要在一张图里
 SaveP("tidy_02_settings", () => Navigate(pack, "settings"));
+// S 级优化（v0.4.0，同 Mac）：封面左上角金色 S、游戏库「S 级优化升级」入口、升级页三态（有可升级 / 都没找到原始程序 / 查找中）
+pack.Height = 1100;
+SetW(pack, "catalog", new LibraryCatalog([atDefault with { SGrade = true }, elsewhere], true, "密钥已就绪"));
+SaveP("sgrade_01_library_badge", () => Navigate(pack, "library"));
+static JsonElement SG(string json) => JsonDocument.Parse(json).RootElement.Clone();
+SetW(pack, "sgradeOpen", true); SetW(pack, "sgradeScanning", true);
+SetW(pack, "sgradeScan", SG("""
+{"games":[
+ {"id":"0100A","name":"暗黑破坏神 III","program":"saved","total":15,"patches":{"widescreen":9,"fps":1,"gfx":3,"cheat":2},"iphone":true,"off":false},
+ {"id":"0100B","name":"空洞骑士：丝之歌","program":"source","total":0,"patches":{},"iphone":true,"off":false},
+ {"id":"0100C","name":"哈迪斯","program":"mac","total":4,"patches":{"gfx":3,"cheat":1},"iphone":false,"off":true},
+ {"id":"0100D","name":"我的世界","program":"none","total":0,"patches":{},"iphone":true,"off":false}],"found":3,"upgradable":1,"noPatch":1,"missing":1}
+"""));
+SaveP("sgrade_02_upgrade_page", () => { SetW(pack, "page", "library"); InvokeW(pack, "Render"); });
+SetW(pack, "sgradeScan", SG("""{"games":[{"id":"0100D","name":"我的世界","program":"none","total":0,"patches":{},"iphone":true,"off":false}]}"""));
+SaveP("sgrade_03_upgrade_nothing", () => InvokeW(pack, "Render"));
+SetW(pack, "sgradeScan", null);
+SaveP("sgrade_04_upgrade_scanning", () => InvokeW(pack, "Render"));
+SetW(pack, "sgradeOpen", false); SetW(pack, "sgradeScanning", false);
+// 金手指页（Windows 对齐 Mac，11-14）：一份公开库的、一份玩家导入的（其中一条版本不对）
+SetW(pack, "cheatsFor", atDefault);
+SetW(pack, "cheatsList", (JsonElement?)SG("""
+{"items":[
+ {"key":"9B9E.txt/无限血","file":"9B9E182991F3F5B5.txt","name":"无限血","from":"library","repo":"bad1dea/NXCheats","author":"Eiffel2018","ok":true,"fixed":false,"reason":""},
+ {"key":"9B9E.txt/秘境进度 1000x","file":"9B9E182991F3F5B5.txt","name":"秘境进度 1000x","from":"library","repo":"bad1dea/NXCheats","author":"Eiffel2018","ok":true,"fixed":true,"reason":""},
+ {"key":"mine.txt/金币锁定","file":"mine.txt","name":"金币锁定","from":"player","repo":"","author":"","ok":false,"fixed":false,"reason":"版本不对：金手指是 2607A74F5DF7754C，这份游戏是 9B9E182991F3F5B5。"}],"reason":""}
+"""));
+SaveP("sgrade_05_cheats_page", () => { SetW(pack, "page", "library"); InvokeW(pack, "Render"); });
+SetW(pack, "cheatsFor", null); SetW(pack, "cheatsList", null);
 pack.Height = 900;
 
 pack.Close();
@@ -347,6 +380,8 @@ Dispatcher.UIThread.RunJobs();
 Console.WriteLine("done.");
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
+static void InvokeW(object obj, string method) =>
+    obj.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, null, Type.EmptyTypes, null)!.Invoke(obj, null);
 static void SetW(object obj, string field, object? value)
 {
     var fi = obj.GetType().GetField(field, BindingFlags.NonPublic | BindingFlags.Instance);

@@ -373,7 +373,7 @@ struct ExportSessionView: View {
                     BoostBanner(boost: boost, text: x)   // 自动配好了金手指 / 补丁：S 级加强生效（开不开玩家在启动设置里定）
                 }
                 // 补丁打入结果（11-14）：逐条列打上 / 没打上（带原因）；两端都出了就分 Mac / iPhone 写
-                SGradeResultView(results: succeeded.compactMap { p in run.outcomes[p].map { SGradeGameResult(name: p == .ios ? "iPhone" : "Mac", outcome: $0.sgrade) } },
+                SGradeResultView(results: succeeded.compactMap { p in run.outcomes[p].map { o in var r = o.sgrade; r.cheats = 0; return SGradeGameResult(name: p == .ios ? "iPhone" : "Mac", outcome: r) } },   // 金手指条数横幅里已写
                                  text: { BackendText.launcherText($0, language: uiLanguage) })
                 ForEach(succeeded, id: \.self) { platform in success(platform) }
             }

@@ -51,7 +51,7 @@ public sealed record LibraryGame(string Id, string Name, string Version, string 
     IReadOnlyList<string> Missing, bool IphoneReady = false, double? IphoneInstalledAt = null,
     bool IphoneFree = false, IReadOnlyList<GamePackage>? Packages = null, bool CustomName = false, bool CustomCover = false,
     GameLocation? Location = null, bool IphoneRestorable = false, GameSizes? Sizes = null, bool NeedsKeys = false, string IphoneInstallDevice = "",
-    bool OnPhone = false, string Banner = "")
+    bool OnPhone = false, string Banner = "", bool SGrade = false)   // SGrade：已打上 S 级优化（catalog sgrade，pack/jobs/library.py sgrade_badge）→ 封面左上角金色 S（同 Mac）
 {
     /// <summary>Storage state (library layout v3): ok / offline / missing / none; older catalogues without the field read as none.</summary>
     public string LocationState => Location?.State ?? "none";
@@ -171,7 +171,8 @@ public sealed record LibraryCatalog(IReadOnlyList<LibraryGame> Games, bool KeysR
                     game.TryGetProperty("sizes", out var sizes) && sizes.ValueKind == JsonValueKind.Object ? GameSizes.Parse(sizes) : null,
                     game.TryGetProperty("needsKeys", out var needsKeys) && needsKeys.ValueKind == JsonValueKind.True, iphoneDevice,
                     game.TryGetProperty("onPhone", out var onPhone) && onPhone.ValueKind == JsonValueKind.True,
-                    game.TryGetProperty("banner", out var banner) && banner.ValueKind == JsonValueKind.String ? banner.GetString() ?? "" : ""));   // 设备记录里装在手机上：删除确认多写一句
+                    game.TryGetProperty("banner", out var banner) && banner.ValueKind == JsonValueKind.String ? banner.GetString() ?? "" : "",   // 设备记录里装在手机上：删除确认多写一句
+                    game.TryGetProperty("sgrade", out var sgr) && sgr.ValueKind == JsonValueKind.True));
             }
             var keys = result.GetProperty("keys");
             return new(games.AsReadOnly(), keys.GetProperty("ready").GetBoolean(),
