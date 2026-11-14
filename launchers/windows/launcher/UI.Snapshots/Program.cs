@@ -106,6 +106,19 @@ var noticeJson = File.ReadAllText(Path.Combine(noticeDir?.FullName ?? throw new 
 SaveW("06_notice_zh", w => { SetW(w, "notice", (JsonElement?)JsonDocument.Parse(noticeJson).RootElement); SetW(w, "language", "zh-Hans"); });
 SaveW("07_notice_en", w => { SetW(w, "language", "en"); });
 SetW(welcome, "notice", null); SetW(welcome, "language", "zh-Hans");
+// 新功能大窗（大版本首次打开）：内容取仓库里那份 docs/site/feature.json（随包那份），图换成绝对路径（同 updater.py feature_spotlight 给的），每页一张
+var site = Path.Combine(noticeDir!.FullName, "docs/site");
+var featureNode = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(site, "feature.json")))!.AsObject();
+featureNode["kind"] = "feature";
+foreach (var pageNode in featureNode["pages"]!.AsArray()) pageNode!["image"] = Path.Combine(site, pageNode["image"]!.GetValue<string>());
+var featurePopup = JsonDocument.Parse(featureNode.ToJsonString()).RootElement.Clone();
+for (var i = 0; i < featureNode["pages"]!.AsArray().Count; i++)
+{
+    var at = i;
+    SaveW($"08_feature_zh_{at + 1}", w => { SetW(w, "updatePopup", (JsonElement?)featurePopup); SetW(w, "featureIndex", at); });
+}
+SaveW("09_feature_en_1", w => { SetW(w, "language", "en"); SetW(w, "featureIndex", 0); });
+SetW(welcome, "updatePopup", null); SetW(welcome, "language", "zh-Hans");
 
 welcome.Close();
 Dispatcher.UIThread.RunJobs();

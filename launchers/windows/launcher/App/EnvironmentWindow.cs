@@ -318,6 +318,12 @@ public sealed partial class EnvironmentWindow : Window
             ShowPage("import", body);
             return;
         }
+        if (FeatureOpen)   // 大版本首次打开的新功能大窗（FeatureSpotlight.cs）：和更新弹窗同一个位子，排在它前面（updater.py inbox）
+        {
+            RenderFeature(body);
+            ShowPage("feature", body);
+            return;
+        }
         if (updatePopup is not null)   // 打开时最多一个更新弹窗，只给最新一期（UpdateFlow.cs）
         {
             RenderUpdatePopup(body);
