@@ -34,6 +34,14 @@ public struct S2ArmShellHostView: View {
                 }
             }
             .animation(.smooth(duration: 0.25), value: model.deleteNotice)
+            // 首次进入引导（三页横滑：设置 / 金手指 / 故障报修），盖在最上面；看过一次就不再弹
+            .overlay {
+                if model.guideOpen {
+                    S2ArmGuideView(page: Binding(get: { model.guidePage }, set: { model.guidePage = $0 }), close: { model.closeGuide() })
+                        .transition(.opacity)
+                }
+            }
+            .animation(.smooth(duration: 0.25), value: model.guideOpen)
         #if canImport(UIKit)
             // 回前台重判资源包：玩家去「文件」/ 访达拷完资源包回来，不用重开 App
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in model.refreshGameData() }

@@ -71,7 +71,7 @@ void SaveW(string name, Action<EnvironmentWindow> setup)
     setup(welcome);
     SetW(welcome, "page", "library");
     CallW(welcome, "Render");
-    Dispatcher.UIThread.RunJobs();
+    Settle();
     var bmp = welcome.CaptureRenderedFrame();
     if (bmp is not null) { using var s = File.OpenWrite(Path.Combine(outDir, name + ".png")); bmp.Save(s); Console.WriteLine("  saved: " + name); }
     else Console.WriteLine("  WARN no frame: " + name);
@@ -106,6 +106,28 @@ var noticeJson = File.ReadAllText(Path.Combine(noticeDir?.FullName ?? throw new 
 SaveW("06_notice_zh", w => { SetW(w, "notice", (JsonElement?)JsonDocument.Parse(noticeJson).RootElement); SetW(w, "language", "zh-Hans"); });
 SaveW("07_notice_en", w => { SetW(w, "language", "en"); });
 SetW(welcome, "notice", null); SetW(welcome, "language", "zh-Hans");
+// 新功能大窗（大版本首次打开）：内容取仓库里那份 docs/site/feature.json（随包那份），图换成绝对路径（同 updater.py feature_spotlight 给的），每页一张
+var site = Path.Combine(noticeDir!.FullName, "docs/site");
+var featureNode = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(site, "feature.json")))!.AsObject();
+featureNode["kind"] = "feature";
+foreach (var pageNode in featureNode["pages"]!.AsArray())
+{
+    // 同 updater.py feature_spotlight：image 给成 {zh-Hans, en} 绝对路径，英文缺了用中文
+    var raw = pageNode!["image"]!;
+    string Abs(string rel) => Path.Combine(site, rel);
+    var zhImg = raw is System.Text.Json.Nodes.JsonObject o1 ? Abs(o1["zh-Hans"]!.GetValue<string>()) : Abs(raw.GetValue<string>());
+    var enRel = raw is System.Text.Json.Nodes.JsonObject o2 && o2["en"] is { } e ? Abs(e.GetValue<string>()) : null;
+    pageNode["image"] = new System.Text.Json.Nodes.JsonObject { ["zh-Hans"] = zhImg, ["en"] = enRel is not null && File.Exists(enRel) ? enRel : zhImg };
+    pageNode["layout"] = pageNode["title"] is null ? "poster" : "detail";   // 同 updater.py feature_spotlight：只有图 = 海报页
+}
+var featurePopup = JsonDocument.Parse(featureNode.ToJsonString()).RootElement.Clone();
+for (var i = 0; i < featureNode["pages"]!.AsArray().Count; i++)
+{
+    var at = i;
+    SaveW($"08_feature_zh_{at + 1}", w => { SetW(w, "updatePopup", (JsonElement?)featurePopup); SetW(w, "featureIndex", at); });
+}
+SaveW("09_feature_en_1", w => { SetW(w, "language", "en"); SetW(w, "featureIndex", 0); });
+SetW(welcome, "updatePopup", null); SetW(welcome, "language", "zh-Hans");
 
 welcome.Close();
 Dispatcher.UIThread.RunJobs();
@@ -116,10 +138,18 @@ pack.Width = 1280; pack.Height = 900;
 pack.Show();
 Dispatcher.UIThread.RunJobs();
 
+// 让过渡动画（如折叠箭头 0→180° 旋转）走完再截，否则截到半转的箭头像个「厂」字
+void Settle()
+{
+    Dispatcher.UIThread.RunJobs();
+    var until = DateTime.UtcNow.AddMilliseconds(600);
+    while (DateTime.UtcNow < until) { AvaloniaHeadlessPlatform.ForceRenderTimerTick(); Dispatcher.UIThread.RunJobs(); Thread.Sleep(20); }
+}
+
 void SaveP(string name, Action setup)
 {
     setup();
-    Dispatcher.UIThread.RunJobs();
+    Settle();
     var bmp = pack.CaptureRenderedFrame();
     if (bmp is not null) { using var s = File.OpenWrite(Path.Combine(outDir, name + ".png")); bmp.Save(s); Console.WriteLine("  saved: " + name); }
     else Console.WriteLine("  WARN no frame: " + name);
