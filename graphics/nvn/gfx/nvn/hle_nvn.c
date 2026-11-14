@@ -544,8 +544,8 @@ NVN(nvnTextureBuilderSetStride, void, NVNtextureBuilder *b, ptrdiff_t s) { TB(b)
 NVN(nvnTextureBuilderSetStorage, void, NVNtextureBuilder *b, NVNmemoryPool *p, ptrdiff_t off) { TB(b)->pool = (pool_t *)p; TB(b)->off = off; }
 NVN(nvnTextureBuilderSetPackagedTextureLayout, void, NVNtextureBuilder *b, const NVNpackagedTextureLayout *l) {
     TB(b)->has_layout = l != NULL; if (l) memcpy(TB(b)->layout, l->layout, 8);
-    // byte 0 = block height (log2 GOBs) + 1 in bits 0-7; byte 1 = row-width alignment (log2 GOBs) + 1 in bits 8-15 (kept in the same int: tex_t must stay <= 0x80)
-    TB(b)->d.pkg_block_h = l ? (l->layout[0] + 1) | (l->layout[1] + 1) << 8 : 0;
+    // byte 0 (low nibble block height, high nibble block depth, log2 GOBs) | byte 1's low nibble (width alignment, log2 GOBs) << 8, + 1 (one int: tex_t must stay <= 0x80; #676)
+    TB(b)->d.pkg_layout = l ? (l->layout[0] | (l->layout[1] & 0xf) << 8) + 1 : 0;
 }
 NVN(nvnTextureBuilderGetFlags, NVNtextureFlags, const NVNtextureBuilder *b) { return (NVNtextureFlags)((const tex_builder_t *)b)->d.flags; }
 NVN(nvnTextureBuilderGetDevice, const NVNdevice *, const NVNtextureBuilder *b) { return ((const tex_builder_t *)b)->dev; }
