@@ -185,11 +185,13 @@ class PatchesTests(unittest.TestCase):
             r = patches.match(self.c)
             self.assertEqual((r["build"], r["exact"], r["total"]), ("FF1D1C05670DB602", {"widescreen": 0, "fps": 1, "gfx": 0, "cheat": 1}, 2))
             self.assertEqual(r["version"], "1.3.0")
-            self.assertEqual(r["others"], [{"version": "1.0", "cats": ["widescreen"]}, {"version": "1.3.0", "cats": ["fps"]}])
+            # 满屏跨版本：这份（FF1D…）没有同版本的满屏补丁，1.0 版的满屏出包时会尝试移植 → 单列 port，不进「不会打入」的 others
+            self.assertEqual((r["port"], r["portVersions"]), (True, ["1.0"]))
+            self.assertEqual(r["others"], [{"version": "1.3.0", "cats": ["fps"]}])
             cheats.main_build = lambda c, g: ""                                    # 没解过包：不知道版本，精确命中为空，只列各版本
             r = patches.match(self.c)
             self.assertEqual((r["build"], r["total"], r["version"]), ("", 0, ""), "没解过包不报版本号（不知道玩家是哪一版）")
-            self.assertEqual([o["version"] for o in r["others"]], ["1.0", "1.3.0"])
+            self.assertEqual([o["version"] for o in r["others"]], ["1.3.0"])
         finally:
             cheats.main_build = real
 

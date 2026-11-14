@@ -12,12 +12,16 @@ struct PatchMatch: Equatable {
     var build = ""
     var version = ""   // 玩家这份游戏的显示版本号（解过包才有；patches.match）
     var exact: [String: Int] = [:]
+    var port = false                // 满屏跨版本：这份没有同版本的满屏补丁，出包时尝试把别的版本的移植过来（patches.match）
+    var portVersions: [String] = []
     var others: [(version: String, cats: [String])] = []
-    static func == (a: PatchMatch, b: PatchMatch) -> Bool { a.build == b.build && a.exact == b.exact && a.others.map(\.version) == b.others.map(\.version) }
+    static func == (a: PatchMatch, b: PatchMatch) -> Bool { a.build == b.build && a.exact == b.exact && a.port == b.port && a.others.map(\.version) == b.others.map(\.version) }
     init() {}
     init(_ raw: [String: Any]) {
         build = raw["build"] as? String ?? ""
         version = raw["version"] as? String ?? ""
+        port = raw["port"] as? Bool ?? false
+        portVersions = raw["portVersions"] as? [String] ?? []
         exact = (raw["exact"] as? [String: Any] ?? [:]).compactMapValues { $0 as? Int }
         others = (raw["others"] as? [[String: Any]] ?? []).compactMap { o in (o["version"] as? String).map { ($0, o["cats"] as? [String] ?? []) } }
     }
@@ -38,7 +42,7 @@ struct SGradeCard: View {
             BackendText.launcherText("export.sgrade." + $0, language: loc.lang == .zh ? "zh-Hans" : "en") }
             .task(id: gameID) {
                 match = nil; failed = false
-                if let r = try? await model.saveJob("patchMatch", gameID: gameID) { let m = PatchMatch(r); match = m; if m.total == 0, m.others.isEmpty, !m.build.isEmpty { nothing() } } else { failed = true }
+                if let r = try? await model.saveJob("patchMatch", gameID: gameID) { let m = PatchMatch(r); match = m; if m.total == 0, !m.port, m.others.isEmpty, !m.build.isEmpty { nothing() } } else { failed = true }
             }
     }
 }
@@ -60,7 +64,7 @@ struct SGradeCardView: View {
     //   配色跟金色 S 同一套双色：上半香槟金、下半玫瑰金（launchers/macos/Branding/make_s_gold.py），标题 / 描边 / 图标钮都从香槟金过渡到玫瑰金
     static let goldHi = Color(red: 1, green: 0.92, blue: 0.70), gold = Color(red: 0.93, green: 0.77, blue: 0.42), rose = Color(red: 0.93, green: 0.62, blue: 0.52), goldDeep = Color(red: 0.55, green: 0.36, blue: 0.24)
     static let sGold: NSImage = Bundle.main.url(forResource: "s-gold", withExtension: "png").flatMap(NSImage.init(contentsOf:)) ?? NSImage()
-    private var lit: Bool { (match?.total ?? 0) > 0 && on?.wrappedValue != false }
+    private var lit: Bool { ((match?.total ?? 0) > 0 || match?.port == true) && on?.wrappedValue != false }
 
     var body: some View {
         HStack(alignment: .top, spacing: 18) {
@@ -107,13 +111,14 @@ struct SGradeCardView: View {
         if failed {
             note(x("unknown"))
         } else if let m = match {
-            if m.total > 0 {
+            if m.total > 0 || m.port {
                 VStack(alignment: .leading, spacing: 9) {
                     ForEach(["widescreen", "fps", "gfx", "cheat"], id: \.self) { c in
                         if let n = m.exact[c], n > 0 { hitRow(x("hit." + c).replacingOccurrences(of: "{0}", with: String(n)), symbol: Self.catSymbol[c] ?? "checkmark") }
+                        if c == "widescreen", m.port { hitRow(x("port").replacingOccurrences(of: "{0}", with: m.portVersions.isEmpty ? x("port.any") : m.portVersions.prefix(3).joined(separator: zh ? "、" : ", ")), symbol: Self.catSymbol[c] ?? "checkmark") }
                     }
                 }
-                note(x("hit.version").replacingOccurrences(of: "{0}", with: mine(m)))
+                if m.total > 0 { note(x("hit.version").replacingOccurrences(of: "{0}", with: mine(m))) } else if m.build.isEmpty { note(x("later")) }
                 note(x("hit.note"))
             } else {
                 note(m.build.isEmpty ? x("later") : x("none").replacingOccurrences(of: "{0}", with: mine(m)))

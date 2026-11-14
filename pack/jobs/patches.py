@@ -340,7 +340,7 @@ def match(c):
     import cheats
     build = cheats.main_build(c, game)
     version = display_version(c, game) if build else ""
-    exact, others = {k: 0 for k in CATS}, {}
+    exact, others, foreign_ws = {k: 0 for k in CATS}, {}, False
     for it, _ in items_for(c, gid, build):
         if it.get("kind") == "pso":   # 管线种子不是玩家可选的补丁，不列
             continue
@@ -349,11 +349,19 @@ def match(c):
         if build and any(bid_hit(build, b) for b in bids):
             exact[cat] += 1
         else:
+            foreign_ws |= cat == "widescreen"
             v = _version_label(it)   # 看不出版本号的不列（构建号对玩家没意义）
             if v:
                 others.setdefault(v, set()).add(cat)
-    return dict(build=build, version=version, exact=exact, total=sum(exact.values()),
-                others=[dict(version=v, cats=[k for k in CATS if k in cs]) for v, cs in sorted(others.items(), key=lambda kv: [int(x) if x.isdigit() else 0 for x in re.split(r"[.]", kv[0])])])
+    # 满屏跨版本（11-13 维护者「画幅补丁扩大泛化性」，pack/cpatch.py scan 末尾 port_writes）：这份主程序没有同版本的满屏补丁时，出包会把同款别的版本的满屏补丁
+    #   按原指令移植过来，移植成的打入。所以别的版本的满屏补丁不算「不会打入」：单列 port（出包时尝试移植的那几版），others 里去掉满屏这一类（帧率 / 画面 / 金手指才要版本对上）
+    port = foreign_ws and not exact["widescreen"]
+    key = lambda kv: [int(x) if x.isdigit() else 0 for x in re.split(r"[.]", kv[0])]
+    port_versions = [v for v, cs in sorted(others.items(), key=key) if "widescreen" in cs] if port else []
+    if port:
+        others = {v: cs - {"widescreen"} for v, cs in others.items() if cs - {"widescreen"}}
+    return dict(build=build, version=version, exact=exact, total=sum(exact.values()), port=port, portVersions=port_versions,
+                others=[dict(version=v, cats=[k for k in CATS if k in cs]) for v, cs in sorted(others.items(), key=key)])
 
 
 def display_version(c, game):
