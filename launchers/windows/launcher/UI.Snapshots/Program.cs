@@ -110,7 +110,11 @@ SetW(welcome, "notice", null); SetW(welcome, "language", "zh-Hans");
 var site = Path.Combine(noticeDir!.FullName, "docs/site");
 var featureNode = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(site, "feature.json")))!.AsObject();
 featureNode["kind"] = "feature";
-foreach (var pageNode in featureNode["pages"]!.AsArray()) pageNode!["image"] = Path.Combine(site, pageNode["image"]!.GetValue<string>());
+foreach (var pageNode in featureNode["pages"]!.AsArray())
+{
+    pageNode!["image"] = Path.Combine(site, pageNode["image"]!.GetValue<string>());
+    pageNode["layout"] = pageNode["title"] is null ? "poster" : "detail";   // 同 updater.py feature_spotlight：只有图 = 海报页
+}
 var featurePopup = JsonDocument.Parse(featureNode.ToJsonString()).RootElement.Clone();
 for (var i = 0; i < featureNode["pages"]!.AsArray().Count; i++)
 {

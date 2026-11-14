@@ -314,9 +314,10 @@ def _bilingual(value):
 
 
 def feature_spotlight(platform, current, path=None, withdrawn=()):
-    """docs/site/feature.json → 这一期新功能大窗 {id, badge, url?, pages:[{image(绝对路径), kicker, title, what, how, where}]}；不弹 → None。
+    """docs/site/feature.json → 这一期新功能大窗 {id, badge, url?, pages:[…]}；不弹 → None。每页两种版式（通用多页轮播，两端照 layout 画）：
+      poster = 只写 image：一张图铺满大窗（首页海报）；detail = image + kicker / title / what / how / where（各中英两份）：上大图、下说明。
     不弹的情形：文件没有 / 格式不对 / 不给本平台 / 本机版本低于 minVersion（功能还没进这一版，热修不能先把大窗带出去）/ 官网 notice.json 的 featureWithdrawn 列了这一期。
-    文字中英缺一或图不在，这一页不要；一页都不剩就不弹。"""
+    图不在、或说明页的文字缺一项 / 中英缺一，这一页不要；一页都不剩就不弹。"""
     import urllib.parse
     path = Path(path) if path else feature_file()
     try:
@@ -340,10 +341,14 @@ def feature_spotlight(platform, current, path=None, withdrawn=()):
         if not isinstance(row, dict) or not isinstance(row.get("image"), str):
             continue
         image = (path.parent / row["image"]).resolve()
-        texts = {key: _bilingual(row.get(key)) for key in FEATURE_TEXTS}
-        if path.parent.resolve() not in image.parents or not image.is_file() or None in texts.values():
+        if path.parent.resolve() not in image.parents or not image.is_file():
             continue
-        pages.append(dict(texts, image=str(image)))
+        if not any(key in row for key in FEATURE_TEXTS):   # 海报页：只有一张图，铺满大窗
+            pages.append({"layout": "poster", "image": str(image)})
+            continue
+        texts = {key: _bilingual(row.get(key)) for key in FEATURE_TEXTS}
+        if None not in texts.values():   # 说明页：大图 + 标题 + 是什么 / 怎么用 / 在哪用
+            pages.append(dict(texts, layout="detail", image=str(image)))
     if not pages:
         return None
     out = {"kind": "feature", "id": ident, "badge": _bilingual(data.get("badge")) or {"zh-Hans": "新功能", "en": "New"}, "pages": pages}

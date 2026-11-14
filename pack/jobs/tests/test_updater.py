@@ -423,8 +423,13 @@ class FeatureTests(unittest.TestCase):
         f = self.spot()
         self.assertEqual((f["kind"], f["id"], len(f["pages"])), ("feature", "v0.4.0-x", 1))   # 第二页图不在：丢掉
         self.assertEqual(f["pages"][0]["image"], str((self.root / "site/feature/a.jpg").resolve()))
+        self.assertEqual(f["pages"][0]["layout"], "detail")
         self.write(pages=[{"image": "feature/a.jpg", **{k: {"zh-Hans": "中"} for k in updater.FEATURE_TEXTS}}])
         self.assertIsNone(self.spot())   # 缺英文：这页不要，一页不剩不弹
+        self.write(pages=[{"image": "feature/a.jpg", "title": self.T}])
+        self.assertIsNone(self.spot())   # 说明页只写了一部分文字：不要（不当海报页）
+        self.write(pages=[{"image": "feature/a.jpg"}, {"image": "feature/a.jpg", **{k: self.T for k in updater.FEATURE_TEXTS}}])
+        self.assertEqual([p["layout"] for p in self.spot()["pages"]], ["poster", "detail"])   # 只有图 = 海报页
         self.write(pages=[{"image": "../private/x.jpg", **{k: self.T for k in updater.FEATURE_TEXTS}}])
         self.assertIsNone(self.spot())   # 图只认 docs/site 里面的
 
