@@ -109,7 +109,7 @@ struct S2ArmGuideView: View {
                  "**Select a game, then the sliders button at the top (Game settings)**: this game's picture, controls, community patches and cheats.",
                  "**In a game, the gear at the top left** opens the same game settings at any time."]
         case 1: ["Cheats matched to your game's version come built in, and they start **off**.",
-                 "In a game: **top-left gear → S-grade → Cheats**, then switch on the ones you want. Each takes effect in about a second.",
+                 "In a game: **top-left gear → S-grade enhancements → Cheats**, then switch on the ones you want. Each takes effect in about a second.",
                  "Or set them up before playing: **select a game → sliders button at the top → Cheats**."]
         default: ["**Gear at the top right → Report a problem** at the bottom.",
                   "Add a sentence about what happened (optional) and upload. You get a short code starting with **D-**; paste it in the group chat or a GitHub issue.",

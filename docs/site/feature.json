@@ -29,7 +29,7 @@
       "title": {"zh-Hans": "画面铺满，帧率翻倍", "en": "Fill the screen, double the frame rate"},
       "what": {"zh-Hans": "**满屏补丁**按你的屏幕比例铺满，不留黑边、人物不变形；**帧率补丁**让 30 帧的游戏跑 60，高刷屏能到 120。", "en": "**Full-screen patches** fill any screen at its own aspect ratio on iPhone, iPad and Mac, without stretching; **frame-rate patches** take 30 fps games to 60, and up to 120 on high-refresh screens."},
       "how": {"zh-Hans": "命中的满屏、帧率补丁默认开着（没有同版本满屏补丁会从别的版本移植），帧率自动挑最高一档。闪退了，下次启动先关掉当时开着的补丁和金手指，并告诉你关了哪些。", "en": "Matched patches are **on by default**, at the highest frame rate your screen supports. After a crash, the next launch turns off the patches and cheats that were on and tells you."},
-      "where": {"zh-Hans": "想调档或关掉：iPhone / iPad 在游戏里点**左上角齿轮 → S 级优化**；Mac 在游戏库选中这款，点齿轮「**启动设置**」。", "en": "To change or turn one off: on iPhone / iPad, **top-left gear → S-grade** in the game; on Mac, select the game in the library and click the gear, **Launch settings**."}
+      "where": {"zh-Hans": "想关掉：iPhone / iPad 在游戏里点**左上角齿轮 → S 级优化 → 社区补丁**；调帧率档位在**齿轮 → 设置… → 画面**。Mac 在游戏库选中这款，点齿轮「**启动设置**」。", "en": "To turn one off on iPhone / iPad: **top-left gear → S-grade enhancements → Community patches**; frame rate level is under **gear → Settings… → Graphics**. On Mac: select the game and click the gear, **Launch settings**."}
     },
     {
       "image": {"zh-Hans": "feature/sgrade-3.jpg", "en": "feature/sgrade-3-en.jpg"},
@@ -37,7 +37,7 @@
       "title": {"zh-Hans": "金手指，进游戏逐条打开", "en": "Cheats, one switch at a time"},
       "what": {"zh-Hans": "社区整理好的**金手指**，按你的游戏版本自动配好，出包时一起打进去。", "en": "Community **cheats** matched to your game's version are built in when you export."},
       "how": {"zh-Hans": "打进去后**默认关**。想用哪条就打开哪条，约 1 秒生效，不用重启游戏。", "en": "They start **off**. Turn on the ones you want; each takes effect in about a second, no restart."},
-      "where": {"zh-Hans": "iPhone / iPad：游戏里点**左上角齿轮 → S 级优化 → 金手指**。Mac：游戏库选中这款，点齿轮「**启动设置**」。Windows：这款游戏菜单里的「**金手指…**」。", "en": "iPhone / iPad: in the game, **top-left gear → S-grade → Cheats**. Mac: select the game in the library and click the gear, **Launch settings**. Windows: **Cheats…** in the game's menu."}
+      "where": {"zh-Hans": "iPhone / iPad：游戏里点**左上角齿轮 → S 级优化 → 金手指**。Mac：游戏库选中这款，点齿轮「**启动设置**」。Windows：这款游戏菜单里的「**金手指…**」。", "en": "iPhone / iPad: in the game, **top-left gear → S-grade enhancements → Cheats**. Mac: select the game in the library and click the gear, **Launch settings**. Windows: **Cheats…** in the game's menu."}
     }
   ]
 }
