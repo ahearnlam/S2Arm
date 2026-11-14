@@ -1990,6 +1990,8 @@ def update_phone(c):
     others = container_others(c, ph, rec)
     sid = packer.current_shell_id(c)
     st = shell_outdated(c, rec, sid, others)
+    if st is None and c.r.get("sgradeUpgrade") is True:   # 「S 级优化升级」页（v0.4.0）：壳已是本版也重组容器——游戏程序要补上 S 级优化（refresh_ios），资源包照旧不推
+        st = dict(stale=[], fromShell=sid)
     if st is None:
         return dict(updated=False, bundleId=ph.bid, games=others, **ph.info)
     stale = [s["gameId"] for s in st["stale"]]

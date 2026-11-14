@@ -144,6 +144,15 @@ extension LauncherView {
             HStack(spacing: 16) {
                 Text(loc.t("library.collection")).font(.manrope(28, .bold)).tracking(-0.6)
                 Spacer()
+                // S 级优化升级（v0.4.0）：已导出的游戏不用重出包就补上 S 级优化（SGradeUpgradeView）
+                Button { model.sgradeUpgradeOpen = true } label: {
+                    HStack(spacing: 6) {
+                        Image(nsImage: SGradeCardView.sGold).resizable().interpolation(.high).aspectRatio(contentMode: .fit).frame(width: 16, height: 16)
+                        Text(BackendText.launcherText("sgrade.upgrade.button", language: loc.lang == .zh ? "zh-Hans" : "en")).font(.manrope(12.5, .semibold))
+                    }
+                }
+                .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy || model.games.isEmpty)
+                .accessibilityIdentifier("library.sgradeUpgrade")
                 Button { model.refresh() } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 13, weight: .semibold))
                 }
