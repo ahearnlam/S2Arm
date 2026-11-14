@@ -1,9 +1,10 @@
 // 社区画面补丁运行时开关（直连线 10-27，维护者：宽屏 / 60 帧 / 画面补丁进包，宿主设置里启停；10-30 起玩家包缺省不带上游补丁字节，只有 S2A_COMMUNITY_PATCHES=1 出的内部包有这张表）：出包 pack/cpatch.py plan 写的 cpatch.tsv，
 //   每份补丁在本模块占掩码的一位。代码里的改动已由改写器编成双路跳板（读键页槽 2046 的掩码、按位分路，runtime/rewriter/rewriter.c cpatch_rows），
 //   这里只做两件事：按开关算掩码写进槽 2046；开着的补丁的数据写入（代码段之后，ro / data）写成补丁值，写前核原值（对不上 = 包与游戏不配套，那份不开）。
-// 开关：S2A_CPATCH_ON = 逗号分隔的补丁编号（iOS 由 App 设置 S2ACommunityPatches 转来，ios/settings.m）；none = 全关；不设时 Apple 按表里「缺省开」、Android 全关。下次启动生效
+// 开关：S2A_CPATCH_ON = 逗号分隔的补丁编号（iOS 由 App 设置 S2ACommunityPatches 转来，ios/settings.m）；none = 全关；不设时按表里「缺省开」（Apple / Android 同口径，#48 D2 维护方定；安卓目前经调试环境通道设 S2A_CPATCH_ON）。下次启动生效
 // 帧率类（编号 fps:）另跟 60 帧开关走（帧率能耗线 runtime/src/fps.c 起局与每次切换调 s2a_cpatch_fps_follow；没有我方帧率表的款才收这类，见 pack/cpatch.py）
-// 随包表：cpatch.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单）
+// 随包表：cpatch.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单；
+//   安卓 android/tools/make_pack.py 按安卓改写器出表放进 modules/，APK 起局经资源读面交 s2a_cpatch_load_source）
 // 随包表：cheat-src.*.txt
 #include <dlfcn.h>
 #include "native.h"
@@ -263,16 +264,10 @@ static void seed_cheats(const char *dir) {
 #endif
 }
 
-void s2a_cpatch_load(module_t *m, const char *dir) {
-    if (!g_tables_dir[0] && dir) { snprintf(g_tables_dir, sizeof g_tables_dir, "%s", dir); seed_cheats(dir); }   // 主程序（第一个装载的模块）的表目录
-    char p[1100]; snprintf(p, sizeof p, "%s/cpatch.tsv", dir); FILE *f = fopen(p, "r"); if (!f) return;
+// 一个模块按表装载：f 由调用方打开（目录装载 = 模块目录的 cpatch.tsv；APK 起局 = 已验签的内存表），这里读完关掉
+static void cpatch_load_stream(module_t *m, FILE *f) {
     g_boot_file = f;
-    const char *on = getenv("S2A_CPATCH_ON"); int fps_list = 0;   // fps_list：目标帧率也只从开关列表里的帧率补丁取（安卓：社区补丁整体要显式选择）
-#if defined(__ANDROID__) || defined(S2A_CPATCH_ANDROID_DEFAULT)
-    // Android community patch execution is experimental and requires opt-in.
-    if (!on) on = "none";
-    fps_list = 1;
-#endif
+    const char *on = getenv("S2A_CPATCH_ON");
     uint64_t mask = 0; int n = 0, cheat_mods = 0, ch0 = g_nch, fu0 = g_nfu;
     static char line[1 << 16];
     if (!fgets(line, sizeof line, f)) { fclose(f); g_boot_file = NULL; return; }   // 表头
@@ -291,7 +286,7 @@ void s2a_cpatch_load(module_t *m, const char *dir) {
         n++;
         // 帧率补丁里最高的目标帧率（s2a_cpatch_fps_follow 按它定出图上限、出图节拍与服务层 vsync）。帧率类的开关位本来就跟 60 帧开关走、不看开关列表，
         //   目标却原先只从列表里的取：iOS 设置页把帧率补丁做成 60 帧开关的联动、从不写进 S2ACommunityPatches，玩家动过任何一个补丁开关后目标就是 0，
-        //   补丁照开、节拍不放（11-13 实机：列表只有 widescreen:auto → 「sdk fps:… 关」、present tick 60 Hz）。安卓照旧只认列表里的
+        //   补丁照开、节拍不放（11-13 实机：列表只有 widescreen:auto → 「sdk fps:… 关」、present tick 60 Hz）
         if (!strncmp(c[0], "wsauto:", 7)) {   // 自适应画幅：开关按族（去掉末尾 :w / :n），登记后按当前画幅开其一（见 ad_apply）
             char fam[96]; char *sd = strrchr(c[0], ':');
             if (!sd || (sd[1] != 'w' && sd[1] != 'n') || sd[2] || (size_t)(sd - c[0]) >= sizeof fam || c[2][0] < '0' || c[2][0] > '9' || *end || bit < 0 || bit >= 64) {
@@ -354,7 +349,7 @@ void s2a_cpatch_load(module_t *m, const char *dir) {
                 LOG("【红】社区补丁 %s %s：帧率跟随表容量已满，整份不开", m->name, c[0]); st_put(c[0], "表不认"); continue;
             }
             struct cp_fu *u = &g_fu[g_nfu++]; memset(u, 0, sizeof *u);
-            u->m = m; u->bits = 1ull << bit; u->target = c[9] ? atoi(c[9]) : 0; u->allow = (en || !fps_list) && !cp_ios_blocked(c[0]);
+            u->m = m; u->bits = 1ull << bit; u->target = c[9] ? atoi(c[9]) : 0; u->allow = !cp_ios_blocked(c[0]);
             snprintf(u->id, sizeof u->id, "%s", c[0]);
             if (c[7][0] && !(u->spec = strdup(c[7]))) die("社区帧率补丁数据分配失败");
             if (c[7][0]) g_nfud++;
@@ -389,6 +384,19 @@ void s2a_cpatch_load(module_t *m, const char *dir) {
     }
     if (cheat_mods) LOG("金手指：%s 编进包 %d 条（缺省关，局内逐条开关）", m->name, cheat_mods);
     for (int i = fu0; i < g_nfu; i++) g_fu[i].slot = (_Atomic uint64_t *)((uint64_t *)page + CP_SLOT);
+}
+void s2a_cpatch_load(module_t *m, const char *dir) {
+    if (!g_tables_dir[0] && dir) { snprintf(g_tables_dir, sizeof g_tables_dir, "%s", dir); seed_cheats(dir); }   // 主程序（第一个装载的模块）的表目录
+    char p[1100]; snprintf(p, sizeof p, "%s/cpatch.tsv", dir); FILE *f = fopen(p, "r"); if (!f) return;
+    cpatch_load_stream(m, f);
+}
+// APK 起局（loader.c load_modules_from_source）：表与模块旁车同经已验签的 APK 资源读面读进内存，每个模块各按表装一遍。
+//   表进了包却读不到 / 读坏 = 包有问题，报红中止（同 s2a_widen_load_source）；没有这张表的包由调用方跳过
+void s2a_cpatch_load_source(module_t *m, const void *bytes, size_t length) {
+    if (!bytes || !length || length > 16 * 1024 * 1024 || memchr(bytes, 0, length)) die("%s：APK 社区补丁表无效", m->name);
+    FILE *f = fmemopen((void *)(uintptr_t)bytes, length, "r");   // 只读打开，不写回调用方的租约内存
+    if (!f) die("APK 社区补丁表无法读取 errno=%d", errno);
+    cpatch_load_stream(m, f);
 }
 // 定画幅变体按画幅 A 选（持 g_ad_lock）：开着的几份里取与 A 同在 16:9 一侧、log 比值最近的一份；先关不该开的（写回原值、清位）再开选中的
 static void fx_select(double A) {
@@ -446,7 +454,7 @@ double s2a_cpatch_present_aspect(void) {
     return a;
 }
 // 本款有没有开着的社区宽屏类补丁（widescreen: / wsauto:）——补丁优先（11-13 维护者「满画幅是一样的」）：有就让我方满屏整体让位（runtime/src/widen.c widen_setting_on），
-//   不拉宽两次。装载前就要答（屏幕宽在装载早期就读），所以直接读表目录的 cpatch.tsv，按与 s2a_cpatch_load 同一开关口径（S2A_CPATCH_ON；没选过 = 开、安卓缺省全关）
+//   不拉宽两次。装载前就要答（屏幕宽在装载早期就读），所以直接读表目录的 cpatch.tsv，按与 s2a_cpatch_load 同一开关口径（S2A_CPATCH_ON；没选过 = 开，Apple / Android 同口径）
 // need_docked = 1：只数「只改了主机档渲染尺寸」的满屏补丁（第 12 列模式 docked；定画幅 widescreen: 一律算——没参数化、管不了另一档）。
 //   自适应满屏两档都补齐（both）或不涉渲染尺寸（空）的不算：运行模式归玩家（11-09 规矩），不替玩家切主机（host_main.c）
 static int ws_scan(const char *dir, int need_docked);
@@ -455,9 +463,6 @@ int s2a_cpatch_ws_needs_docked(const char *dir) { return ws_scan(dir, 1); }
 static int ws_scan(const char *dir, int need_docked) {
     if (!dir || !dir[0]) return 0;
     const char *on = getenv("S2A_CPATCH_ON");
-#if defined(__ANDROID__) || defined(S2A_CPATCH_ANDROID_DEFAULT)
-    if (!on) on = "none";
-#endif
     if (on && !strcmp(on, "none")) return 0;
     char p[1100]; snprintf(p, sizeof p, "%s/cpatch.tsv", dir); FILE *f = fopen(p, "r"); if (!f) return 0;
     static char line[1 << 16]; int hit = 0;
