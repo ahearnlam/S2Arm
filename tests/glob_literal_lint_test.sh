@@ -25,10 +25,10 @@ ck "② 坏写法两处都报（实际：$(echo "$o" | tr '\n' ' ')）" '[ $r = 
 ck "③ 好写法不报" '! echo "$o" | grep -q "good.py"'
 mkdir -p "$T/[2]NS库/src" && printf x > "$T/[2]NS库/src/p1.pk"
 n=$(python3 -c 'import glob,os,sys; d=os.path.join(sys.argv[1],"[2]NS库"); print(len(glob.glob(os.path.join(d,"src","*.pk"))), len(glob.glob(os.path.join(glob.escape(d),"src","*.pk"))))' "$T")
-ck "④ 路径带 [2]：未转义找到 0 个、转义后找到 1 个（实际 $n）" '[ "$n" = "0 1" ]'
+ck "④ 路径带 [2]：未转义找到 0 个、转义后找到 1 个（实际 ${n}）" '[ "$n" = "0 1" ]'
 # ⑤ #1009 原样：抽取目录在「[2]NS库」下，生产写端写一支、生产读端要读得回来（修前读端 0 支 → 合并抽取第一支就 KeyError）
 k=$(python3 -c 'import sys,os; sys.path.insert(0, os.path.join(sys.argv[1], "graphics/tools/shbake")); import srcpack
 x = os.path.join(sys.argv[2], "[2]NS库", "s2x"); w = srcpack.Writer(x); w.put("000084a91b9e57a2", b"code", b"ctl"); w.flush()
 s = srcpack.Src(x); print(len(s), s.get("000084a91b9e57a2") == (b"code", b"ctl"))' "$H" "$T")
-ck "⑤ srcpack 在「[2]」目录下读得回写进去的那支（实际 $k）" '[ "$k" = "1 True" ]'
+ck "⑤ srcpack 在「[2]」目录下读得回写进去的那支（实际 ${k}）" '[ "$k" = "1 True" ]'
 [ $bad = 0 ] && echo "✅ glob 路径字面量守卫全通" || { echo "🔴 glob 路径字面量守卫有不通"; exit 1; }
