@@ -213,6 +213,26 @@ cpatch.plan(r13, '', [idx13])
 n13 = len(open(r13 + '/cpatch.tsv', encoding='utf-8').read().splitlines()) - 1
 sus13 = sum(l.startswith('可疑不收') for l in open(r13 + '/cpatch_plan.log', encoding='utf-8'))
 ck(f'⑬ 画幅值自相矛盾的补丁不收（实得 进包 {n13}、可疑 {sus13}）', n13 == 0 and sus13 == 1)
+# ⑭ 金手指偏移寄存器（11-13 实测漏收）：同一份里 [A] 04070000 00000100 52800120（R=7 写主程序代码）、[B] 040F0000 00000104 D503201F（R=F）、
+#    [C] 580F0000 00005000 / 780F0000 00000010 / 640F0000 00000000 00000001（指针链，写 RF）。期望：R7 没有任何指令写 → A 编进包（0x100 写 20 01 80 52）；
+#    RF 被 C 的 58 / 78 写 → B 交运行时（writes None）；C 本身有别的类型 → None。再加一条 [D] 30070000 00000002 / 31070000（循环用 R7）后 A 也交运行时
+t14 = '[A]\n04070000 00000100 52800120\n\n[B]\n040F0000 00000104 D503201F\n\n[C]\n580F0000 00005000\n780F0000 00000010\n640F0000 00000000 00000001\n'
+e14 = {e['name']: e['writes'] for e in cpatch.parse_cheats(t14)[1]}
+e14b = {e['name']: e['writes'] for e in cpatch.parse_cheats(t14 + '\n[D]\n30070000 00000002\n31070000\n')[1]}
+ck(f'⑭ 金手指偏移寄存器：文件里没人写的 R 当 0 编进包、有人写的交运行时（实得 {e14}；加循环后 A = {e14b.get("A")}）',
+   e14 == {'A': [(0x100, bytes.fromhex('20018052'))], 'B': None, 'C': None} and e14b.get('A') is None)
+# ⑮ 金手指同文件同处代码的几档（11-13 实测「x3」被当成与「x2」冲突落选）：合成 main 0x100 原字 mov w9,#0 = 52800009；
+#    AABBCCDD00112233.txt：[x2] 写 0x100 = mov w9,#2（52800049），[x3] 写 0x100 = mov w9,#3（52800069）。期望（手算）：两条都进 cpatch.tsv、位各自不同（x2 位 0、x3 位 1，按条目顺序分位）；
+#    cpatch_rows.tsv 同点各一行 p、后面的条目在前（几档同开时后写的生效，跳板先测到的生效）。另一份文件（文件名排后）[x5] 写 528000A9 也并存（位 2，行最前）；
+#    [x1] 写的就是原字 52800009（「改回原样」那档）：登记进表、位「-」、不出行（运行时按编进包处理，不再标「改代码，不支持」）
+r15 = T + '/root15'; shutil.copytree(root, r15, ignore=shutil.ignore_patterns('cpatch*', 'cheat-src*')); cd15 = T + '/cheats15'; os.makedirs(cd15)
+open(cd15 + '/AABBCCDD00112233.txt', 'w').write('[x2]\n04000000 00000100 52800049\n\n[x3]\n04000000 00000100 52800069\n\n[x1]\n04000000 00000100 52800009\n')
+open(cd15 + '/AABBCCDD00112233.zz.txt', 'w').write('[AABB BID=AABBCCDD00112233]\n[x5]\n04000000 00000100 528000A9\n')
+os.environ['S2A_CHEATS_DIRS'] = cd15; cpatch.plan(r15, '', []); del os.environ['S2A_CHEATS_DIRS']
+t15 = [(c[4], c[2]) for c in (l.split('\t') for l in open(r15 + '/cpatch.tsv', encoding='utf-8').read().splitlines()[1:]) if c[0].startswith('cheat:')]
+p15 = [tuple(l.split('\t# ')[0].split('\t')) for l in open(r15 + '/cpatch_rows.tsv').read().splitlines() if l.startswith('p\t')]
+ck(f'⑮ 金手指同处几档（含别的文件）并存、后写的在前（实得 表 {t15}、行 {p15}）',
+   t15 == [('x2', '0'), ('x3', '1'), ('x1', '-'), ('x5', '2')] and p15 == [('p', 'main', '100', '52800009', '528000a9', '2'), ('p', 'main', '100', '52800009', '52800069', '1'), ('p', 'main', '100', '52800009', '52800049', '0')])
 sys.exit(bad)
 EOF
 rc=$?; [ $rc = 0 ] && echo "✅ cpatch_adapt_test 全过" || { echo "🔴 cpatch_adapt_test 有不通项"; exit 1; }

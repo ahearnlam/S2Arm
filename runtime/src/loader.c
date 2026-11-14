@@ -169,6 +169,21 @@ const char *s2a_cheats_dir(void) {
     return d;
 }
 uint64_t s2a_main_base(void) { return g_nmod ? (uint64_t)(uintptr_t)g_mod[0].base : 0; }   // 主程序（Horizon 序第一个模块）装载基址：金手指 Atmosphere「main」区（services Cheats.cs）
+// 金手指 Atmosphere「main」区偏移 → 真实地址（services Cheats.cs）：Horizon 把起局模块按 main → subsdk0..N → sdk 首尾相接装（各自映像尾 4 KB 对齐），
+//   金手指作者照这个排布写偏移，超出 main 的落进后面的模块（11-13 实测：一款的帧率金手指写 main+0x24191F4 = sdk 里的变量）；我们的模块按 2 MB 对齐各自摆放，
+//   直接加 main 基址会写到别的模块的别处。映像尾取各模块 MOD0 的 bss 结尾（与 NSO 头算的映像尾 4 KB 取整后一致，11-13 量 20 款 50 个模块全同）。
+//   直连不装的 GPU 驱动模块不知道大小：排在它后面的偏移、超出最后一个起局模块的偏移都回 0（读写落空，不写错地方）；nn::ro 后装的 NRO 不在 Horizon 这段里
+static int g_nboot, g_boot_cut = 1 << 30;   // 起局装的模块数（之后是 NRO）；第一个前面有没装模块的下标
+uint64_t s2a_main_region_va(uint64_t off) {
+    uint64_t h = 0;
+    for (int i = 0; i < g_nboot && i < g_boot_cut; i++) {
+        const uint8_t *b = g_mod[i].base; uint32_t mod0 = *(const uint32_t *)(b + 4);
+        uint64_t end = ((uint64_t)mod0 + (int64_t)*(const int32_t *)(b + mod0 + 0xC) + 0xFFF) & ~0xFFFull;
+        if (off - h < end) return (uint64_t)(uintptr_t)b + (off - h);
+        h += end;
+    }
+    return 0;
+}
 // 同一表解析器读取目录流或已验证 APK 的借用字节；后者不落地、也不二次打开。
 struct loader_text {
     FILE *file;
@@ -1019,7 +1034,7 @@ void load_modules(const char *dir, const char **names_in, int n_in) {
     const char **names = calloc(n_in > 0 ? (size_t)n_in : 1, sizeof *names); int n = 0;
     if (!names) die("模块名表分配失败");
     for (int i = 0; i < n_in; i++) {
-        if (gpu_driver_skip(dir, names_in[i])) { LOG("直连：%s 是 GPU 驱动模块（gpu_drivers.tsv），不装——游戏对它的调用由直连图形层答", names_in[i]); continue; }
+        if (gpu_driver_skip(dir, names_in[i])) { LOG("直连：%s 是 GPU 驱动模块（gpu_drivers.tsv），不装——游戏对它的调用由直连图形层答", names_in[i]); if (g_boot_cut > n) g_boot_cut = n; continue; }
         names[n++] = names_in[i];
     }
     int cap = n;
@@ -1050,6 +1065,7 @@ void load_modules(const char *dir, const char **names_in, int n_in) {
         LOG("%s: 基址 %p 大小 %#zx", names[i], m->base, m->size);
         g_nmod++;
     }
+    g_nboot = g_nmod;
     s2a_nro_table_load(dir);   // 模块目录的 nro_exports.tsv（出包 tools/nro_exports.py 写；没有 romfs/nro 的款没有这张表）
     finish_modules();          // 统一重定位、填 rtld 手动装载查符号槽、报未解析导入
     if (g_deferred) LOG("装载：%u 个导入延迟到 nn::ro 装载（romfs NRO 导出，游戏用 nn::ro 装进来时才解析；起局前没装就被调到照旧报红中止）", g_deferred);
@@ -1220,7 +1236,7 @@ __attribute__((visibility("default"), used)) int s2a_nro_unmap(uint64_t base) {
 // Signed iOS images are remapped from their pristine original segments.
 void s2a_loader_session_reset(void) {
     for (int i = 0; i < g_mod_cap; i++) free(g_mod[i].symh);
-    free(g_mod); g_mod = NULL; g_mod_cap = 0; g_nmod = 0;
+    free(g_mod); g_mod = NULL; g_mod_cap = 0; g_nmod = 0; g_nboot = 0; g_boot_cut = 1 << 30;
 #if defined(__APPLE__)
     g_modcur = g_slot_at = 0;
 #endif

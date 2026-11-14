@@ -833,15 +833,26 @@ def _adapt_single(c, exefs, log, root, side, fid=None):
 #   文件头 [游戏名 … BID=<构建号>] 写了 BID 的以它为准。构建号对不上主程序的整份不收，原因写进 cpatch_plan.log「版本不对」。
 # 只收「每一行都是类型 0（写常量）、区域 0（主程序）」的条目；别的类型（按键 / 条件 / 堆 / 寄存器）留给运行时 Tamper（services/S2A.Services/Cheats.cs）。
 #   20000000（条件块结束）在只有它的「分类标题」条目里是空操作，不算别的类型。主控（{…}）单独成一份，运行时同文件任一条开着就开（Atmosphere 约定）。
-# 偏移寄存器 R：寄存器装载时全是 0，整份文件只有类型 0 写入时没人改它，R 等于加 0（暗黑 3 这份就写 R=E）；文件里只要有别的类型，R 非 0 的条目交运行时。
+# 偏移寄存器 R：寄存器每轮从 0 起，只有少数指令写寄存器（_reg_writes）；整份文件里没有任何指令写 R 时 R 恒为 0、等于加 0（暗黑 3 这份写 R=E；
+#   另一款写 R=7、同文件别的条目只用 RF 跑指针链——原先「文件里有别的类型就一律交运行时」把它整份改代码条目漏掉了，运行时又写不了代码页）。文件里有指令写 R 的条目交运行时。
 # 编号 cheat:<文件内容 sha256 前 16 位>:<条目在文件里的序号>；段名 = 条目名，来源 = 文件名（Cheats.cs 按「文件名 + 条目名」认）
 CHEAT_RE = re.compile(r'^0([1248])([0-9A-Fa-f])([0-9A-Fa-f])00([0-9A-Fa-f]{2})$')   # 0 T M R 00 AA：宽度 / 区域 / 偏移寄存器 / 地址高位
+
+
+def _reg_writes(op):
+    """一条非类型 0 指令（首字）可能写的寄存器号集合（Atmosphere 指令格式，同 Ryujinx AtmosphereCompiler）：3 循环 / 4 装常量 / 5 读内存 / 7 常量运算 /
+    9 寄存器运算写第 4 位的 R；6 存常量、A 存寄存器在自增位（第 5 位）非 0 时改第 4 位的地址寄存器；0 / 1 / 2 / 8 / F 不写。C 类（存取 / 静态寄存器）与认不出的按全部 16 个算"""
+    t = op[:1].upper()
+    if t in '0128F': return set()
+    if len(op) == 8 and t in '34579': return {int(op[3], 16)}
+    if len(op) == 8 and t in '6A': return {int(op[3], 16)} if op[4] != '0' else set()
+    return set(range(16))
 
 
 def parse_cheats(text):
     """→ (文件头里的 BID 或 '', [{name, master, writes:[(偏移, 字节)] 或 None（有不能编进包的行）}])"""
     m = re.search(r'BID\s*=\s*([0-9A-Fa-f]{16,64})', text.split('\n', 1)[0])
-    bid, out, cur, foreign = (m.group(1).upper() if m else ''), [], None, False
+    bid, out, cur, written = (m.group(1).upper() if m else ''), [], None, set()   # written：整份文件里有指令写的寄存器
     for line in text.splitlines():
         s = line.strip()
         h = re.match(r'^([\[{])(.*)[\]}]$', s)
@@ -851,13 +862,16 @@ def parse_cheats(text):
         if len(w) == 1 and re.fullmatch(r'20[0-9A-Fa-f]{6}', w[0]): continue   # 条件块结束（Atmosphere 只看第 2 位：0 = 结束；有的文件写 20000001），在没有条件块的条目里是空操作
         c = CHEAT_RE.match(w[0]) if len(w) in (3, 4) else None
         if not c or c.group(2) != '0':   # 区域 0 = 主程序；别的类型 / 区域交运行时
-            cur['other'] = True; foreign = True; continue
-        if c.group(3) != '0': cur['reg'] = True
+            cur['other'] = True
+            if not re.fullmatch(r'[0-9A-Fa-f]{8}', w[0]): written |= set(range(16))
+            elif w[0][0] != '0': written |= _reg_writes(w[0])
+            continue
+        if c.group(3) != '0': cur.setdefault('regs', set()).add(int(c.group(3), 16))
         width = int(c.group(1)); off = int(c.group(4) + w[1], 16)
         val = int(''.join(w[2:]), 16)
         if val >> (8 * width): cur['other'] = True; continue
         cur['writes'].append((off, val.to_bytes(width, 'little')))
-    return bid, [dict(e, writes=None if e['other'] or (foreign and e.get('reg')) else e['writes']) for e in out if e['writes'] or e['other']]
+    return bid, [dict(e, writes=None if e['other'] or (e.get('regs', set()) & written) else e['writes']) for e in out if e['writes'] or e['other']]
 
 
 def module_layout(path):
@@ -1445,7 +1459,12 @@ def plan(root, default_on, index_dirs):
         #   runtime/src/cpatch.c fps_pick）。目标相同的两份照旧按「改同一处」落选
         sib = lambda x: (uid.startswith('wsauto:') and x.startswith('wsauto:') and x.rsplit(':', 1)[0] == uid.rsplit(':', 1)[0]) or \
             (A0 is not None and x.startswith('widescreen:') and uasp.get(x) is not None and abs(uasp[x] - A0) > 1e-3) or \
-            (F0 and x.startswith('fps:') and ufps.get(x) and ufps[x] != F0)
+            (F0 and x.startswith('fps:') and ufps.get(x) and ufps[x] != F0) or \
+            (cheat and x.startswith('cheat:'))
+        # 金手指之间改同一处代码（攻速 x2 / x3、伤害 x2 / x5 这类几档写法；几份文件各带一套同样的几档，11-13 实测）：都是兄弟——
+        #   不同的新字分到不同的位（下面 owners 按「同处同值的条目集合」分位），改写器同一点按行序依次测位、多路并存（CP_VAR_MAX，超了记缺口、prune 剔掉）。
+        #   只认「前一个占位者」不够：一份的 x3 占着时另一份的 x2 会被判冲突。几档同时开时 Atmosphere 每帧按顺序执行、后写的生效，
+        #   所以金手指的 p 行按条目倒序输出（跳板先测到的生效）
         # 金手指专用（11-12）：映像到键页前（bss 与其后空余可写，开关表搬过去）、写原值的字节不占（暗黑 3 主控把空洞清零）、
         #   代码段结尾到 ro 开头的尾巴当代码字（金手指往这里写新代码，改写器按 w 行常写）。社区补丁照原判定
         ext = cheat or u['meta'].get('ext')   # FPSLocker 单元同此规则
@@ -1457,7 +1476,9 @@ def plan(root, default_on, index_dirs):
                 if cheat and im[o] == v: continue
                 if o < code_end: w0 = o & ~3; words.setdefault(w0, bytearray(words.get(w0) or im[w0:w0 + 4]))[o - w0] = v
                 else: data[o] = v
-        if not why and cheat and not words and not data: why = '全部写入与原值相同，不用改'
+        # 金手指写的全是原值（「… off / normal」这类：把某档改回原指令）：照样登记进表（位 -、无数据写入），运行时按「编进游戏」处理——开关只记一笔，
+        #   写代码页的行由包接管、静默跳过。原先判「不用改」不进表，运行时照写代码页、标「改代码，不支持」（11-13 实测；那个字常是别的档的双路点，
+        #   内存里已是跳板，运行时比不了原值）。与改同处的那档同时开时，那档生效（Atmosphere 是后写的生效，这种组合本身无意义）
         if not why and uid.startswith('widescreen:'):
             r = phone_res(words, wkinds(mod))
             if r: log.append(f'改值\t{uid}\t{mod}\t渲染尺寸按手机口径：{r}')
@@ -1540,15 +1561,17 @@ def plan(root, default_on, index_dirs):
             if bits.get(mod, 0) >= 64: dropped |= set(us); continue
             setbit[k] = bits.get(mod, 0); bits[mod] = setbit[k] + 1
         for x in us: ubits.setdefault(x, set()).add(setbit[k])
+    crows = []   # 金手指各条的行：倒序并进 rows（见上「后写的生效」）
     for uid, mod, u, words, data in cheats:
         if uid in dropped: log.append(f'不收\t{uid}\t{mod}\t{u["name"][:40]}\t{mod} 槽 2046 的 64 位用尽'); continue
-        im = img(mod)[0]
+        im = img(mod)[0]; mine = []
         for w0, nb in sorted(words.items()):
             orig = int.from_bytes(im[w0:w0 + 4], 'little'); new = int.from_bytes(nb, 'little')
             if new == orig: continue
             if fill(im, w0): r = f'w\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}'
             else: r = f'p\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}\t{setbit[(mod, frozenset(owners[(mod, w0, bytes(nb))]))]}'
-            if not any(x.startswith(r + '\t') for x in rows): rows.append(f'{r}\t# ' + ','.join(owners.get((mod, w0, bytes(nb)), [uid])))
+            mine.append((r, f'{r}\t# ' + ','.join(owners.get((mod, w0, bytes(nb)), [uid]))))
+        crows.append(mine)
         runs, cur = [], None
         for o in sorted(data):
             if cur and o == cur[0] + len(cur[1]): cur[1].append(data[o]); continue
@@ -1556,7 +1579,10 @@ def plan(root, default_on, index_dirs):
         dw = ' '.join(f'{o:x}:{im[o:o + len(b)].hex()}:{bytes(b).hex()}' for o, b in runs)
         bl = ','.join(map(str, sorted(ubits.get(uid, ())))) or '-'
         table.append((uid, mod, bl, u, dw))
-        log.append(f'收\t{uid}\t{mod}\t{u["name"][:40]}\t位 {bl}，代码 {len(words)} 字、数据 {len(data)} 字节')
+        log.append(f'收\t{uid}\t{mod}\t{u["name"][:40]}\t' + (f'位 {bl}，代码 {len(words)} 字、数据 {len(data)} 字节' if words or data else '全部写入与原值相同：空操作，登记为编进包'))
+    for mine in reversed(crows):
+        for r, line in mine:
+            if not any(x.startswith(r + '\t') for x in rows): rows.append(line)
     on = set(x for x in default_on.split(',') if x)
     with open(os.path.join(root, 'cpatch_rows.tsv'), 'w') as f: f.write('\n'.join(rows) + ('\n' if rows else ''))
     # FPSLocker 收下的单元：定期写入表交运行时（services/S2A.Services/FpsLocker.cs，随包表 fpslocker.json）；没有就删掉旧表

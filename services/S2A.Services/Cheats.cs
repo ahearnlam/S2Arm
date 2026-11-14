@@ -202,7 +202,7 @@ namespace S2A.Services
                     else if (exe == 0 || l == null) { p.Status = "游戏未装载"; p.Off = true; }
                     else
                     {
-                        var compiler = new AtmosphereCompiler(exe, l->HeapBase, l->AliasBase, l->AslrBase, packed ? new GameProcess { Packed = true } : process);
+                        var compiler = new AtmosphereCompiler(MainVirtual, l->HeapBase, l->AliasBase, l->AslrBase, packed ? new GameProcess { Packed = true } : process);
                         p.Code = compiler.Compile(e.Key, e.Lines);
                         if (p.Code == null) { p.Status = "指令有误"; p.Off = true; }
                         else { p.Code.IsEnabled = true; p.Status = packed ? "生效中（编进游戏）" : "生效中"; }
@@ -250,9 +250,25 @@ namespace S2A.Services
             catch (IOException e) { Console.Error.WriteLine($"金手指：写 status.txt 失败 {e.Message}"); }
         }
 
+        // 「main」区（Atmosphere 区号 0）：偏移按 Horizon 排布算——main 后面首尾相接 subsdk0..N、sdk（各自映像尾 4 KB 对齐），超出 main 的落进后面的模块；
+        //   我们的模块按 2 MB 对齐各自摆放（runtime/src/loader.c），直接加 main 基址会写到别的模块的别处（11-13 实测：一款的帧率金手指写 main+0x24191F4，
+        //   是 sdk 里的变量，原先落到 sdk 另一处）。编译时 main 区基址交虚拟基址 MainVirtual，读写时经原生层 s2a_main_region_va 换成该模块的真实地址。
+        //   虚拟区间在 2^56 起，远高于任何真实用户态地址（< 2^47）；从游戏内存读出来的指针都是真实地址，不会落进虚拟区间被误换
+        internal const ulong MainVirtual = 1UL << 56, MainSpan = 1UL << 40;   // Atmosphere 偏移 40 位
+        internal static Func<ulong, ulong> MainVa = off => Imports.s2a_main_region_va(off);   // 单测换成假排布
+
         // 游戏内存适配：只读已映射页、只写可写页（MemoryPermission 位：1 读、2 写、4 执行）
         internal sealed class GameProcess : ITamperedProcess
         {
+            // main 区虚拟地址 → 真实地址；换不出（超出起局模块 / 前面有没装的模块）按没映射报，界面显示「地址未就绪」、不写别处
+            private static ulong Real(ulong va)
+            {
+                if (va - MainVirtual >= MainSpan) return va;
+                ulong r = MainVa(va - MainVirtual);
+                if (r == 0) throw new TamperExecutionException($"main 区偏移 0x{va - MainVirtual:X} 不在起局模块里");
+                return r;
+            }
+
             public ProcessState State => ProcessState.Started;
             public bool TamperedCodeMemory { get; set; }
             public bool Packed;   // 这条编进了包：写只读代码页的行已由包里的改动接管，静默跳过
@@ -278,15 +294,17 @@ namespace S2A.Services
 
             public T ReadMemory<T>(ulong va) where T : unmanaged
             {
+                va = Real(va);
                 Check(va, (ulong)Unsafe.SizeOf<T>(), false);
                 return Dispatcher.Instance.Memory.Read<T>(va);
             }
 
             public void WriteMemory<T>(ulong va, T value) where T : unmanaged
             {
+                va = Real(va);
                 if (!Check(va, (ulong)Unsafe.SizeOf<T>(), true)) return;
                 Dispatcher.Instance.Memory.Write(va, value);
-                // 每个写入地址首次写时记一行（至多 64 个）：指针链金手指落到哪里只有运行时知道，排查「写成功但没效果」靠它对照宿主对象地址
+                // 每个写入地址首次写时记一行（至多 64 个，换算后的真实地址）：指针链金手指落到哪里只有运行时知道，排查「写成功但没效果」靠它对照宿主对象地址
                 lock (Written) if (Written.Count < 64 && Written.Add(va)) Console.Error.WriteLine($"金手指：写 0x{va:X} {Unsafe.SizeOf<T>()} 字节");
             }
             private static readonly HashSet<ulong> Written = new HashSet<ulong>();
@@ -306,6 +324,7 @@ namespace S2A.Services
             private const string Lib = "s2a_native";
             [DllImport(Lib)] public static extern Layout* s2a_layout_get();
             [DllImport(Lib)] public static extern ulong s2a_main_base();
+            [DllImport(Lib)] public static extern ulong s2a_main_region_va(ulong off);
             [DllImport(Lib)] public static extern byte* s2a_main_build_id();
             [DllImport(Lib)] public static extern byte* s2a_cheats_dir();
             [DllImport(Lib)] public static extern int s2a_cpatch_cheat(byte* file, byte* name, int on);
