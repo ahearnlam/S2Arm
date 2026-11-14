@@ -15,7 +15,7 @@ namespace Ryujinx.Audio.Backends.Apple
 {
     [SupportedOSPlatform("macos")]
     [SupportedOSPlatform("ios")]
-    class AppleHardwareDeviceSession : HardwareDeviceSessionOutputBase
+    class AppleHardwareDeviceSession : HardwareDeviceSessionOutputBase, Ryujinx.Audio.Integration.IS2AOutputDepth   // 平台例外：苹果会话自己实现中性的在途深度接口，共享代码只认接口、不引用苹果类型
     {
         // S2Arm: a pool of 32 device buffers of up to 50 ms each, filled as soon as samples are queued (DeviceBufferPump), instead of
         // 3 buffers of 10 ms refilled only from the device callback. 50 ms holds a whole game buffer (witcher3 audout: 1024 frames =
@@ -318,7 +318,10 @@ namespace Ryujinx.Audio.Backends.Apple
                 return;
             }
 
-            if (_timeline.Tick(zero, returned, elapsed) && now - _lastHealTicks >= (long)HealBackoffMs * Stopwatch.Frequency / 1000)
+            // S2Arm (11-13 断音): iOS only. A macOS queue recovers by itself (QueueTimelineWatch), and its criterion cannot tell a timeline
+            //   ahead from a queue playing at zero margin: 0400486024DEC000 Mac 局第 26 秒 a 30 ms render stall left zero margin, this fired, and the
+            //   synchronous stop / restart only cut the audio once more (zero-in-flight hand-backs 24 → 39 in the next window)
+            if (OperatingSystem.IsIOS() && _timeline.Tick(zero, returned, elapsed) && now - _lastHealTicks >= (long)HealBackoffMs * Stopwatch.Frequency / 1000)   // 平台例外：苹果后端内部，iOS 队列跑前要重启、macOS 队列自己恢复
             {
                 S2ARecover($"队列时间轴跑到声音前面（这 {elapsed * 1000 / Stopwatch.Frequency} ms 交还 {returned / _bytesPerFrame} 帧、{zero} 次交还后在途为 0：欠载后交的缓冲排在已过去的时刻，没播就交还）",
                            false, now, false);
@@ -918,6 +921,12 @@ namespace Ryujinx.Audio.Backends.Apple
                 return _queuedCount == 0 || _queued[_queuedHead].DriverIdentifier != buffer.DataPointer;
             }
         }
+
+        // S2Arm (11-13 断音): what the renderer paces by (AudioProcessor.S2ADepthWait): queued + submitted, not handed back yet.
+        //   Only while the device plays: in pre-roll the queue must fill to the prime floor on the wall clock
+        public long S2ABufferedFrames => Volatile.Read(ref _queueRunning) && !Volatile.Read(ref _disposed)
+            ? (_pump.InFlightBytes + _samples.Length) / _bytesPerFrame
+            : -1;
 
         public override void PrepareToClose() { }
         // S2Arm: the buffer goes back to the game (Stop / FlushBuffers / Dispose) possibly before it was played: keep what it held
