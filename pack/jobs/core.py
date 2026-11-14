@@ -280,6 +280,11 @@ def atomic(path, value):
         tmp.unlink(missing_ok=True)
 
 
+def _windows():
+    """resolve_path 的平台判断单独一处：单测只换它，不改全局 os.name（改了 pathlib 会去建 WindowsPath，在 Mac / Linux 上直接抛异常）"""
+    return os.name == "nt"
+
+
 def resolve_path(path):
     """Resolve a path while keeping Windows ERROR_UNRECOGNIZED_VOLUME (1005) volumes usable.
 
@@ -291,7 +296,7 @@ def resolve_path(path):
     try:
         return path.resolve()
     except OSError as error:
-        if os.name != "nt" or getattr(error, "winerror", None) != 1005:
+        if not _windows() or getattr(error, "winerror", None) != 1005:
             raise
         absolute = Path(os.path.abspath(path))
         if not absolute.anchor or absolute.anchor.startswith("\\\\"):
