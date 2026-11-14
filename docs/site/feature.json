@@ -13,7 +13,7 @@
       "title": {"zh-Hans": "出包时，自动带上社区补丁和金手指", "en": "Community patches and cheats, built in automatically"},
       "what": {"zh-Hans": "S2Arm 按你的游戏版本，从社区补丁库里找能用的**满屏补丁、帧率补丁和金手指**，出包时一起打进去。", "en": "S2Arm looks up **full-screen patches, frame-rate patches and cheats** that match your game's version and builds them in when you export."},
       "how": {"zh-Hans": "不用自己找、自己装。照常点「开始出包」就行，命中的会自动打进包。", "en": "Nothing to find or install. Just click Start export as usual; matches are built in for you."},
-      "where": {"zh-Hans": "选一款去出包：出包页金色的「**S 级优化（Beta）· 出包时打入**」默认勾着，列出命中的每一项和作者，不要可以取消。", "en": "Pick a game and go to export: the gold \"**S-grade (Beta) · Build in when exporting**\" box is checked by default and lists every match and its author. Uncheck it if you don't want them."}
+      "where": {"zh-Hans": "选一款去出包：出包页上金色的「**S 级优化**」卡片列出命中的每一项和作者，右边的「**出包时打入**」默认勾着，不要可以取消。", "en": "Pick a game and go to export: the gold **S-grade** card lists every match and its author; **Build in when exporting** on its right is checked by default, and you can uncheck it."}
     },
     {
       "image": "feature/sgrade-2.jpg",
