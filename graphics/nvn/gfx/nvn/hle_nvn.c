@@ -203,7 +203,7 @@ NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     if (!dev_ok(cur) || cur == d) { atomic_store(&g_cur_dev, d); dev_apply(o); }
     else LOG("[nvn] another NVN device %p initialized while %p is current: it keeps its own window origin / depth mode, the backend switches when its queue submits", (void *)d, (void *)cur);
     nvn2_device_init();   // Switch 2: NVN2's GOB order and log line (nvn2.c); nothing on Switch 1
-    OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
+    LOG("[nvn] DeviceInitialize %p flags=%#x", (void *)d, o->flags);   // 地址常打（一局一两行）：金手指指针链落点对照用
     return 1;
 }
 NVN(nvnDeviceFinalize, void, NVNdevice *d) { ((dev_t_ *)d)->magic = 0; NVNdevice *e = d; atomic_compare_exchange_strong(&g_cur_dev, &e, NULL); }
@@ -2980,6 +2980,8 @@ void s2a_nvn_set_xwrap(void *(*w)(const char *, void *)) {
 // ---------- Window / present ----------
 #define WB(b) ((win_builder_t *)(b))
 static void nvn2_win_builder_defaults(NVNwindowBuilder *b);   // 「NVN2 入口全量」段
+#define NAT_ITV_OFF 0xf14   // 原生窗口对象里的交换间隔（见 nat_itv）
+#define NAT_MAGIC 0x5f776e64u   // 原生窗口对象头「dnw_」
 NVN(nvnWindowBuilderSetDefaults, void, NVNwindowBuilder *b) { NVNdevice *dev = WB(b)->dev; memset(b, 0, sizeof(win_builder_t)); WB(b)->dev = dev; WB(b)->interval = 1;
     if (nvn2_on()) nvn2_win_builder_defaults(b); }   // NVN2 字段在 0x40 之后：只有 Switch 2 的构建器有那么大
 NVN(nvnWindowBuilderSetDevice, void, NVNwindowBuilder *b, NVNdevice *d) { WB(b)->dev = d; }
@@ -3008,13 +3010,26 @@ NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
     if (o->ntex > 0 && o->tex[0]) { o->crop[2] = (int)CTX(o->tex[0])->d.width; o->crop[3] = (int)CTX(o->tex[0])->d.height; }
     for (int i = 0; i < o->ntex; i++) if (o->tex[i]) nvn_be_xv_window_tex(CTX(o->tex[i])->serial);
     if (nvn2_on()) nvn2_win_init(w, b);   // NVN2：获取超时、色彩空间、HDR 元数据从构建器带过来（「NVN2 入口全量」段）
-    LOG("[nvn] WindowInitialize swap chain %d textures, interval %d, first %dx%d format %#x", o->ntex, o->interval,
+    // 先认对象头标记「dnw_」（系统原生窗口对象开头 4 字节，11-13 一款游戏实测），认得出再读 +0xF14：单测 / 别的写法给的原生窗口指针不碰
+    int dnw = o->native && *(const volatile uint32_t *)o->native == NAT_MAGIC, nat0 = dnw ? *(volatile int32_t *)((char *)o->native + NAT_ITV_OFF) : -1;
+    o->nat = nat0 == 1; if (o->nat) *(volatile int32_t *)((char *)o->native + NAT_ITV_OFF) = o->interval;   // 同真机驱动：建窗口时把间隔写进原生窗口（见 nat_itv）
+    LOG("[nvn] WindowInitialize %p native %p（%s交换间隔同步%s，原值 %d） swap chain %d textures, interval %d, first %dx%d format %#x", (void *)w, o->native, dnw ? "" : "对象头不认、", o->nat ? "开" : "关", nat0, o->ntex, o->interval,
         o->ntex ? (int)CTX(o->tex[0])->d.width : 0, o->ntex ? (int)CTX(o->tex[0])->d.height : 0, o->ntex ? CTX(o->tex[0])->d.format : 0);
     return 1;
 }
 NVN(nvnWindowGetNativeWindow, NVNnativeWindow, const NVNwindow *w) { return ((const win_t *)w)->native; }
-NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { return ((const win_t *)w)->interval; }   // Link's Awakening reads it back every frame
-NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { if (((win_t *)w)->interval != v) LOG("[nvn] the game sets present interval %d → %d", ((win_t *)w)->interval, v); ((win_t *)w)->interval = v; }
+// 原生窗口的交换间隔（11-13）：真机驱动 nvnWindowSetPresentInterval / 建窗口时把间隔写进系统原生窗口对象（构建器 SetNativeWindow 给的那个，+0xF14，
+//   sdk 里的显示层代码就读写这一处），出图时按它走。直连层不走系统显示层，原先只记在自己的 win_t 里：公开库常见的帧率金手指（指针链落到原生窗口 +0xF14 写 1）
+//   写成功却不生效（一款游戏开着仍 30 帧）。这里照驱动的做法双向同步：设间隔时写进去，每次出图读回来，被别人改了（金手指）就跟着改。
+//   只在建窗口时这一处是系统缺省值 1 时才开（别的 SDK 版本这里若不是交换间隔，不写它）
+static volatile int32_t *nat_itv(const win_t *o) { return o->nat && o->native ? (volatile int32_t *)((char *)o->native + NAT_ITV_OFF) : NULL; }
+static void nat_itv_sync(win_t *o) {
+    volatile int32_t *p = nat_itv(o); if (!p) return;
+    int v = *p;
+    if (v != o->interval && v >= 0 && v <= 4) { LOG("[nvn] 原生窗口交换间隔被改成 %d（游戏设的 %d；金手指等直接写系统窗口），出图跟它", v, o->interval); o->interval = v; }
+}
+NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { nat_itv_sync((win_t *)w); return ((const win_t *)w)->interval; }   // 原生窗口被改过（金手指）先读回来，同驱动   // Link's Awakening reads it back every frame
+NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { win_t *o = (win_t *)w; if (o->interval != v) LOG("[nvn] the game sets present interval %d → %d", o->interval, v); o->interval = v; volatile int32_t *p = nat_itv(o); if (p) *p = v; }
 // 显示层裁切（nn::vi::SetLayerCrop，说明见 graphics/nvn/host_adapt.m s2a_vi_entry）：上屏取窗口贴图的区域。nvnWindowSetCrop 写的是同一个系统窗口裁切，谁最后写算谁
 static pthread_mutex_t g_vi_mu = PTHREAD_MUTEX_INITIALIZER; static int g_vi_crop[4];
 int32_t h_vi_set_layer_crop(void *layer, int32_t x, int32_t y, int32_t w, int32_t h) {
@@ -3633,7 +3648,7 @@ static void fstep_tick(const win_t *o) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (dm_gfx_session_stopping()) return;
-    win_t *o = (win_t *)w; o->presents++;
+    win_t *o = (win_t *)w; o->presents++; nat_itv_sync(o);
     if (q) { pthread_mutex_lock(&g_sub_mu); nvn_be_xq_flush(q, "a present on it"); pthread_mutex_unlock(&g_sub_mu); }   // 上屏排在这条队列的工作后面：停在跨队列等待上的部分先放行（nvn_xqueue.inc）
     if (q && dev_ok(((queue_t *)q)->dev) && atomic_load(&g_cur_dev) != ((queue_t *)q)->dev) { pthread_mutex_lock(&g_sub_mu); dev_follow(((queue_t *)q)->dev); pthread_mutex_unlock(&g_sub_mu); }   // 上屏翻转跟上屏队列的设备
     {   // 节拍主人：被上屏这张的取图线程（取图线程未知 = 上屏线程自己）；连续 PACE_SWITCH 次同一个才换
