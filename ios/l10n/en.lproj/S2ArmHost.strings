@@ -331,6 +331,7 @@
 "diag.upload.cancelSending" = "Uploading… (tap to cancel)";
 "diag.upload.cancelled" = "Upload cancelled. You can export the diagnostics package and send it to us yourself.";
 "diag.upload.copy" = "Copy code";
+"diag.upload.runNext" = "Record more next time (if it happens again)";
 "diag.upload.done.message" = "Code: %@\nTap Post on GitHub and the code is filled in for you, or copy the code into your issue or the group. It’s valid for 7 days.\nRepository: %@";
 "diag.upload.done.title" = "Uploaded";
 "diag.upload.fail.busy" = "Too many uploads just now. Wait a minute and try again, or export the diagnostics bundle and send it to us yourself.";

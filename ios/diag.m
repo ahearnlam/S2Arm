@@ -20,6 +20,7 @@
 #include <sys/sysctl.h>
 #include "native.h"
 #include "diagredact.h"
+NSUserDefaults *s2a_ios_settings_defaults(void);   // settings.m：诊断局开关 S2ADiagRunNext 与设置页同一份存储
 #include "s2a_unattended.h"
 #include "s2a_pad.h"   // s2a_pad_plus_press：手柄长按「+」开菜单
 #include "s2a_launch_ctx.h"
@@ -450,6 +451,10 @@ static void upload_zip(UIViewController *host, NSURL *zip) {
                 LOG("诊断包：打开 GitHub 发帖页（短码 %s）", code.UTF8String); [UIApplication.sharedApplication openURL:issue_url(code) options:@{} completionHandler:nil]; }];
             [a addAction:post]; a.preferredAction = post;   // 主按钮
             [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.upload.copy") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; UIPasteboard.generalPasteboard.string = code; LOG("诊断包：短码已复制"); }]];
+            // 诊断局（#438）从设置页挪到这里（11-14 重做）：报完问题顺手问一句，下一局多记一些再传一次；已开着就不问
+            if (![s2a_ios_settings_defaults() boolForKey:@"S2ADiagRunNext"])
+                [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.upload.runNext") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x;
+                    [s2a_ios_settings_defaults() setBool:YES forKey:@"S2ADiagRunNext"]; LOG("诊断包：玩家选了下一局开诊断局"); }]];
             [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]];
         } else {
             a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.upload.fail.title") message:fail preferredStyle:UIAlertControllerStyleAlert];

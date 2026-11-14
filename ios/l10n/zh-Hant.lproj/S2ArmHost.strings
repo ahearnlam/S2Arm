@@ -304,6 +304,7 @@
 "diag.upload.cancelSending" = "正在上傳…（點按取消）";
 "diag.upload.cancelled" = "上傳已取消。可以改用匯出診斷包，手動發給我們。";
 "diag.upload.copy" = "複製短碼";
+"diag.upload.runNext" = "下一局多記一些（問題還會出現時）";
 "diag.upload.done.message" = "短碼：%@\n點「前往 GitHub 發文」，診斷碼會自動填好；也可以複製短碼貼到討論串或群組裡，7 天內有效。\n儲存庫網址：%@";
 "diag.upload.done.title" = "已上傳";
 "diag.upload.fail.busy" = "剛才上傳太頻繁，請等一分鐘再試；也可以改為匯出診斷包，手動傳給我們。";

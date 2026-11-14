@@ -82,8 +82,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
     if (g == 8) return nil;   // S 级优化：金色头（viewForHeaderInSection）
     if (g == 6) return S2AL(@"play.group");
     if (g == 7) return S2AL(@"settings.group.language");
-    if (g == 5) return S2APICK(S2A_DPROMPT_SWITCH_GAME_TITLE);
-    return @[S2AL(@"cpatch.group.gfx"), S2AL(@"settings.group.controls"), S2AL(@"settings.group.diag"), S2AL(@"settings.group.dev"), S2AL(@"settings.group.saves")][g];
+    return g == 2 ? nil : S2AL(@"cpatch.group.gfx");   // 2：开发者页，标题在导航栏
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (self.groups[section].integerValue) {
@@ -91,11 +90,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         case 6: return S2AL(@"play.footer");
         case 7: return S2AL(@"settings.footer.language");
         case 0: return S2AL(@"settings.footer.graphics");
-        case 1: return S2AL(@"settings.footer.controls");
-        case 2: return S2AL(@"settings.footer.diag");
-        case 4: return S2AL(@"settings.footer.saves");
-        case 5: return S2APICK(S2A_DPROMPT_SWITCH_GAME_NOTE);
-        default: return S2AL(@"settings.footer.dev");
+        default: return S2AL(@"settings.footer.dev");   // 2：开发者页
     }
 }
 // S 级优化（社区补丁 + 金手指，11-13 统一入口）：金色分组头，同启动器与游戏库设置一套样式（sgrade_style.m）
@@ -141,10 +136,18 @@ static UILabel *textLabel(UIFontTextStyle style) {
     _columns = [[UIStackView alloc] initWithArrangedSubviews:@[_left.view, _right.view]];
     _columns.axis = UILayoutConstraintAxisHorizontal; _columns.distribution = UIStackViewDistributionFillEqually;
     _columns.translatesAutoresizingMaskIntoConstraints = NO; [self.view addSubview:_columns];
+    // 11-14 重做（维护者「太丑、好多功能冗余」）：单栏，最宽 620 居中，横屏也不拆两栏；右栏只当「开发者」页用（见 openDeveloper）
+    _right.view.hidden = YES;
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    NSLayoutConstraint *fill = [_columns.widthAnchor constraintEqualToAnchor:safe.widthAnchor]; fill.priority = UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[
-        [_columns.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor], [_columns.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [_columns.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor], [_columns.widthAnchor constraintLessThanOrEqualToConstant:620], fill,
         [_columns.topAnchor constraintEqualToAnchor:safe.topAnchor], [_columns.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor]]];
+    // 标题长按 1.5 秒进「开发者」页（诊断局、触屏诊断、打开时导出、两个开发浮层：玩家用不到，不放在主页面）
+    UILabel *titleLabel = [UILabel new]; titleLabel.text = self.title; titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    titleLabel.userInteractionEnabled = YES; titleLabel.accessibilityIdentifier = @"settings.title";
+    UILongPressGestureRecognizer *dev = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(developerPress:)]; dev.minimumPressDuration = 1.5;
+    [titleLabel addGestureRecognizer:dev]; self.navigationItem.titleView = titleLabel;
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:S2AL(@"common.done") style:UIBarButtonItemStyleDone target:self action:@selector(done)];
     self.navigationItem.rightBarButtonItem.accessibilityIdentifier = @"settings.done";
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:NSUserDefaultsDidChangeNotification object:nil];
@@ -170,15 +173,28 @@ static UILabel *textLabel(UIFontTextStyle style) {
     [self refresh];
 }
 - (void)updateColumns {
-    BOOL compact = self.view.bounds.size.width < 650 || UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
-    NSArray *secondary = _runtime.manageSaves ? @[@1, @7, @4, @2, @3] : @[@1, @7, @2, @3];   // 7：界面语言（11-13）
-    if (_runtime.switchGame) secondary = [@[@5] arrayByAddingObjectsFromArray:secondary];   // 多款容器：「切换游戏」放第二栏最上（找回游戏库的玩家先看到）
-    NSArray *groups = compact ? [@[@6, @0, @8] arrayByAddingObjectsFromArray:secondary] : @[@6, @0, @8];   // S 级优化（8；7 是 main 的语言组）紧跟画面
+    // 11-14 重做：设置页只放低频、改了要重启的——屏幕（6）/ 画面（0）/ S 级优化（8）/ 语言（7）。
+    //   局内随手调、当场生效的（布局、摇杆、震动、手柄与体感、性能浮层、存档、切换游戏、故障报修）都在齿轮菜单（vpad.m），这里不再重复一份；
+    //   开发项（组 2）在标题长按进的「开发者」页
+    NSArray *groups = @[@6, @0, @8, @7];
     if (![_left.groups isEqual:groups]) {
-        _left.groups = groups; _right.groups = secondary; _right.view.hidden = compact;
+        _left.groups = groups; _right.groups = @[@2];
         // 转屏切换分组后必须直接失效旧行；refresh 先取 visibleCells 会让 UITableView 用旧 section 查询新数组，越界退出。
         [_left.tableView reloadData]; [_right.tableView reloadData];
     }
+}
+- (void)developerPress:(UILongPressGestureRecognizer *)press { if (press.state == UIGestureRecognizerStateBegan) [self openDeveloper]; }
+- (void)openDeveloper {
+    if (self.navigationController.topViewController != self) return;
+    S2ASettingsPane *page = [S2ASettingsPane new]; page.owner = self; page.groups = @[@2]; page.title = S2AL(@"settings.group.dev");
+    page.view.backgroundColor = UIColor.systemGroupedBackgroundColor; page.navigationItem.rightBarButtonItem = self.navigationItem.rightBarButtonItem;
+    [self.navigationController pushViewController:page animated:YES];
+}
+// 测试开关（真机自动化长按不了标题；同 diag.m S2A_OPEN_SETTINGS，环境变量只有 devicectl / Xcode 起 App 能给，玩家碰不到）：S2A_SETTINGS_DEV=1 一打开就进「开发者」页
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    static BOOL once; const char *e = getenv("S2A_SETTINGS_DEV");
+    if (!once && e && !strcmp(e, "1")) { once = YES; [self openDeveloper]; }
 }
 - (void)refresh {
     if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self refresh]; }); return; }
@@ -188,6 +204,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         if ([cell.contentView viewWithTag:100] && [(UISlider *)[cell.contentView viewWithTag:100] isTracking]) return;
     }
     [_left.tableView reloadData]; [_right.tableView reloadData];
+    if ([self.navigationController.topViewController isKindOfClass:S2ASettingsPane.class]) [((S2ASettingsPane *)self.navigationController.topViewController).tableView reloadData];
 }
 - (void)showError:(NSString *)message {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"settings.error.title") message:message preferredStyle:UIAlertControllerStyleAlert];
@@ -330,10 +347,9 @@ static UILabel *textLabel(UIFontTextStyle style) {
 - (NSInteger)rowsForGroup:(NSInteger)group {
     if (group == 6) return 2;
     if (group == 7) return 2;   // 界面语言、游戏语言
-    if (group == 4 || group == 5) return 1;
-    // 操作组 5 行：布局 / 手柄按键排布 / NS2 Pro / 体感 / 手机震动；诊断组 5 行：导出 / 性能浮层 / 触屏显示 / 打开时导出 / 诊断局（11-13 与齿轮菜单统一：两处都有的开关同一个键）
     if (group == 8) return 1 + (_patchGroups.count > 0);   // S 级优化：社区补丁（这款有才列）+ 金手指
-    return group == 0 ? (NSInteger)[self graphicsRows].count : [@[@0, @5, @5, @2][group] integerValue];
+    if (group == 2) return 5;   // 开发者页：打开时导出 / 诊断局 / 触屏诊断 / S2Arm 浮层 / Metal 浮层
+    return group == 0 ? (NSInteger)[self graphicsRows].count : 0;
 }
 // 画面组的行（11-13 维护者撤掉我方 60 帧与通用满屏，只用社区补丁）：画质四项 → 满屏（这款有宽屏补丁才列）→ 帧率（有帧率补丁才列）→ 运行模式；
 //   值 0–3 = 画质选项序号，6 / 7 / 9 = toggleKeys 序号（满屏 / 帧率 / 运行模式）
@@ -390,17 +406,6 @@ static UILabel *textLabel(UIFontTextStyle style) {
             [weakSelf.navigationController.topViewController presentViewController:alert animated:YES completion:nil]; [weakSelf refresh];
         } identifier:@"settings.uiLanguage"];
     }
-    if (group == 5) {   // 多款容器切换游戏：点了弹确认（runtime.switchGame），同「导出诊断包」一样是一行动作
-        UITableViewCell *cell = [self baseCell:S2APICK(S2A_DPROMPT_SWITCH_GAME_ACTION)];
-        cell.textLabel.textColor = self.view.tintColor; cell.textLabel.numberOfLines = 0;
-        cell.accessibilityIdentifier = @"settings.switchGame";
-        return cell;
-    }
-    if (group == 4) {
-        UITableViewCell *cell = [self baseCell:S2AL(@"settings.manageSaves")];
-        cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.manageSaves";
-        return cell;
-    }
     if (group == 8) {   // S 级优化：社区补丁 → 补丁页；金手指 → 金手指页（都推进本设置的导航里）
         BOOL patches = _patchGroups.count > 0 && row == 0;
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
@@ -437,24 +442,8 @@ static UILabel *textLabel(UIFontTextStyle style) {
             [s2a_ios_settings_defaults() setObject:values[index] forKey:option[@"key"]]; [weakSelf refresh];
         } identifier:@"settings.filter"];
     }
-    if (group == 1 && row == 0) {
-        UITableViewCell *cell = [self baseCell:S2AL(@"vpad.layouts.title")]; cell.detailTextLabel.text = s2a_vpad_layout_name();
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; cell.accessibilityIdentifier = @"settings.layouts";
-        cell.userInteractionEnabled = s2a_vpad_has_layouts(); if (!cell.userInteractionEnabled) cell.textLabel.textColor = UIColor.secondaryLabelColor;
-        return cell;
-    }
-    if (group == 1 && row == 1) {   // 手柄按键排布（定义表 game_settings.v1.json padFace，所有游戏共用；controller.m 监听偏好变化，下一次按键即生效）
-        NSArray *values = @[@"auto", @"switch", @"xbox"];
-        NSString *cur = [NSUserDefaults.standardUserDefaults stringForKey:@"padFace"];
-        NSInteger sel = s2a_pad_layout_parse ? s2a_pad_layout_parse(cur.UTF8String) : (NSInteger)MAX(0, (NSInteger)[values indexOfObject:cur ?: @"auto"]);
-        if (sel < 0 || sel > 2) sel = 0;
-        return [self dropdown:S2AL(@"settings.padFace") labels:@[S2AL(@"settings.padFace.auto"), S2AL(@"settings.padFace.switch"), S2AL(@"settings.padFace.xbox")]
-                     selected:sel enabled:^BOOL(NSInteger index) { (void)index; return YES; }
-                       choose:^(NSInteger index) { [NSUserDefaults.standardUserDefaults setObject:values[index] forKey:@"padFace"]; [weakSelf refresh]; } identifier:@"settings.padFace"];
-    }
-    if (group == 2 && row == 0) { UITableViewCell *cell = [self baseCell:s2a_diag_is_uploading() ? S2AL(@"diag.upload.cancelSending") : S2AL(@"diag.report.title")]; cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.export"; return cell; }
-    if (group == 2) { static const NSInteger diag[] = {0, 11, 8, 3, 10}; return [self toggleCell:diag[row]]; }
-    return [self toggleCell:group == 1 ? row - 2 : row + 4];
+    static const NSInteger dev[] = {3, 10, 8, 4, 5};   // toggleKeys 下标
+    return [self toggleCell:dev[MIN(MAX(row, 0), 4)]];
 }
 - (void)selectGroup:(NSInteger)group row:(NSInteger)row {
     if (group == 8 && !(_patchGroups.count > 0 && row == 0)) {
@@ -470,15 +459,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
             patches.navigationItem.rightBarButtonItem = self.navigationItem.rightBarButtonItem;
             [self.navigationController pushViewController:patches animated:YES];
         }
-    } else if (group == 1 && row == 0) {
-        UIViewController *layouts = s2a_vpad_layout_controller();
-        if (layouts) {
-            layouts.navigationItem.rightBarButtonItem = self.navigationItem.rightBarButtonItem;
-            [self.navigationController pushViewController:layouts animated:YES];
-        }
-    } else if (group == 2 && row == 0) { if (s2a_diag_is_uploading()) s2a_diag_cancel_upload(); else s2a_diag_report(); }
-    else if (group == 4 && row == 0) _runtime.manageSaves(self.navigationController.topViewController);
-    else if (group == 5 && row == 0 && _runtime.switchGame) _runtime.switchGame(self.navigationController.topViewController);
+    }
 }
 - (void)close {
     [self.navigationController dismissViewControllerAnimated:!UIAccessibilityIsReduceMotionEnabled() completion:^{ s2a_vpad_set_settings_open(NO); }];
@@ -551,5 +532,6 @@ void s2a_settings_present(UIViewController *presenter) {
     S2ASettingsNavigation *navigation = [[S2ASettingsNavigation alloc] initWithRootViewController:[S2ASettingsController new]];
     navigation.modalPresentationStyle = UIModalPresentationOverFullScreen; navigation.modalInPresentation = YES;
     navigation.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    navigation.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;   // 11-14 重做：和游戏画面同一种深色，不再是灰毛玻璃上压白卡片
     [presenter presentViewController:navigation animated:!UIAccessibilityIsReduceMotionEnabled() completion:nil];
 }
