@@ -57,11 +57,18 @@ def rewriter_bin(c):
 
 
 def original_exefs(c, game, work):
-    """这款的原始 exefs 目录；取不到（原件不在 / 不是 NSP、XCI）→ None"""
+    """这款的原始 exefs 目录；取不到（原件不在 / 不是 NSP、XCI）→ None。
+    顺序：共用解包目录 → 这款的 Mac 运行版本自带的 exefs/（出过 Mac 版的款，原件删了 / 外接盘没插也能补 S 级优化）→ 从原件只解 exefs"""
     from build import extract_valid, shared_dir
     from library import selected_packages, source_path
     if extract_valid(c, game):
         return shared_dir(c, game) / "extract/exefs"
+    try:
+        mac = layout.image_mac(c, game["id"], create=False) / "exefs"
+        if (mac / "main").is_file() and (mac / "main.npdm").is_file():
+            return mac
+    except (OSError, Failure):
+        pass
     packages = selected_packages(game)
     if any(p.get("format") for p in packages if p.get("format") not in (None, "nsp", "xci", "nsz", "xcz")):
         return None   # 解包好的文件夹 / Switch 2 NUP：没有现成的只解 exefs 路子，留给重新出包
@@ -251,16 +258,23 @@ def refresh_ios(c, games):
     if not todo:
         return []
     c.emit("message", f"正在核对 {len(todo)} 款游戏的程序是否要按新版更新（含 S 级优化补丁）")
-    updated = []
+    updated, missing = [], []
     for g in todo:
         try:
-            if check_and_update(c, g, layout.ios_kit(c, g), "ios", rid) == "updated":
+            r = check_and_update(c, g, layout.ios_kit(c, g), "ios", rid)
+            if r == "updated":
                 updated.append(g)
+            elif r == "unavailable":
+                missing.append(g)
         except (Failure, OSError, subprocess.SubprocessError) as e:
             # 核对是附带的一步：某款核不了（改写器在它上面出错、原件读不了）不挡这次装机；这款保留原来的产物、不记指纹，下次再核
             c.emit("message", f"【黄】{g} 没核成要不要按新版更新程序，先保留原来的：{str(e)[:200]}")
     if updated:
         c.emit("message", f"已更新 {len(updated)} 款游戏的程序（资源不用重推）")
+    if missing:   # 不悄悄跳过：说清哪几款这次没补上、怎么补
+        names = {x["id"].upper(): x.get("name") or x["id"] for x in c.catalog()["games"]}
+        c.emit("message", "【黄】这几款这次没补上 S 级优化（找不到游戏原件，也没有 Mac 版可借）："
+               + "、".join(names.get(g.upper(), g) for g in missing) + "。插上存原件的盘（或在游戏库里重新添加原件）后再更新一次就会补上；这次照常装，游戏照常能玩")
     return updated
 
 

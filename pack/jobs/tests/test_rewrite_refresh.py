@@ -166,5 +166,23 @@ class RewriteRefreshTests(unittest.TestCase):
             self.assertEqual(m["sgradeKey"], "k1")
             self.assertFalse(rr.refresh_mac(self.c, "0100A", rt), "记号没变不再做")
 
+    # 原件不在：出过 Mac 版的款用 Mac 运行版本自带的 exefs/（老游戏补 S 级优化不必回原件）
+    def test_original_exefs_falls_back_to_mac_runtime(self):
+        import build
+        mac = self.tmp / "img-mac"; (mac / "exefs").mkdir(parents=True)
+        (mac / "exefs/main").write_bytes(b"x"); (mac / "exefs/main.npdm").write_bytes(b"x")
+        with patch.object(build, "extract_valid", return_value=False), patch.object(rr.layout, "image_mac", return_value=mac):
+            self.assertEqual(rr.original_exefs(self.c, {"id": "0100A"}, self.tmp), mac / "exefs")
+
+    # 补不上的款不悄悄跳过：点名、说怎么补
+    def test_unavailable_games_are_named(self):
+        self.c.catalog = lambda: {"games": [{"id": "0100A", "name": "甲游戏"}, {"id": "0100B", "name": "乙游戏"}]}
+        with patch.object(rr, "rewriter_id", return_value="rid-new"), patch.object(rr, "sgrade_off", return_value=False), \
+             patch.object(rr, "sgrade_key", return_value="k"), patch.object(rr.layout, "game_info", return_value={}), \
+             patch.object(rr.layout, "ios_kit", return_value=self.tmp), \
+             patch.object(rr, "check_and_update", side_effect=lambda c, g, *a: "unavailable" if g == "0100A" else "updated"):
+            self.assertEqual(rr.refresh_ios(self.c, ["0100A", "0100B"]), ["0100B"])
+        self.assertTrue(any("甲游戏" in e and "没补上 S 级优化" in e and "乙游戏" not in e for e in self.events), self.events)
+
 if __name__ == "__main__":
     unittest.main()
