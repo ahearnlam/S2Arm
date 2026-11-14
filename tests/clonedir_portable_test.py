@@ -58,6 +58,24 @@ class CloneDirContract(unittest.TestCase):
             self.assertEqual((target / 'sentinel').read_text(), 'safe')
             self.assertEqual(sorted(p.name for p in target.iterdir()), ['sentinel'])
 
+    def test_root_copy_falls_back_when_clone_is_refused(self):
+        # D-GHJC（11-14）：源和目标不在同一卷，macOS cp -c 报「clonefile failed: Cross-device link」退出 1。期望手写：
+        #   _root_cp 退回普通复制、退出 0、目标内容与源相同；源不存在时照旧失败（普通复制也失败）
+        if sys.platform != 'darwin':
+            self.skipTest('只在 macOS 走克隆')
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); bin_ = base / 'bin'; bin_.mkdir()
+            (bin_ / 'cp').write_text('#!/bin/bash\nfor a in "$@"; do [ "$a" = -c ] && { echo "cp: clonefile failed: Cross-device link" >&2; exit 1; }; done\nexec /bin/cp "$@"\n')
+            (bin_ / 'cp').chmod(0o755)
+            src = base / 'main'; src.write_bytes(b'NSO0' + bytes(range(256)))
+            roots = SCRIPT.parents[1] / 'pack' / 'roots.sh'
+            env = dict(os.environ, PATH=f'{bin_}:{os.environ["PATH"]}')
+            ok = subprocess.run(['bash', '-c', 'source "$1"; _root_cp "$2" "$3"', '_', str(roots), str(src), str(base / 'out')], capture_output=True, env=env)
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertEqual((base / 'out').read_bytes(), src.read_bytes())
+            bad = subprocess.run(['bash', '-c', 'source "$1"; _root_cp "$2" "$3"', '_', str(roots), str(base / 'missing'), str(base / 'out2')], capture_output=True, env=env)
+            self.assertNotEqual(bad.returncode, 0)
+
     def test_snapshot_preserves_source_and_link_contract(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)

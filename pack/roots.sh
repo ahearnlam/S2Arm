@@ -28,7 +28,9 @@ S2A_ROOTS=${S2A_ROOTS:-$S2A_ROOTS_SHARED}
 # macOS 保留 clonefile 复制；Linux 使用保留元数据的独立拷贝，错误直接上报。
 _root_cp() {
   case $(uname -s) in
-    Darwin) cp -c "$@" || return $? ;;
+    # 克隆不了（源和目标不在同一卷：游戏换过存放位置、缓存在另一块盘；exFAT / HFS+ 不支持克隆）就退回普通复制：
+    #   诊断 D-GHJC（11-14）追加内容缓存 cp -c 报「clonefile failed: Cross-device link」整单失败。普通复制也失败才算失败，报的是它的原话
+    Darwin) cp -c "$@" 2> /dev/null || cp -p "$@" || return $? ;;
     Linux) cp -p "$@" || return $? ;;
     *) echo "【红】不支持的目录复制宿主" >&2; return 1 ;;
   esac
