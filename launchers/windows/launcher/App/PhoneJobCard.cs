@@ -284,7 +284,8 @@ public sealed partial class EnvironmentWindow
         return panel;
     }
 
-    /// <summary>「详细过程」：自己画的折叠头，箭头是矢量路径（Expander 的箭头是字体字形，部分 Windows 字体里没有，显示成一个「厂」字）</summary>
+    /// <summary>「详细过程」：自己画的折叠头，箭头是矢量路径。原注释说「Expander 的箭头是字体字形、显示成厂字」是误判：
+    /// Fluent Expander 的箭头本来就是矢量路径，那次看到的怪形是截图截在箭头旋转动画中途（11-14 体验梳理查实）。自绘这一个保留：样式与本卡片一致、没有动画</summary>
     private Control DetailsToggle(string header, string text)
     {
         var body = new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 260, IsVisible = false };
