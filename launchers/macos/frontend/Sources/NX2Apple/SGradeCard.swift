@@ -136,6 +136,24 @@ struct SGradeCardView: View {
     }
 }
 
+/// 游戏库封面左上角的金色 S（v0.4.0 维护者：已导出的游戏自动补上 S 级优化，封面点亮金色 S）：金色毛玻璃 S + 暗底圆角托，浅色深色封面上都看得清
+struct SGradeBadge: View {
+    var size: CGFloat = 28
+    var sImage: NSImage = SGradeCardView.sGold
+    var body: some View {
+        Image(nsImage: sImage).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+            .frame(width: size, height: size)
+            .padding(size * 0.14)
+            .background(RoundedRectangle(cornerRadius: size * 0.32).fill(Color.black.opacity(0.42)))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.32).strokeBorder(LinearGradient(colors: [SGradeCardView.goldHi.opacity(0.7), SGradeCardView.rose.opacity(0.5)],
+                                                                                              startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8))
+            .shadow(color: SGradeCardView.gold.opacity(0.55), radius: size * 0.3)
+            .padding(6)
+            .accessibilityLabel("S")
+            .accessibilityIdentifier("card.sgrade")
+    }
+}
+
 /// 启动设置里的「S 级优化」一组（社区补丁 + 金手指，11-13 维护者：各界面入口与样式统一一次）：同出包页卡片一套金色——
 ///   金色毛玻璃 S、香槟金到玫瑰金的标题与描边、一句崩溃兜底的说明；下面的行照常（CardRow / 开关），只是放在金色描边的卡里
 struct SGradeGroupCard<Content: View>: View {

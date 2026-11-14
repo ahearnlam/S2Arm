@@ -164,6 +164,7 @@ extension LauncherView {
                                     .clipShape(RoundedRectangle(cornerRadius: 5))
                                     .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(
                                         game.id == heroID ? LauncherPalette.cream : .clear, lineWidth: 2))
+                                    .overlay(alignment: .topLeading) { if game.sgrade { SGradeBadge(size: max(24, cardWidth / 9)) } }   // 金色 S：这款有 S 级优化（v0.4.0）
                                     Text(game.name).font(.manrope(16, .semibold)).lineLimit(1)
                                     status(game)
                                     Capsule().fill(game.id == heroID ? LauncherPalette.cream : .clear)

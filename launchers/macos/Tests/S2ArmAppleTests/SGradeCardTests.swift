@@ -45,6 +45,20 @@ import XCTest
         XCTAssertGreaterThan(on, off, "取消勾选应不亮（金色像素 \(on) 对 \(off)）"); XCTAssertGreaterThan(off, 0)
     }
 
+    // 游戏库封面左上角金色 S（v0.4.0）：叠在一张亮色、一张暗色的「封面」上都画得出（金色像素 > 0），存图看样子
+    func testCardBadgeOnLightAndDarkCovers() throws {
+        _ = NSApplication.shared
+        let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../Branding/s-gold.png").standardized
+        let img = try XCTUnwrap(NSImage(contentsOf: src))
+        for (name, bg) in [("light", Color(red: 0.85, green: 0.9, blue: 1.0)), ("dark", Color(red: 0.08, green: 0.1, blue: 0.14))] {
+            let view = Rectangle().fill(bg).frame(width: 300, height: 167).overlay(alignment: .topLeading) { SGradeBadge(size: 33, sImage: img) }
+            let r = ImageRenderer(content: view); r.scale = 2
+            let rep = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(r.nsImage?.tiffRepresentation)))
+            if let dir = ProcessInfo.processInfo.environment["S2A_SGRADE_SHOT"] { try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appendingPathComponent("sgrade_badge_\(name).png")) }
+            XCTAssertGreaterThan(goldPixels(rep), 0, "\(name) 封面上金色 S 画得出")
+        }
+    }
+
     // 启动设置里的「S 级优化」组：金色头 + 金色描边卡 + 真的小节与开关行（SGradeSettingsRows，同启动设置一份代码）。
     //   金手指 40 条：收起态只多一行汇总（框不随条数变长）；展开态列表限高 300 点、带搜索
     func renderGroup(open: Bool) throws -> NSBitmapImageRep {
