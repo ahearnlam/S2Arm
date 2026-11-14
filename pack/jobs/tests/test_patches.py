@@ -150,6 +150,16 @@ class PatchesTests(unittest.TestCase):
         finally:
             patches._get = real
 
+    def test_cloud_update_not_downloaded_falls_back_to_snapshot(self):
+        # 内置补丁库优先（11-14 维护者）：云端清单说这款的包更新了、但这个包没下下来（下载站只剩清单）→ 用随启动器装的快照里那份，不是一条都不打
+        old_g = [dict(self.bundles[f"g/{GID}"][0], name="old.pchtxt")]
+        self.snapshot({"b/FF1D1C05670DB602": self.bundles["b/FF1D1C05670DB602"], f"g/{GID}": old_g})
+        (self.base / f"g/{GID}.json.gz").unlink()
+        dirs = patches.fetch(self.c, dict(id=GID), str(self.exefs))
+        self.assertEqual(sorted(Path(d).name for d in dirs), ["fps", "widescreen"])
+        ws = (Path(dirs[1]) / "INDEX.tsv").read_text().splitlines()
+        self.assertEqual(Path(dict(zip(ws[0].split("\t"), ws[1].split("\t")))["path"]).name, "old.pchtxt")
+
     def test_cloud_dropped_bundle_is_not_used(self):
         # 云端清单里已经没有的包（上游删了）：快照里有也不用
         self.snapshot({"b/FF1D1C05670DB602": self.bundles["b/FF1D1C05670DB602"]})

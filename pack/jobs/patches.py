@@ -102,7 +102,7 @@ def bundle(c, key, cloud, snap, snap_get):
     """这一款的一个包 → 条目列表。本地优先、云端兜底（11-13 维护者）：
       云端取得到：以云端清单为准——本地（之前增量下过的 / 随启动器装的快照）有同 sha256 的直接用，没有才下这一个包（增量），下好存进私有缓存；
                   云端清单里已经没有这个包（上游删了）= 不用；
-      云端取不到：用本地已有的（增量下过的优先，其次快照）。核不过 sha256 的一律不用"""
+      云端取不到 / 云端有更新但这个包没下下来：用本地已有的（增量下过的优先，其次快照）。核不过 sha256 的一律不用"""
     cache = Path(c.private) / "community-cache" / "v2"
     p = cache / (key + ".json.gz")
     have = p.read_bytes() if p.is_file() else None
@@ -126,17 +126,27 @@ def bundle(c, key, cloud, snap, snap_get):
                 print(f"补丁：{key} 云端有更新，已增量下载（{len(got)} 字节）", file=sys.stderr)
             elif got is not None:
                 print(f"补丁：{key} 内容与云端清单不符，不收", file=sys.stderr)
+        if data is None:   # 云端有更新却没下下来（断网 / 下载站不通 / 内容不符）：退回本地已有的（增量下过的 > 随启动器装的快照），不因为下不到更新就一条都不打（11-14 维护者：内置补丁库优先）
+            data = _local(have, snap, snap_get, key)
         if data is None:
             return []
     else:
-        sw = (snap.get(key) or {}).get("sha256")
-        data = have if have is not None else (snap_get(key) if snap_get and sw else None)
-        if data is None or (data is not have and hashlib.sha256(data).hexdigest() != sw):
+        data = _local(have, snap, snap_get, key)
+        if data is None:
             return []
     try:
         return json.loads(gzip.decompress(data)).get("items", [])
     except (OSError, ValueError):
         return []
+
+
+def _local(have, snap, snap_get, key):
+    """本地已有的这个包：增量下过的（私有缓存）> 随启动器装的快照（核过快照清单里的 sha256）；都没有 = None"""
+    if have is not None:
+        return have
+    sw = (snap.get(key) or {}).get("sha256")
+    data = snap_get(key) if snap_get and sw else None
+    return data if data is not None and hashlib.sha256(data).hexdigest() == sw else None
 
 
 _MANIFEST = {}
