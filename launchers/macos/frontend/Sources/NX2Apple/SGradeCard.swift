@@ -32,7 +32,8 @@ struct SGradeCard: View {
     @State private var failed = false
 
     var body: some View {
-        SGradeCardView(match: match, failed: failed, zh: loc.lang == .zh) { BackendText.launcherText("export.sgrade." + $0, language: loc.lang == .zh ? "zh-Hans" : "en") }
+        SGradeCardView(match: match, failed: failed, zh: loc.lang == .zh, on: Binding(get: { model.sgradeOn(gameID) }, set: { model.setSgrade(gameID, $0) })) {
+            BackendText.launcherText("export.sgrade." + $0, language: loc.lang == .zh ? "zh-Hans" : "en") }
             .task(id: gameID) {
                 match = nil; failed = false
                 if let r = try? await model.saveJob("patchMatch", gameID: gameID) { let m = PatchMatch(r); match = m; if m.total == 0, m.others.isEmpty, !m.build.isEmpty { nothing() } } else { failed = true }
@@ -45,6 +46,8 @@ struct SGradeCardView: View {
     let match: PatchMatch?
     let failed: Bool
     let zh: Bool
+    /// 「出包时打入」勾选（v0.4.0 维护者：作为 Beta 功能出包页默认勾上，玩家可取消；取消 = 这次出包不带社区补丁与金手指）；nil = 不出勾选（单测旧图）
+    var on: Binding<Bool>? = nil
     /// export.sgrade.<键> → 当前语言的文字
     let x: (String) -> String
     /// 金色 S（缺省读 App 资源 s-gold.png；单测传仓库里的原图）
@@ -55,7 +58,7 @@ struct SGradeCardView: View {
     //   配色跟金色 S 同一套双色：上半香槟金、下半玫瑰金（launchers/macos/Branding/make_s_gold.py），标题 / 描边 / 图标钮都从香槟金过渡到玫瑰金
     static let goldHi = Color(red: 1, green: 0.92, blue: 0.70), gold = Color(red: 0.93, green: 0.77, blue: 0.42), rose = Color(red: 0.93, green: 0.62, blue: 0.52), goldDeep = Color(red: 0.55, green: 0.36, blue: 0.24)
     static let sGold: NSImage = Bundle.main.url(forResource: "s-gold", withExtension: "png").flatMap(NSImage.init(contentsOf:)) ?? NSImage()
-    private var lit: Bool { (match?.total ?? 0) > 0 }
+    private var lit: Bool { (match?.total ?? 0) > 0 && on?.wrappedValue != false }
 
     var body: some View {
         HStack(alignment: .top, spacing: 18) {
@@ -69,8 +72,13 @@ struct SGradeCardView: View {
                         .foregroundStyle(LinearGradient(colors: [Self.goldHi, Self.gold, Self.rose], startPoint: .leading, endPoint: .trailing))
                     Text("BETA").font(.manrope(9.5, .bold)).tracking(1.4).padding(.horizontal, 7).padding(.vertical, 2.5)
                         .foregroundStyle(Self.gold).overlay(Capsule().strokeBorder(Self.gold.opacity(0.55), lineWidth: 1))
+                    if let on {
+                        Spacer(minLength: 12)
+                        Toggle(x("toggle"), isOn: on).toggleStyle(.checkbox).font(.manrope(12.5, .medium)).tint(Self.gold)
+                            .accessibilityIdentifier("export.sgrade.toggle")
+                    }
                 }
-                content
+                if on?.wrappedValue == false { note(x("off")) } else { content }
             }
             Spacer(minLength: 0)
         }

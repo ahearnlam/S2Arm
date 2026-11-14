@@ -714,6 +714,10 @@ public final class S2ArmLauncherModel: ObservableObject {
 
     /// 出一款：起一个出包编排作业（剃刀 H13，pack/jobs/export_plan.py），计划只有这一款的这几个平台、不写批次文件。
     /// 平台顺序、iPhone 之后还有平台时先不清解包（followUp）、这台电脑出不了的平台都在作业层；这里只按它的事件画每个平台的进度与结局。
+    /// 出包页「S 级优化（Beta）· 出包时打入」（v0.4.0 维护者：默认勾上，玩家可取消）：按款记住；没记过 = 勾上
+    func sgradeOn(_ gameID: String) -> Bool { !UserDefaults.standard.bool(forKey: "S2ASGradeOff." + gameID) }
+    func setSgrade(_ gameID: String, _ on: Bool) { objectWillChange.send(); UserDefaults.standard.set(!on, forKey: "S2ASGradeOff." + gameID) }
+
     func runExport(_ item: QueuedExport) {
         failAction(nil, game: nil)
         let game = item.game, platforms = item.platforms
@@ -723,6 +727,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         if let location = item.location { plan["location"] = location }
         if let target = item.target { plan["deviceTarget"] = target }
         if item.spaceOverride { plan["spaceOverride"] = true }
+        if !sgradeOn(game.id) { plan["sgrade"] = false }   // 出包页取消「S 级优化（Beta）」：这次不带社区补丁与金手指（pack/jobs/patches.py prepare）
         start(session) { [weak self] sink in
             guard let self else { return nil }
             do { _ = try await self.provider.export(plan: plan, hasIPhone: platforms.contains(.ios), events: self.exportSink(sink)) }

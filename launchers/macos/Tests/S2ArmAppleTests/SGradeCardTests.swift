@@ -10,12 +10,13 @@ import XCTest
 @MainActor final class SGradeCardTests: XCTestCase {
     static let texts = ["title": "S 级优化", "loading": "正在匹配社区补丁…", "hit.widescreen": "{0} 个满屏补丁，已打入并默认开启", "hit.fps": "{0} 个帧率补丁，已打入并默认开启",
                         "hit.cheat": "{0} 条金手指，已打入、默认关闭，进游戏后按需打开", "hit.note": "开着补丁如遇到不兼容导致游戏崩溃，下次启动会自动将崩溃补丁关掉以确保您正常游戏。",
-                        "none": "这个版本暂无社区补丁", "others": "游戏的其他版本有社区支持：", "cat.fps": "帧率", "cat.widescreen": "满屏", "cat.cheat": "金手指"]
-    func render(_ m: PatchMatch?, _ name: String) throws -> NSBitmapImageRep {
+                        "none": "这个版本暂无社区补丁", "others": "游戏的其他版本有社区支持：", "cat.fps": "帧率", "cat.widescreen": "满屏", "cat.cheat": "金手指",
+                        "toggle": "出包时打入", "off": "这次出包不带社区补丁和金手指，游戏按原生画面与帧率运行。重新勾上，下次出包再打入。"]
+    func render(_ m: PatchMatch?, _ name: String, on: Binding<Bool>? = nil) throws -> NSBitmapImageRep {
         _ = NSApplication.shared
         let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../Branding/s-gold.png").standardized
         let img = try XCTUnwrap(NSImage(contentsOf: src))
-        let view = SGradeCardView(match: m, failed: false, zh: true, x: { Self.texts[$0] ?? $0 }, sImage: img)
+        let view = SGradeCardView(match: m, failed: false, zh: true, on: on, x: { Self.texts[$0] ?? $0 }, sImage: img)
             .frame(width: 760).padding(28).background(Color(red: 0.055, green: 0.055, blue: 0.06)).environment(\.colorScheme, .dark)
         let r = ImageRenderer(content: view); r.scale = 2
         let rep = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(r.nsImage?.tiffRepresentation)))
@@ -35,6 +36,13 @@ import XCTest
         var others = PatchMatch(); others.build = "aa11bb22cc33dd44"; others.others = [("1.1.0", ["fps", "widescreen"]), ("1.0.0", ["cheat"])]
         let h = goldPixels(try render(hit, "hit")), o = goldPixels(try render(others, "others")), l = goldPixels(try render(nil, "loading"))
         XCTAssertGreaterThan(h, 0); XCTAssertGreaterThan(h, o, "命中态应比只命中别的版本更亮（金色像素 \(h) 对 \(o)）"); XCTAssertGreaterThan(o, 0); XCTAssertGreaterThan(l, 0)
+    }
+
+    // 出包时打入（v0.4.0：默认勾上、玩家可取消）：勾着同命中态一样亮；取消后卡片不亮（金色像素明显少），内容换成「这次不带」一句
+    func testUncheckedCardDims() throws {
+        var hit = PatchMatch(); hit.build = "d95ec48ffe269b6e"; hit.exact = ["widescreen": 1, "fps": 1, "cheat": 12]
+        let on = goldPixels(try render(hit, "hit_checked", on: .constant(true))), off = goldPixels(try render(hit, "hit_unchecked", on: .constant(false)))
+        XCTAssertGreaterThan(on, off, "取消勾选应不亮（金色像素 \(on) 对 \(off)）"); XCTAssertGreaterThan(off, 0)
     }
 
     // 启动设置里的「S 级优化」组：金色头 + 金色描边卡 + 真的小节与开关行（SGradeSettingsRows，同启动设置一份代码）。

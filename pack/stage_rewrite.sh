@@ -57,7 +57,8 @@ fi
 # 补丁索引目录：S2A_CPATCH_DIRS（冒号分隔）没给就同启动器（pack/jobs/community.py _indexes），S2A_COMMUNITY_DIR（环境 → tools/machine.local；都没有 = 没有社区补丁，不再缺省读开发机数据盘）下 INDEX.tsv 所在目录：
 #   第一轮布局 <包>/full/<名>/INDEX.tsv、第二轮布局 <包>/<类>/INDEX.tsv（10-27 gfxpatches：60fps / ultrawide / other-gfx，之前只认第一轮、整包没进）；名字以 -lite 结尾的包是同轮子集，不收
 CDIR=${S2A_COMMUNITY_DIR:-$(bash "$R/tools/machine.sh" get S2A_COMMUNITY_DIR 2> /dev/null)}
-[ -n "${S2A_CPATCH_DIRS:-}" ] || [ -z "$CDIR" ] || S2A_CPATCH_DIRS=$(for f in "$CDIR"/*/full/*/INDEX.tsv "$CDIR"/*/*/INDEX.tsv; do
+# S2A_CPATCH=none（出包页取消 S 级优化，pack/jobs/patches.py prepare）：不从本机补丁库目录兜底，帧率仓库条目（下面 fps_warehouse）也不读
+[ "${S2A_CPATCH:-}" = none ] || [ -n "${S2A_CPATCH_DIRS:-}" ] || [ -z "$CDIR" ] || S2A_CPATCH_DIRS=$(for f in "$CDIR"/*/full/*/INDEX.tsv "$CDIR"/*/*/INDEX.tsv; do
   [ -f "$f" ] || continue; [[ $f == */*-lite/* ]] && continue; dirname "$f"; done | paste -sd: -)
 # 金手指（11-12 维护者：出包时把能编进包的金手指带上）：S2A_CHEATS_DIRS（冒号分隔，玩家导入的 + 启动器从公开库取的 Atmosphere txt）里改代码的条目
 #   走同一条双路 + 槽（pack/cpatch.py scan_cheats），缺省全关、局内逐条开关；只写可写内存的条目不进包，照旧由运行时 Tamper 执行。

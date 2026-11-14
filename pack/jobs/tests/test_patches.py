@@ -85,6 +85,12 @@ class PatchesTests(unittest.TestCase):
         self.assertEqual([Path(d).name for d in env["S2A_CPATCH_DIRS"].split(os.pathsep)], ["fps", "widescreen"])
         d = Path(env["S2A_PSO_SOURCES_EXTRA"])
         self.assertEqual([(f.name, f.read_bytes()) for f in d.iterdir()], [(hashlib.sha256(seed).hexdigest()[:16] + ".tsv", seed)])
+        # 出包页取消「S 级优化（Beta）」（请求 sgrade = false）：不带社区补丁与金手指、改写阶段整体不编（S2A_CPATCH=none），管线种子照带
+        self.c.r = {"sgrade": False}
+        env = {"S2A_CPATCH_DIRS": "x", "S2A_CHEATS_DIRS": "y"}
+        patches.prepare(self.c, dict(id=GID), self.t, env)
+        self.assertEqual(env, {"S2A_CPATCH": "none", "S2A_PSO_SOURCES_EXTRA": str(d)})
+        self.c.r = {}
         self.bundles[f"g/{GID}"].pop(); self.publish()
         env = {}
         patches.prepare(self.c, dict(id=GID), self.t, env)

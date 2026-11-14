@@ -158,6 +158,8 @@ def _run_step(c, child, gid, platform, plan, location, followUp):
         request["spaceOverride"] = True
     if platform == "iphone" and plan.get("deviceTarget"):
         request["target"] = plan["deviceTarget"]
+    if plan.get("sgrade") is False:   # 出包页取消「S 级优化（Beta）」：各平台都不带社区补丁与金手指（pack/jobs/patches.py prepare）
+        request["sgrade"] = False
     if followUp:
         request["followUp"] = True
     path = c.logs / "jobs" / (child + ".request.json")

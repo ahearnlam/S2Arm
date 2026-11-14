@@ -1456,6 +1456,8 @@
       {"id": "export.sgrade.hit.gfx", "zh-Hans": "画面 {0} 条，只打入 Mac 版并默认开启", "en": "{0} graphics patch(es), added to the Mac version only and on by default"},
       {"id": "export.sgrade.hit.cheat", "zh-Hans": "金手指 {0} 条，打入后默认关，进游戏后可逐条打开", "en": "{0} cheat(s), added but off by default; turn each on in the game"},
       {"id": "export.sgrade.hit.note", "zh-Hans": "开着补丁如遇到不兼容导致游戏崩溃，下次启动会自动将崩溃补丁关掉以确保您正常游戏。", "en": "If a patch is incompatible and makes the game crash, it is turned off automatically the next time you launch, so you can keep playing."},
+      {"id": "export.sgrade.toggle", "zh-Hans": "出包时打入", "en": "Add when building"},
+      {"id": "export.sgrade.off", "zh-Hans": "这次出包不带社区补丁和金手指，游戏按原生画面与帧率运行。重新勾上，下次出包再打入。", "en": "This build won't include community patches or cheats; the game runs at its native picture and frame rate. Tick it again to add them next time."},
       {"id": "export.sgrade.others", "zh-Hans": "社区支持的其他版本：", "en": "Other versions with community support: "},
       {"id": "export.sgrade.cat.widescreen", "zh-Hans": "满屏", "en": "full screen"},
       {"id": "export.sgrade.cat.fps", "zh-Hans": "帧率", "en": "frame rate"},

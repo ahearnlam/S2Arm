@@ -233,7 +233,16 @@ def pso_dir(c, game):
 
 
 def prepare(c, game, extraction, env, target="mac"):
-    """出包作业在解包之后、改写之前调（build.prepare：Mac / ipa.build：target="ios"）：金手指与补丁都按真构建号查库，结果交改写阶段的环境变量"""
+    """出包作业在解包之后、改写之前调（build.prepare：Mac / ipa.build：target="ios"）：金手指与补丁都按真构建号查库，结果交改写阶段的环境变量。
+    出包页「S 级优化（Beta）」取消勾选（请求 sgrade = false，v0.4.0 维护者：缺省勾上、玩家可取消）= 这次出包不带社区补丁与金手指（原生方案）：
+    不查库、改写阶段整体不编（S2A_CPATCH=none，pack/stage_rewrite.sh 也不再从本机补丁库目录兜底）；管线种子不是社区补丁，照带"""
+    if (getattr(c, "r", None) or {}).get("sgrade") is False:
+        env["S2A_CPATCH"] = "none"; env.pop("S2A_CPATCH_DIRS", None); env.pop("S2A_CHEATS_DIRS", None)
+        seed = pso_dir(c, game)
+        if seed:
+            env["S2A_PSO_SOURCES_EXTRA"] = seed
+        print("补丁：出包页取消了 S 级优化，这次不带社区补丁与金手指", file=sys.stderr)
+        return
     import cheats
     try:
         cheats.fetch(c, game)

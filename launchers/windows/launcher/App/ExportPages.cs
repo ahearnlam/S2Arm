@@ -478,7 +478,13 @@ public sealed partial class EnvironmentWindow
         title.Children.Add(new Border { BorderBrush = new SolidColorBrush(A(SGold, 0.55)), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(999),
             Padding = new Thickness(7, 1.5), VerticalAlignment = VerticalAlignment.Center,
             Child = new TextBlock { Text = "BETA", FontSize = 9.5, FontWeight = FontWeight.Bold, LetterSpacing = 1.4, Foreground = new SolidColorBrush(SGold) } });
-        stack.Children.Add(title);
+        // 出包时打入（v0.4.0 维护者：Beta 功能出包页默认勾上，玩家可取消；取消 = 这次出包不带社区补丁与金手指，同 Mac SGradeCard.swift）
+        var on = !SGradeOff().Contains(game.Id);
+        var check = new CheckBox { Content = T("export.sgrade.toggle"), IsChecked = on, VerticalAlignment = VerticalAlignment.Center, FontSize = 12.5 };
+        check.Click += (_, _) => SetSGrade(game.Id, check.IsChecked == true);
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        head.Children.Add(title); Grid.SetColumn(check, 1); head.Children.Add(check);
+        stack.Children.Add(head);
         var lit = false;
         if (sgradeFailed) stack.Children.Add(Muted(T("export.sgrade.unknown"), 12));
         else if (sgrade is not { } r) stack.Children.Add(Muted(T("export.sgrade.loading"), 12.5));
@@ -518,6 +524,7 @@ public sealed partial class EnvironmentWindow
                 }
             }
         }
+        if (!on) { while (stack.Children.Count > 1) stack.Children.RemoveAt(1); stack.Children.Add(Muted(T("export.sgrade.off"), 12)); lit = false; }
         var size = lit ? 56 : 44;
         var s = new Image { Source = SGoldImage(), Width = size, Height = size, VerticalAlignment = VerticalAlignment.Top, Opacity = lit || sgrade is null ? 1 : 0.7,
             Effect = new DropShadowEffect { Color = SGold, BlurRadius = lit ? 22 : 8, OffsetX = 0, OffsetY = 0, Opacity = lit ? 0.55 : 0.18 } };
@@ -533,6 +540,25 @@ public sealed partial class EnvironmentWindow
             BoxShadow = lit ? BoxShadows.Parse("0 6 22 0 #24EDC46B") : default,
             Child = new Border { CornerRadius = new CornerRadius(16), Background = glow, Padding = new Thickness(22, 20), Child = row0 },
         };
+    }
+
+    // 「出包时打入」取消过的款（按程序号记在私有目录 sgrade-off.json；没记过 = 勾上）
+    private HashSet<string>? sgradeOff;
+    private string SGradeOffPath => Path.Combine(privateRoot, "sgrade-off.json");
+    private HashSet<string> SGradeOff()
+    {
+        if (sgradeOff is not null) return sgradeOff;
+        try { sgradeOff = JsonSerializer.Deserialize<HashSet<string>>(File.ReadAllText(SGradeOffPath)) ?? []; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { sgradeOff = []; }
+        return sgradeOff;
+    }
+    private void SetSGrade(string gameId, bool on)
+    {
+        var set = SGradeOff();
+        if (on) set.Remove(gameId); else set.Add(gameId);
+        try { Directory.CreateDirectory(privateRoot); File.WriteAllText(SGradeOffPath, JsonSerializer.Serialize(set)); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }   // 记不住只影响下次进页面的初值；这次出包照当前勾选
+        Render();
     }
 
     private async Task LoadSGradeAsync(LibraryGame game)
@@ -642,8 +668,12 @@ public sealed partial class EnvironmentWindow
     }
 
     /// <summary>出包页单款：同批量出包走出包编排作业（剃刀 H13），计划只有这一款的 iPhone、不写批次文件</summary>
-    private Task RunPackAsync(LibraryGame game, bool spaceOverride) =>
-        RunExportAsync(ExportStream.InlinePlan(game.Id, game.Name, ["iphone"], packLocation, spaceOverride), batch: false);
+    private Task RunPackAsync(LibraryGame game, bool spaceOverride)
+    {
+        var plan = ExportStream.InlinePlan(game.Id, game.Name, ["iphone"], packLocation, spaceOverride);
+        if (SGradeOff().Contains(game.Id)) plan["sgrade"] = false;   // 出包页取消「S 级优化（Beta）」：这次不带社区补丁与金手指（pack/jobs/patches.py prepare）
+        return RunExportAsync(plan, batch: false);
+    }
 
     // 这一步收到 stepEnded 没有（没收到 = 编排作业在第一步前就结束了：被拒、已有一个在出、取消）；子作业的终态（失败页的原因 / 建议从这里读）
     private bool exportStepEnded;
