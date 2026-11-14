@@ -951,7 +951,9 @@ namespace S2A.Dsh
         internal const long LB_DC = LB_MAXID + 1;
         internal const string RED_BEGIN = "// s2a:samp-emu 4 (S2A.Dsh FsRd)\n";   // 变体格式版本 4（11-03 加折行贴图 s2a_fx：超 Metal 2D 上限的高线性贴图）；3（11-01 表项改 S2ASe、加任意边界色 / 全过滤组合归约），宿主 nvn_mtl.m SE_VERSION 认它：旧版 2 的兜底文件重出
         static readonly Regex s_redCall = R(@"spvDescriptorSet0\.(\w+)\.sample\(");
-        static readonly Regex s_lbCall = R(@"spvDescriptorSet0\.(\w+)\.(?:sample|sample_compare)\(");   // FsLb：比较采样同样加偏置（缺口族 31）
+        // FsLb：比较采样同样加偏置（缺口族 31）。#529 营地阴影：深度贴图按 texture2d 声明时 SPIRV-Cross 写成 spvDepthCast(spvDescriptorSet0.X).sample_compare(...)，
+        //   原先只认直接调用，这一形态的定点深度比较标志、偏置都没加上（玩家同存档实测：左下地面平均亮度 26.22 → 44.71）。贴图成员名在第 1 或第 2 组（Tx）
+        static readonly Regex s_lbCall = R(@"(?:spvDepthCast\(spvDescriptorSet0\.(\w+)\)|spvDescriptorSet0\.(\w+))\.(?:sample|sample_compare)\(");
         static readonly Regex s_redEntry = R(@"^((?:\[\[[^\]]*\]\]\s*)*)(fragment|kernel) (\S+) main0\((.*)\)\n\{\n", RegexOptions.Multiline);
         // 成员的 [[id(N)]] 后面可以还有别的属性（[[id(4), raster_order_group(0)]]，SPIRV-Cross 给片元同步的资源这样写；马力欧派对 超级巨星 10-30）：
         //   三处成员正则与反射（Reflect）同一种写法，只认 [[id(N)]] 会漏掉它们——下一个 id 撞车、带第二属性的贴图不加偏置（审计 1101 18:00 P1-18）
@@ -988,7 +990,7 @@ namespace S2A.Dsh
         static List<int> Starts(string body, Dictionary<string, (string Kind, string Elem)> tex, Regex call = null)
         {
             var l = new List<int>();
-            foreach (Match m in (call ?? s_redCall).Matches(body)) if (tex.ContainsKey(m.Groups[1].Value)) l.Add(m.Index);
+            foreach (Match m in (call ?? s_redCall).Matches(body)) if (tex.ContainsKey(Tx(m))) l.Add(m.Index);
             l.Reverse(); return l;
         }
         /// <summary>= call_at：st 起的采样调用 → (结尾, 参数, 贴图成员)；括号不闭合返回 null</summary>
@@ -1003,8 +1005,10 @@ namespace S2A.Dsh
                 if ((c == ',' && depth == 1) || depth == 0) { args.Add(body[a0..i].Trim()); a0 = i + 1; }
                 i++;
             }
-            return depth != 0 ? null : (i, args, m.Groups[1].Value);
+            return depth != 0 ? null : (i, args, Tx(m));
         }
+        /// <summary>采样调用匹配里的贴图成员名：第一个匹配上的捕获组（s_lbCall 的两种形态各一组；别的调用正则只有第 1 组）</summary>
+        static string Tx(Match m) { for (int g = 1; g < m.Groups.Count; g++) if (m.Groups[g].Success) return m.Groups[g].Value; return ""; }
         /// <summary>= fs_lb：片元 / 计算着色器 main0 里经单个采样器成员的每次采样加该采样器的偏置 b = spvDescriptorSet0.s2a_lb[成员 id]：level(l) → level((l) + b)、bias(x) → bias((x) + b)、
         /// gradient → 两个导数 × precise::exp2(b)、没写 LOD → 片元插 bias(b) / 计算插 level(b)（计算只带 min_lod_clamp(m) 的 → level(max(b, m))）；参数块末尾加 constant float* s2a_lb。没有可改的采样原样返回。
         /// 深度比较采样 sample_compare 同样改（缺口族 31：本机不吃采样器偏置时比较采样的偏置原来丢掉），LOD 参数排在参考值之后；
@@ -1026,7 +1030,8 @@ namespace S2A.Dsh
                 var ca = CallAt(main, st, s_lbCall);
                 if (ca == null) continue;
                 var (i, args, t) = ca.Value;
-                bool cmp = string.CompareOrdinal(main, st + "spvDescriptorSet0.".Length + t.Length, ".sample_compare(", 0, ".sample_compare(".Length) == 0;
+                string head = s_lbCall.Match(main, st).Value;   // 调用头原样（含 spvDepthCast( … ) 包法与方法名、左括号）：改写时照抄
+                bool cmp = head.EndsWith(".sample_compare(", StringComparison.Ordinal);
                 string kind = tex[t].Kind; int k = (kind.EndsWith("_array", StringComparison.Ordinal) ? 3 : 2) + (cmp ? 1 : 0);   // 比较采样：参考值在 LOD 之前
                 var sm = args.Count > 0 ? Full(@"spvDescriptorSet0\.(\w+)", args[0]) : null;
                 if (sm == null || !sm.Success || !smp.ContainsKey(sm.Groups[1].Value) || args.Count < k) continue;
@@ -1050,7 +1055,7 @@ namespace S2A.Dsh
                 }
                 else if (!frag && lods.Count > 0) { var (j, lm) = lods[0]; na[j] = "level(max(" + b + ", " + lm.Groups[2].Value + "))"; }   // 计算、只带 min_lod_clamp(m)：level(max(b, m))
                 else na.Insert(k, frag ? "bias(" + b + ")" : "level(" + b + ")");
-                main = main[..st] + "spvDescriptorSet0." + t + (cmp ? ".sample_compare(" : ".sample(") + string.Join(", ", na) + ")" + main[i..]; n++;
+                main = main[..st] + head + string.Join(", ", na) + ")" + main[i..]; n++;
             }
             if (n == 0) return src;
             src = src[..b0] + main + src[(b1 + 1)..];
