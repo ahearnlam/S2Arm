@@ -122,6 +122,8 @@ def main():
                SWIFTPM_MODULECACHE_OVERRIDE=str(output / "swift-cache"))
     sdk_version = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-version"],
                                           env=env, text=True).strip()
+    # Sparkle 二进制包不在仓库里（公开仓扫描不收二进制包）：构建前按钉死的校验值备到 frontend/Vendor/（本机缓存有就拷，没有下一次）
+    subprocess.run([sys.executable, str(ROOT / "launchers/macos/sparkle_vendor.py")], check=True)
     # --disable-keychain：拉 Sparkle 二进制包时 SwiftPM 缺省去钥匙串找 github.com 凭据，钥匙串弹授权框等人点，无人值守的出包机就一直挂着（11-13 v0.3.10 候选卡 14 分钟）
     command = ["swift", "build", "--disable-sandbox", "--disable-keychain", "--cache-path", str(output / "spm-cache"),
                "--package-path", str(ROOT / "launchers/macos"), "--scratch-path", str(output / "spm"), "-c", "release",
