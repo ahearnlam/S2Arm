@@ -675,7 +675,7 @@ public sealed partial class EnvironmentWindow
         // ---- LEFT: game info panel + disk space ----
         var leftCol = new StackPanel { Spacing = 16 };
         leftCol.Children.Add(GameInfoPanel(game));
-        leftCol.Children.Add(LiveSlot(() => packSpace is { } sp ? SpaceCard(sp) : null));   // 空间事件随时到：每秒刷新这一格
+        leftCol.Children.Add(LiveSlot(() => packRunning && packSpace is { } sp ? SpaceCard(sp) : null));   // 空间事件随时到：每秒刷新这一格；出完就收起（11-14 体验梳理：成功页还挂着出包前的「预计占用」；失败页有自己的「释放空间」）
         twoCol.Children.Add(leftCol);
 
         // ---- RIGHT: heading + overall + steps / results ----
