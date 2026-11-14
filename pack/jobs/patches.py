@@ -139,6 +139,21 @@ def bundle(c, key, cloud, snap, snap_get):
         return []
 
 
+_MANIFEST = {}
+
+
+def version_key(c, gid, main_bid=""):
+    """这款在补丁库里的包版本（老游戏补 S 级优化的记号用，pack/jobs/rewrite_refresh.py sgrade_key）：按程序号的包 + 按主程序构建号的包各自的 sha256
+    （云端清单优先，取不到用随启动器装的快照）。云端清单一个进程只取一次（一次更新核几十款不重复请求）"""
+    if "cloud" not in _MANIFEST:
+        _MANIFEST["cloud"] = cloud_manifest()
+    cloud = _MANIFEST["cloud"]
+    snap, _ = _snapshot(c)
+    keys = [f"g/{gid.upper()}"] + ([f"b/{main_bid[:16].upper()}"] if len(main_bid) >= 16 else [])
+    src = cloud if cloud is not None else snap
+    return hashlib.sha256("|".join(f"{k}={(src.get(k) or {}).get('sha256', '')}" for k in keys).encode()).hexdigest()[:12]
+
+
 def items_for(c, gid, main_bid):
     """这款的条目：按程序号的包 + 按主程序构建号的包（没写程序号、只认构建号的；sdk 等公共模块不按它认：各游戏同一份二进制，
     按它认会串款，11-12 实测暗黑 3 的 sdk 认上古惑狼赛车的帧率补丁）。每条核内容 sha256，对不上的不收"""
@@ -236,7 +251,13 @@ def prepare(c, game, extraction, env, target="mac"):
     """出包作业在解包之后、改写之前调（build.prepare：Mac / ipa.build：target="ios"）：金手指与补丁都按真构建号查库，结果交改写阶段的环境变量。
     出包页「S 级优化（Beta）」取消勾选（请求 sgrade = false，v0.4.0 维护者：缺省勾上、玩家可取消）= 这次出包不带社区补丁与金手指（原生方案）：
     不查库、改写阶段整体不编（S2A_CPATCH=none，pack/stage_rewrite.sh 也不再从本机补丁库目录兜底）；管线种子不是社区补丁，照带"""
-    if (getattr(c, "r", None) or {}).get("sgrade") is False:
+    off = (getattr(c, "r", None) or {}).get("sgrade") is False
+    try:   # 记下这款这次出包的选择：老游戏补 S 级优化（pack/jobs/rewrite_refresh.py）按它决定补不补
+        import layout
+        layout.update_info(c, game["id"].upper(), sgradeOff=off)
+    except Exception:
+        pass
+    if off:
         env["S2A_CPATCH"] = "none"; env.pop("S2A_CPATCH_DIRS", None); env.pop("S2A_CHEATS_DIRS", None)
         seed = pso_dir(c, game)
         if seed:
