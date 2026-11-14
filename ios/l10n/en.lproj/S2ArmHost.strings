@@ -326,11 +326,8 @@
 "diag.prompt.crash" = "The system reported that S2Arm crashed or froze last time";
 "diag.prompt.message" = "%@. This uploads run logs, crash reports and the list of graphics pipelines the games used (shader IDs only) — no saves, keys or game files — and gives you a short code.";
 "diag.prompt.no" = "No thanks";
-"diag.prompt.send" = "Upload to developers";
+"diag.prompt.send" = "Upload";
 "diag.prompt.title" = "Send us diagnostics from last time?";
-"diag.upload" = "Upload to developers";
-"diag.upload.confirm.message" = "This uploads logs from the last few runs, crash reports, device and version info, and the list of graphics pipelines the games used (shader IDs only) — no saves, keys or game files. You’ll get a short code; post it in your GitHub issue or the group so we can find these diagnostics.";
-"diag.upload.confirm.title" = "Upload to developers?";
 "diag.upload.cancelSending" = "Uploading… (tap to cancel)";
 "diag.upload.cancelled" = "Upload cancelled. You can export the diagnostics package and send it to us yourself.";
 "diag.upload.copy" = "Copy code";

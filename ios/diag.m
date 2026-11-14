@@ -496,16 +496,6 @@ void s2a_report_gear_attach(UIView *page) {
     [NSLayoutConstraint activateConstraints:@[[g.widthAnchor constraintEqualToConstant:36], [g.heightAnchor constraintEqualToConstant:36],
         [g.leadingAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.leadingAnchor constant:12], [g.topAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.topAnchor constant:12]]];
 }
-// 「上传给开发者」（四指菜单 / 提示页按钮，主线程调）：先说清会传什么、不传什么，玩家点了才传
-void s2a_diag_upload(void) {
-    UIViewController *host = diag_host();
-    if (g_exporting || !host) return;
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.upload.confirm.title") message:S2AL(@"diag.upload.confirm.message") preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.cancel") style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.upload.go") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; upload_now(); }]];
-    present_over(host, a);
-}
-
 // ---------- MetricKit：崩溃 / 卡顿诊断与退出原因计数（系统在下次启动或之后交来）原样存 Documents/metrickit/ ----------
 // 每类各留最近 20 份（按文件名后缀分：-exit.json 一类，崩溃 / 卡顿 / 其它诊断一类），退出计数不挤掉崩溃现场
 static void mk_trim(NSString *dir, BOOL exits) {

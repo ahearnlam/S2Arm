@@ -299,11 +299,8 @@
 "diag.prompt.crash" = "系統回報上次 S2Arm 當機或卡住了";
 "diag.prompt.message" = "%@。會上傳執行紀錄、當機紀錄和遊戲用過的圖形管線清單（只有著色器編號），不會上傳存檔、金鑰和遊戲檔案；上傳完成後會給你一組短碼。";
 "diag.prompt.no" = "不用了";
-"diag.prompt.send" = "上傳給開發者";
+"diag.prompt.send" = "上傳";
 "diag.prompt.title" = "要把上次的診斷資料傳給我們嗎？";
-"diag.upload" = "上傳給開發者";
-"diag.upload.confirm.message" = "會上傳最近幾次執行的紀錄、當機紀錄、裝置和版本資訊，以及遊戲用過的圖形管線清單（只有著色器編號），不會上傳存檔、金鑰和遊戲檔案。上傳完成後會給你一組短碼，把它貼到 GitHub 討論串或群組裡，我們就能找到這份診斷資料。";
-"diag.upload.confirm.title" = "要上傳給開發者嗎？";
 "diag.upload.cancelSending" = "正在上傳…（點按取消）";
 "diag.upload.cancelled" = "上傳已取消。可以改用匯出診斷包，手動發給我們。";
 "diag.upload.copy" = "複製短碼";
