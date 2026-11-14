@@ -27,7 +27,7 @@ function(s2a_android_host_sources output)
         native/docs_android.c
         # AMediaCodec 视频解码边界（#44 第二刀）：纯 NDK API，无钉版源码，直接进单库。
         codecs/s2a_mc.c
-        native/direct_vk.c native/direct_session.c native/direct_choice.c native/direct_callback.c native/direct_callback.S)
+        native/direct_vk.c native/direct_session.c native/direct/vk_loader_shim.c native/direct_choice.c native/direct_callback.c native/direct_callback.S)
     if(S2A_ANDROID_EXPERIMENTAL_TOUCH)
         list(APPEND sources native/touch_input.c)
     endif()

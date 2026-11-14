@@ -5,6 +5,7 @@
 #include "direct_callback.h"
 #include "direct/selection.h"   // NVN 直连的冻结选择（s2a_direct_lookup 的 nvnBootstrapLoader 分支）
 #include "capprobe/capprobe.h"  // #1456 runtime-lost 回写
+#include "direct/vk_loader_shim.h"  // 窄 shim 的入口表（__wrap_* 在 direct/vk_loader_shim.c）
 S2A_CAPPROBE_RUNTIME_LOST_WEAK_REF;   // 宿主链接单元无 bridge.cpp 时解析为 NULL
 #include <errno.h>
 #include <stdatomic.h>
@@ -321,11 +322,6 @@ static int hook_dir_from_self(char *out, size_t cap) {
 // 每个进程只试一次（探针先试，正式路径复用同一 handle，避免开第二个命名空间）。
 static void *g_custom_loader;
 static int g_custom_attempted;
-static PFN_vkGetInstanceProcAddr g_private_gipa;
-static PFN_vkCreateInstance g_private_create;
-static PFN_vkEnumerateInstanceVersion g_private_version;
-static PFN_vkEnumerateInstanceExtensionProperties g_private_ext;
-static PFN_vkEnumerateInstanceLayerProperties g_private_layer;
 static void *custom_driver_open(const char *state_dir) {
     if (g_custom_attempted) return g_custom_loader;
     g_custom_attempted = 1;
@@ -424,48 +420,18 @@ static void *custom_driver_open(const char *state_dir) {
     fprintf(stderr, "[vk-direct] 自定义驱动已加载：%s%s（来源 %s；hooks 在 %s）\n", driver_dir, library, how, hooks);
     driver_log("adrenotools_open_libvulkan=ok");
     g_custom_loader = handle;
-    g_private_gipa = (PFN_vkGetInstanceProcAddr)dlsym(handle, "vkGetInstanceProcAddr");
-    if (g_private_gipa) {
-        g_private_create = (PFN_vkCreateInstance)g_private_gipa(NULL, "vkCreateInstance");
-        g_private_version = (PFN_vkEnumerateInstanceVersion)g_private_gipa(NULL, "vkEnumerateInstanceVersion");
-        g_private_ext = (PFN_vkEnumerateInstanceExtensionProperties)g_private_gipa(NULL, "vkEnumerateInstanceExtensionProperties");
-        g_private_layer = (PFN_vkEnumerateInstanceLayerProperties)g_private_gipa(NULL, "vkEnumerateInstanceLayerProperties");
+    s2a_vk_loader_shim shim = {0};
+    shim.gipa = (PFN_vkGetInstanceProcAddr)dlsym(handle, "vkGetInstanceProcAddr");
+    if (shim.gipa) {
+        shim.create = (PFN_vkCreateInstance)shim.gipa(NULL, "vkCreateInstance");
+        shim.version = (PFN_vkEnumerateInstanceVersion)shim.gipa(NULL, "vkEnumerateInstanceVersion");
+        shim.ext = (PFN_vkEnumerateInstanceExtensionProperties)shim.gipa(NULL, "vkEnumerateInstanceExtensionProperties");
+        shim.layer = (PFN_vkEnumerateInstanceLayerProperties)shim.gipa(NULL, "vkEnumerateInstanceLayerProperties");
     }
-    driver_log("窄 shim %s", g_private_create ? "就绪" : "不可用");
+    g_s2a_vk_shim = shim;
+    driver_log("窄 shim %s", shim.create ? "就绪" : "不可用");
     return handle;
 }
-
-#ifdef S2A_ANDROID_VK_LOADER_SHIM
-// 窄 shim：只把实例创建这一组入口在“选了驱动”时路由到 adrenotools 的私有 loader；
-// 其余 Vulkan 命令继续走系统 loader（窄调度实验已证明系统 loader 能操作私有实例/设备）。
-// 没选驱动 / 私有 loader 不可用时原样调用系统 loader，默认路径不变。
-extern VKAPI_ATTR VkResult VKAPI_CALL __real_vkEnumerateInstanceVersion(uint32_t *);
-extern VKAPI_ATTR VkResult VKAPI_CALL __real_vkEnumerateInstanceExtensionProperties(const char *, uint32_t *, VkExtensionProperties *);
-extern VKAPI_ATTR VkResult VKAPI_CALL __real_vkEnumerateInstanceLayerProperties(uint32_t *, VkLayerProperties *);
-extern VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateInstance(const VkInstanceCreateInfo *, const VkAllocationCallbacks *, VkInstance *);
-extern VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL __real_vkGetInstanceProcAddr(VkInstance, const char *);
-
-VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkEnumerateInstanceVersion(uint32_t *api) {
-    if (g_private_version) return g_private_version(api);
-    return __real_vkEnumerateInstanceVersion(api);
-}
-VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count, VkExtensionProperties *props) {
-    if (g_private_ext) return g_private_ext(layer, count, props);
-    return __real_vkEnumerateInstanceExtensionProperties(layer, count, props);
-}
-VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkEnumerateInstanceLayerProperties(uint32_t *count, VkLayerProperties *props) {
-    if (g_private_layer) return g_private_layer(count, props);
-    return __real_vkEnumerateInstanceLayerProperties(count, props);
-}
-VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateInstance(const VkInstanceCreateInfo *ci, const VkAllocationCallbacks *alloc, VkInstance *out) {
-    if (g_private_create) return g_private_create(ci, alloc, out);
-    return __real_vkCreateInstance(ci, alloc, out);
-}
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL __wrap_vkGetInstanceProcAddr(VkInstance instance, const char *name) {
-    if (g_private_gipa) return g_private_gipa(instance, name);
-    return __real_vkGetInstanceProcAddr(instance, name);
-}
-#endif
 
 // 隔离探针：只通过 adrenotools 打开驱动、建一个实例、枚举物理设备并打印驱动身份。
 // 不改渲染路径；只用来回答“这个驱动包在 S2Arm 里能不能被 adrenotools 加载”。

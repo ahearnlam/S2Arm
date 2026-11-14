@@ -18,6 +18,27 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 mode=${1:-}
+# 窄 shim 的 wrap 直通用例（#1091 复审）：不设驱动时 5 个入口必须逐条落 __real_*。
+# 只依赖编译器与仓内 Vulkan 头，不需要 lavapipe / validation，放在容器分流之前无条件跑。
+if [ "$(uname -s)" = Linux ]; then
+    shim_out="$repo/build/vk-loader-shim"
+    mkdir -p "$shim_out"
+    cc -D_POSIX_C_SOURCE=200809L -std=c11 -O1 -g -Wall -Wextra -Werror \
+        -DS2A_ANDROID_VK_LOADER_SHIM=1 \
+        -I "$repo/graphics/nvn/third_party/vulkan-headers/include" \
+        -I "$repo/android/native/direct" \
+        "$repo/android/native/direct/vk_loader_shim.c" \
+        "$repo/android/tests/vk/vkfake_driver_stub.c" "$repo/android/tests/vk/t_loader_shim_wrap.c" \
+        -Wl,--wrap=vkEnumerateInstanceVersion \
+        -Wl,--wrap=vkEnumerateInstanceExtensionProperties \
+        -Wl,--wrap=vkEnumerateInstanceLayerProperties \
+        -Wl,--wrap=vkCreateInstance \
+        -Wl,--wrap=vkGetInstanceProcAddr \
+        -o "$shim_out/t_loader_shim_wrap"
+    timeout 30 "$shim_out/t_loader_shim_wrap"
+else
+    echo "窄 shim wrap 直通用例：$(uname -s) 的链接器不支持 -Wl,--wrap，改在 Linux / 离线容器里跑（本机跳过）" >&2
+fi
 if [ "$mode" = "--shown-only" ] && [ -z "${S2A_VULKAN_IMAGE_ID:-}" ]; then
     . "$repo/android/tools/ndk_toolchain.sh"
     ndk=$(s2a_ndk_resolve) || { echo 'NDK 29 missing' >&2; exit 2; }
