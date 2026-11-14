@@ -110,7 +110,7 @@ def _run(c, plan):
             where = dict(gameId=gid, platform=platform, task=child, index=index, count=total)
             c.emit("step", f"出 {item['name']}（{platform}）", step=where)
             outcome = dict(state="failed", message=UNSUPPORTED_MESSAGE) if platform not in SUPPORTED else \
-                _run_step(c, child, gid, platform, plan, location, followUp=platform == "iphone" and bool(rest))
+                _run_step(c, child, gid, platform, dict(plan, sgrade=False) if item.get("sgrade") is False else plan, location, followUp=platform == "iphone" and bool(rest))
         except Cancelled:
             if not getattr(c, "parent_gone", False):
                 with book.edit() as b:   # 玩家取消：正在出的和没开始的记「已取消」，已出好的保留
@@ -158,7 +158,7 @@ def _run_step(c, child, gid, platform, plan, location, followUp):
         request["spaceOverride"] = True
     if platform == "iphone" and plan.get("deviceTarget"):
         request["target"] = plan["deviceTarget"]
-    if plan.get("sgrade") is False:   # 出包页取消「S 级优化（Beta）」：各平台都不带社区补丁与金手指（pack/jobs/patches.py prepare）
+    if plan.get("sgrade") is False:   # 出包页取消「S 级优化（Beta）」（单款：计划顶层；批量：条目 sgrade，按款记住）：各平台都不带社区补丁与金手指（pack/jobs/patches.py prepare）
         request["sgrade"] = False
     if followUp:
         request["followUp"] = True

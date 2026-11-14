@@ -140,6 +140,15 @@ class ExportPlanTests(JobCase):
         result = [e for e in read_events(self.c.private, task) if e["type"] == "result"][-1]
         self.assertEqual((result["state"], result["result"]["pausedReason"], result["result"]["stoppedAt"]), ("paused", "disk_full", 1))
 
+    # 批量出包按款认「出包时打入」（v0.4.0：出包页取消过的款记在条目 sgrade = false）：只有那一款的子作业带 sgrade = false，别的款照旧不带
+    def test_batch_passes_per_game_sgrade_off(self):
+        items = self.two(); items[1]["sgrade"] = False
+        batch.save(self.c.private, batch.create(items))
+        task, path = self.new_request({"source": "batch"})
+        self.assertEqual(self.run_inline(path), 0)
+        seen = [self.seen(f"{task}-{i}") for i in range(1, 5)]
+        self.assertEqual([(r["gameId"], r.get("sgrade")) for r in seen], [(A, None), (A, None), (B, False), (B, False)])
+
     # 一款失败（非磁盘满）不挡后面
     def test_batch_other_failure_does_not_stop_the_rest(self):
         batch.save(self.c.private, batch.create(self.two()))
