@@ -168,7 +168,8 @@ def cs_types(text):
     types = set(re.findall(
         r"\b(?:(?:public|internal|sealed|static|abstract|partial|unsafe|readonly|ref|new|file)\s+)*"
         r"(?:class|interface|struct|enum|record)\s+([A-Za-z_]\w*)", src))
-    eps = set(re.findall(r"\[UnmanagedCallersOnly\(EntryPoint\s*=\s*\"([A-Za-z_]\w*)\"", src))
+    # 导出名在字符串里：从原文取（src 已把字符串清空，原先这一条永远取不到任何 EntryPoint 导出）
+    eps = set(re.findall(r"\[UnmanagedCallersOnly\(EntryPoint\s*=\s*\"([A-Za-z_]\w*)\"", re.sub(r"/\*.*?\*/|//[^\n]*", " ", text, flags=re.S)))
     for m in re.finditer(
             r"\[UnmanagedCallersOnly\]\s*(?:\[[^\]\n]*\]\s*)*(?:public|internal|private|static|extern|unsafe|\s)+"
             r"[\w<>\[\],\. ]+?\s+(\w+)\s*\(", src):
@@ -438,12 +439,17 @@ def corpus(root, names, android=False):
         text = read(Path(root) / f)
         if android and Path(f).suffix in (".c", ".cc", ".cpp", ".h", ".hpp", ".m", ".mm"):
             text = android_known_inactive(text)
+        text = DLSYM_SRC.sub(lambda m: m.group(1) + "S2A_DLSYM__" + m.group(2), text)   # 去字符串之前把 dlsym 取的名字留成标记（DLSYM）
         result[f] = strip_comments(text)
     return result
 
 
 PROTO_TAIL = re.compile(r"\)\s*(?:;|\{)\s*$")
 CALL = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+# 按名字取的入口：dlsym(句柄, "名字")。服务层 C# 的 [UnmanagedCallersOnly] 导出常由共用 C 代码这样取（nvn2.c 取 S2A_CameraSessionOpen）——
+#   那份 C 代码进了哪个平台的链，导出就在哪个平台接了线；原先只认 .cs 里的使用，这类导出一律被判「找不到调用方」
+DLSYM_SRC = re.compile(r'(\bdlsym\s*\([^,()]*,\s*)"([A-Za-z_]\w*)"')   # 原文里的形态（corpus 在去掉字符串之前换成标记）
+DLSYM = re.compile(r"\bS2A_DLSYM__([A-Za-z_]\w*)")
 USE = [re.compile(r"\bnew\s+([A-Za-z_]\w*)"),
        re.compile(r":\s*([A-Za-z_]\w*)\b"),
        re.compile(r"\b([A-Za-z_]\w*)\s*\."),
@@ -468,6 +474,8 @@ def scan_callers(corpus_map):
             for p in USE:
                 for m in p.finditer(l):
                     uses.setdefault(m.group(1), []).append((f, n))
+            for m in DLSYM.finditer(l):
+                calls.setdefault("dlsym:" + m.group(1), []).append((f, n))   # 单独的键：普通 C 调用形不受影响
     return calls, uses
 
 
@@ -487,6 +495,8 @@ def wired_of(mod, syms, has_main, linked, prod_calls, prod_uses, test_calls):
     for s in syms:
         hits += [f"{f}:{n}" for f, n in prod_calls.get(s, []) + (prod_uses.get(s, []) if mod["kind"] in ("service-cs", "gfx-csproj") else [])
                  if not_self(f) and (mod["kind"] not in ("service-cs", "gfx-csproj") or f.endswith(".cs"))]
+        if mod["kind"] in ("service-cs", "gfx-csproj"):   # C# 导出被平台可调到的 C 代码按名字 dlsym 取：算接线（不限 .cs）
+            hits += [f"{f}:{n}" for f, n in prod_calls.get("dlsym:" + s, []) if not_self(f)]
         thits += [f for f, _n in test_calls.get(s, []) if not_self(f)]
     hits = sorted(set(hits))
     if hits:
