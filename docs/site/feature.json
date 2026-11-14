@@ -16,6 +16,14 @@
       "where": {"zh-Hans": "选一款去出包：出包页上金色的「**S 级优化**」卡片列出命中的每一项和作者，右边的「**出包时打入**」默认勾着，不要可以取消。", "en": "Pick a game and go to export: the gold **S-grade** card lists every match and its author; **Build in when exporting** on its right is checked by default, and you can uncheck it."}
     },
     {
+      "image": {"zh-Hans": "feature/sgrade-4.jpg", "en": "feature/sgrade-4-en.jpg"},
+      "kicker": {"zh-Hans": "S 级优化 · 老游戏也能用", "en": "S-grade · Games you already have"},
+      "title": {"zh-Hans": "已经导出的游戏，不用重新出包", "en": "No need to export your games again"},
+      "what": {"zh-Hans": "已经导出到 Mac 和 iPhone 上的游戏，**更新 S2Arm 后自动补上** S 级优化：满屏、帧率、金手指。", "en": "Games already on your Mac or iPhone **pick up S-grade after you update S2Arm**: full screen, frame rate and cheats."},
+      "how": {"zh-Hans": "Mac：下次打开这款就带上。iPhone：在启动器里点**更新 iPhone 上的 S2Arm**，只换程序，游戏不用重推。", "en": "Mac: the next launch of the game brings it in. iPhone: click **Update S2Arm on iPhone** in the launcher; only the app is replaced, games stay."},
+      "where": {"zh-Hans": "Mac 和 iPhone 的游戏库里，封面左上角**亮起金色 S** 的就是已带上的；出包时取消了「出包时打入」的不亮。", "en": "In the Mac and iPhone libraries, a **gold S** at the top left of a cover means it has S-grade. Games exported with \"Build in when exporting\" unchecked don't light up."}
+    },
+    {
       "image": {"zh-Hans": "feature/sgrade-2.jpg", "en": "feature/sgrade-2-en.jpg"},
       "kicker": {"zh-Hans": "S 级优化 · 满屏与帧率", "en": "S-grade · Full screen and frame rate"},
       "title": {"zh-Hans": "画面铺满，帧率翻倍", "en": "Fill the screen, double the frame rate"},
