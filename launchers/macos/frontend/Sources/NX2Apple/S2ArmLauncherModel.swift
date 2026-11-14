@@ -1286,9 +1286,23 @@ public final class S2ArmLauncherModel: ObservableObject {
         let alert = NSAlert()
         alert.messageText = Localizer().t(titleKey)
         alert.informativeText = error.localizedDescription
-        alert.runModal()
+        if Self.bundleIncomplete(error) { offerFullDownload(alert) } else { alert.runModal() }
     }
     func readOK(_ titleKey: String) { failingReads.remove(titleKey) }
+
+    /// 最新完整安装包（GitHub「latest」固定链接，跳到当前最新版的 DMG）
+    static let fullDownloadURL = URL(string: "https://github.com/jhaizhou-ops/S2Arm/releases/latest/download/S2Arm-mac-arm64.dmg")!
+
+    static func bundleIncomplete(_ error: Error) -> Bool { (error as? JobClientError)?.code == JobClientError.bundleIncomplete }
+
+    /// App 包不完整（内置 Python 缺失等）：不只说一句「请重新安装」，直接给「下载完整安装包」按钮，点了用浏览器下载最新 DMG
+    func offerFullDownload(_ alert: NSAlert = NSAlert(), message: String? = nil) {
+        if let message { alert.messageText = Localizer().t("s2arm.bundleIncomplete.title"); alert.informativeText = message }
+        alert.informativeText += "\n\n" + Localizer().t("s2arm.bundleIncomplete.howto")
+        alert.addButton(withTitle: Localizer().t("s2arm.bundleIncomplete.download"))
+        alert.addButton(withTitle: Localizer().t("s2arm.bundleIncomplete.later"))
+        if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(Self.fullDownloadURL) }
+    }
 
     private func explainMissing(_ key: String) {
         let alert = NSAlert()
@@ -1400,6 +1414,7 @@ public final class S2ArmLauncherModel: ObservableObject {
                 self?.finish(.failed, message: "")
             } catch {
                 self?.finish(.failed, message: error.localizedDescription)
+                if Self.bundleIncomplete(error) { self?.offerFullDownload(message: error.localizedDescription) }
             }
         }
     }
