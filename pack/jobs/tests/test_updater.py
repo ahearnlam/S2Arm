@@ -402,6 +402,84 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(updater.seen_state(self.private), {"noticeSeen": "n1"})
 
 
+class FeatureTests(unittest.TestCase):
+    """新功能大窗（docs/site/feature.json）：本机没看过这一期就弹一次（新装、更新上来都算），排在更新弹窗前面；版本不够 / 撤回 / 不给本平台不弹。期望按规则手写"""
+    T = {"zh-Hans": "中", "en": "En"}
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.private = self.root / "private"
+        (self.root / "site/feature").mkdir(parents=True)
+        (self.root / "site/feature/a.jpg").write_bytes(b"jpg")
+        self.write()
+
+    def write(self, **over):
+        page = {"image": "feature/a.jpg", **{k: self.T for k in updater.FEATURE_TEXTS}}
+        data = {"schema": 1, "id": "v0.4.0-x", "minVersion": "0.4.0", "platforms": ["mac", "windows"], "pages": [page, dict(page, image="feature/none.jpg")]}
+        data.update(over)
+        (self.root / "site/feature.json").write_text(json.dumps(data), encoding="utf-8")
+
+    def spot(self, current="0.4.0", platform="mac", withdrawn=()):
+        return updater.feature_spotlight(platform, current, self.root / "site/feature.json", withdrawn)
+
+    def test_pages_need_both_languages_and_an_existing_image(self):
+        f = self.spot()
+        self.assertEqual((f["kind"], f["id"], len(f["pages"])), ("feature", "v0.4.0-x", 1))   # 第二页图不在：丢掉
+        a = str((self.root / "site/feature/a.jpg").resolve())
+        self.assertEqual(f["pages"][0]["image"], {"zh-Hans": a, "en": a})   # 只写一个路径：两种语言同图
+        self.assertEqual(f["pages"][0]["layout"], "detail")
+        self.write(pages=[{"image": "feature/a.jpg", **{k: {"zh-Hans": "中"} for k in updater.FEATURE_TEXTS}}])
+        self.assertIsNone(self.spot())   # 缺英文：这页不要，一页不剩不弹
+        self.write(pages=[{"image": "feature/a.jpg", "title": self.T}])
+        self.assertIsNone(self.spot())   # 说明页只写了一部分文字：不要（不当海报页）
+        self.write(pages=[{"image": "feature/a.jpg"}, {"image": "feature/a.jpg", **{k: self.T for k in updater.FEATURE_TEXTS}}])
+        self.assertEqual([p["layout"] for p in self.spot()["pages"]], ["poster", "detail"])   # 只有图 = 海报页
+        self.write(pages=[{"image": "../private/x.jpg", **{k: self.T for k in updater.FEATURE_TEXTS}}])
+        self.assertIsNone(self.spot())   # 图只认 docs/site 里面的
+
+    def test_image_follows_ui_language(self):
+        (self.root / "site/feature/a_en.jpg").write_bytes(b"jpg")
+        page = {**{k: self.T for k in updater.FEATURE_TEXTS}}
+        self.write(pages=[dict(page, image={"zh-Hans": "feature/a.jpg", "en": "feature/a_en.jpg"}),
+                          dict(page, image={"zh-Hans": "feature/a.jpg", "en": "feature/none.jpg"}),
+                          dict(page, image={"en": "feature/a_en.jpg"})])
+        site = (self.root / "site/feature").resolve()
+        imgs = [p["image"] for p in self.spot()["pages"]]
+        self.assertEqual(imgs, [{"zh-Hans": str(site / "a.jpg"), "en": str(site / "a_en.jpg")},
+                                {"zh-Hans": str(site / "a.jpg"), "en": str(site / "a.jpg")}])   # 英文图不在：用中文；没有中文图：这页不要
+
+    def test_version_platform_and_withdraw(self):
+        self.assertIsNone(self.spot("0.3.10"))                     # 功能还没进这一版：热修不带大窗
+        self.assertIsNotNone(self.spot("0.4.0-dev+abc1234"))        # 开发版按前三段比
+        self.assertIsNotNone(self.spot("0.10.0"))                   # 按数字比，不按字面
+        self.assertIsNone(self.spot(platform="iphone"))
+        self.assertIsNone(self.spot(withdrawn=["v0.4.0-x"]))
+
+    def test_shows_once_before_update_popups(self):
+        f = self.spot()
+        updater.save_json(self.private / "updates/notes/0.4.0.json", {"highlights": [{"zh-Hans": "亮点"}], "sections": []})
+        check = {"available": True, "version": "0.4.1"}
+        r = updater.inbox("mac", "0.4.0", self.private, check, [], f)
+        self.assertEqual((r["popup"]["kind"], r["popup"]["id"]), ("feature", "v0.4.0-x"))   # 新功能先弹，这版说明下次
+        updater.inbox_seen(self.private, feature="v0.4.0-x")
+        self.assertEqual(updater.inbox("mac", "0.4.0", self.private, check, [], f)["popup"]["kind"], "afterUpdate")
+        with self.assertRaises(ValueError):
+            updater.inbox_seen(self.private, feature="../x")
+
+    def test_site_dir_finds_mac_app_engine_snapshot(self):
+        # Mac App：作业在 Contents/Resources/Jobs，随包 docs/site 在旁边的 Resources/Engine 里；Windows：Engine/pack/jobs 往上两级
+        mac = self.root / "S2Arm.app/Contents/Resources"
+        (mac / "Jobs").mkdir(parents=True); (mac / "Engine/docs/site").mkdir(parents=True)
+        self.assertEqual(updater.site_dir(mac / "Jobs"), mac / "Engine/docs/site")
+        win = self.root / "win/Engine"
+        (win / "pack/jobs").mkdir(parents=True); (win / "docs/site").mkdir(parents=True)
+        self.assertEqual(updater.site_dir(win / "pack/jobs"), win / "docs/site")
+
+    def test_fresh_install_without_seen_file_shows_it(self):
+        self.assertFalse((self.private / "updates/seen.json").exists())
+        self.assertEqual(updater.inbox("windows", "0.4.0", self.private, None, [], self.spot(platform="windows"))["popup"]["kind"], "feature")
+
+
 class MirrorTests(Base):
     """查版本先走官网静态清单（updater.MIRROR）、失败回退 GitHub API。期望按规则手写：
     官网验签通过 → 以它为准（新就给、不新就没有），一次都不问 GitHub；官网超时 / 404 / 验签不过 → 问 GitHub；两边都不行 → 报 GitHub 那边的错误码"""

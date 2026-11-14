@@ -34,7 +34,9 @@ INPUTS = ["runtime", "ios", "graphics", "translator", "services", "compat", "pac
           #   把这些编译产物当成改动、拒绝出包——玩家导出 iPhone 版必死在最后一步
           ".gitignore",
           # 启动器公告的随包兜底（pack/jobs/updater.py inbox：官方下载页上的同一份取不到时用它）
-          "docs/site/notice.json"]
+          "docs/site/notice.json",
+          # 新功能大窗的随包内容（updater.py feature_spotlight：文字在 feature.json，图在 feature/）
+          "docs/site/feature.json", "docs/site/feature"]
 
 
 def include_source(relative):

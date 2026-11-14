@@ -77,8 +77,12 @@ public struct JobEnvironment: Equatable {
 
 public struct JobClientError: Error, Equatable, LocalizedError {
     public let message: String
-    public init(_ message: String) { self.message = message }
+    /// 界面据此给出动作（bundle_incomplete：App 包不完整 → 「下载完整安装包」按钮）；没有动作的错误为 nil
+    public let code: String?
+    public init(_ message: String, code: String? = nil) { self.message = message; self.code = code }
     public var errorDescription: String? { message }
+    /// App 包里缺了随包的东西（内置 Python 等）：多半是旧版应用内更新回滚把正在跑的包换掉了一半，只有重装完整包能好
+    public static let bundleIncomplete = "bundle_incomplete"
 }
 
 /// 作业层的一行事件（pack/jobs/core.py emit）。schema 不是 1 的行不认。
@@ -163,7 +167,7 @@ public final class JobClient {
     public func pythonExecutable() throws -> URL {
         let bundled = environment.resources.appendingPathComponent("Runtime/python/bin/python3")
         if fileManager.isExecutableFile(atPath: bundled.path) { return bundled }
-        if environment.engineBundle != nil { throw JobClientError("应用内置 Python 缺失，请重新安装完整应用。") }
+        if environment.engineBundle != nil { throw JobClientError("应用内置 Python 缺失，请重新安装完整应用。", code: JobClientError.bundleIncomplete) }
         if let selected = environment.pythonPath, !selected.isEmpty {
             guard fileManager.isExecutableFile(atPath: selected) else { throw JobClientError("设置中的 Python 不可执行，请重新选择。") }
             return URL(fileURLWithPath: selected)
@@ -251,12 +255,13 @@ public final class JobClient {
         return result?["messages"] is [Any] ? result : nil
     }
 
-    /// 玩家关掉了：update = 「有新版」那版（以后再说），after = 「这版更新了什么」那版，notice = 看过的最新一条公告号
-    public func inboxSeen(update: String? = nil, after: String? = nil, notice: String? = nil) async {
+    /// 玩家关掉了：update = 「有新版」那版（以后再说），after = 「这版更新了什么」那版，notice = 看过的最新一条公告号，feature = 看过的新功能大窗期号
+    public func inboxSeen(update: String? = nil, after: String? = nil, notice: String? = nil, feature: String? = nil) async {
         var command = ["inbox-seen", "--private-root", environment.privateRoot.path]
         if let update { command += ["--update", update] }
         if let after { command += ["--after", after] }
         if let notice { command += ["--notice", notice] }
+        if let feature { command += ["--feature", feature] }
         _ = await runUpdater(command)
     }
 

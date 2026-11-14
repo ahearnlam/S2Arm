@@ -6,7 +6,7 @@
 "cheats.error.deleteFailed" = "没删掉";
 "cheats.error.toggleNotSaved" = "开关没保存";
 "cheats.fixedAddress" = "地址写死，可能不生效";
-"cheats.footer" = "逐条打开，约 1 秒生效，不用重启；改游戏代码的条目出包时已编进游戏。金手指可能影响存档，建议先备份。";
+"cheats.footer" = "逐条打开，约 1 秒生效，不用重启。金手指可能影响存档，建议先备份。";
 "cheats.footer.buildId" = "本游戏版本号（构建号前 16 位）：%@。金手指文件名通常就是它，名字对不上的文件不会生效。";
 "cheats.footer.empty" = "还没有金手指文件，点右上角「导入 txt」。";
 "cheats.import" = "导入 txt";
@@ -19,7 +19,7 @@
 "cheats.status.badInstruction" = "指令有误";
 "cheats.status.execError" = "执行出错";
 "cheats.status.gameNotLoaded" = "游戏未装载";
-"cheats.status.modifiesCode" = "这条要改游戏代码：在电脑上的 S2Arm 里重新装一次这款就能用";
+"cheats.status.modifiesCode" = "要改游戏代码，手机上导入的用不了：在电脑上的 S2Arm 里导入这份 txt，再更新手机上的 S2Arm 就能用";
 "cheats.status.packed" = "已生效";
 "cheats.status.off" = "关";
 "cheats.status.pending" = "等待生效…";
@@ -40,7 +40,7 @@
 "cpatch.state.on" = "已开";
 "cpatch.state.off" = "已关";
 "cpatch.group.gfx" = "画面";
-"cpatch.group.widescreen" = "宽屏";
+"cpatch.group.widescreen" = "满屏";
 "cpatch.item.detail" = "%@\n%@ · 许可 %@%@";
 "cpatch.item.followsFps" = " · 跟随 60 帧开关";
 "cpatch.item.followsFullscreen" = " · 跟随满屏开关";

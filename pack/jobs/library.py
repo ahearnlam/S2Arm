@@ -1347,7 +1347,8 @@ def require_fat32_fits(c, game, loc):
 
 def check_pack_space(c, game, *, compiler_policy=None):
     """打包前的磁盘预检（Mac 打包与打 iPhone 包共用）：IPA 可先按已有保留规则尝试回收；发最终 space 事件（存任务文件），再按预算拦。
-    请求带 spaceOverride: true（玩家在失败页点「仍然继续」）：不拦，只记一条警告；真写满由出包中途的磁盘写满识别报错"""
+    预估不够一律不拦、只记一条警告（11-14 不许堵门）；请求带 spaceOverride: true 且这款有上一次的 iPhone 包时先删掉它腾地方（旧版失败页「仍然继续」）。
+    真写满由出包中途的磁盘写满识别报错"""
     require_fat32_fits(c, game, _pack_paths(c, game)[0])
     budget = space_budget(c, game)
     cache_result = None
@@ -1386,10 +1387,9 @@ def check_pack_space(c, game, *, compiler_policy=None):
                 continue
             c.diagnostic(head + "已按你的选择仍然继续。", code="disk_full", severity="warning")
             continue
-        # 确认文案只写玩家据此做选择的事（维护者 11-12）：点「仍然继续」会先删旧包、腾多少；预计偏保守可以试
-        if reclaim:
-            raise Failure(head + f"点「仍然继续」会先删掉这款上一次的 iPhone 包，腾出 {_gb(reclaim)}；也可以清出空间后点「重试」。", code="disk_full")
-        raise Failure(head + "清出空间后点「重试」；预计偏保守，也可以点「仍然继续」试试。", code="disk_full")
+        # 预估只当提示、不拦（不许堵门，11-14 定：预估偏保守，玩家盘可能其实够）：记一条警告照常开工；真写满时写盘报 ENOSPC，那才停、归 disk_full
+        c.diagnostic(head + "这是预估，照常开工；真写满时会停下，释放空间后重试即可。"
+                     + (f"这款上一次的 iPhone 包（{_gb(reclaim)}）出完会被新包换掉。" if reclaim else ""), code="disk_full", severity="warning")
 
     return budget
 
