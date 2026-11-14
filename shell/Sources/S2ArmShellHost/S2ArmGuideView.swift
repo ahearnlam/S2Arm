@@ -113,7 +113,7 @@ struct S2ArmGuideView: View {
                  "Or set them up before playing: **select a game → Game settings → Cheats**."]
         default: ["**Gear at the top right → Report a problem** at the bottom.",
                   "Add a sentence about what happened (optional) and upload. You get a short code starting with **D-**; paste it in the group chat or a GitHub issue.",
-                  "In a game: **top-left gear → Settings… → Diagnostics → Upload to developers**."]
+                  "In a game: **top-left gear → Report a problem**."]
         }
     }
 

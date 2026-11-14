@@ -13835,18 +13835,18 @@
         }
       }
     },
-    "In a game: **top-left gear → Settings… → Diagnostics → Upload to developers**.": {
+    "In a game: **top-left gear → Report a problem**.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "In a game: **top-left gear → Settings… → Diagnostics → Upload to developers**."
+            "value": "In a game: **top-left gear → Report a problem**."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "游戏里：**左上角齿轮 → 设置… → 诊断 → 上传给开发者**。"
+            "value": "游戏里：**左上角齿轮 → 故障报修**。"
           }
         }
       }
