@@ -171,7 +171,9 @@ class RewriteRefreshTests(unittest.TestCase):
         import build
         mac = self.tmp / "img-mac"; (mac / "exefs").mkdir(parents=True)
         (mac / "exefs/main").write_bytes(b"x"); (mac / "exefs/main.npdm").write_bytes(b"x")
-        with patch.object(build, "extract_valid", return_value=False), patch.object(rr.layout, "image_mac", return_value=mac):
+        import sgrade
+        with patch.object(sgrade, "saved_program", return_value=None), patch.object(build, "extract_valid", return_value=False), \
+             patch.object(rr.layout, "image_mac", return_value=mac):
             self.assertEqual(rr.original_exefs(self.c, {"id": "0100A"}, self.tmp), mac / "exefs")
 
     # 补不上的款不悄悄跳过：点名、说怎么补

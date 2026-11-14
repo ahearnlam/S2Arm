@@ -516,7 +516,7 @@ OPERATION_NAMES = {"build": "出包", "ipa": "打 iPhone 包", "import": "导入
                    "remove": "移出游戏库", "delete": "删除游戏", "clean": "清理空间", "spaceFree": "释放空间", "launch": "开始游戏",
                    "moveGame": "移动游戏", "relinkGame": "重新关联原件", "forgetGame": "忘掉游戏", "setup": "设置游戏库", "keys": "导入密钥",
                    "saveBackup": "备份存档", "saveRestore": "恢复存档", "saveInspect": "查看存档", "saveStatus": "读存档状态",
-                   "communitySave": "保存补丁设置", "diagnostics": "导出诊断"}
+                   "communitySave": "保存补丁设置", "diagnostics": "导出诊断", "sgradeScan": "查找可升级 S 级优化的游戏", "sgradeMac": "给 Mac 游戏补上 S 级优化"}
 
 
 def describe_holder(info):

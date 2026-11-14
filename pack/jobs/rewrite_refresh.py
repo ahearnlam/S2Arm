@@ -61,6 +61,10 @@ def original_exefs(c, game, work):
     顺序：共用解包目录 → 这款的 Mac 运行版本自带的 exefs/（出过 Mac 版的款，原件删了 / 外接盘没插也能补 S 级优化）→ 从原件只解 exefs"""
     from build import extract_valid, shared_dir
     from library import selected_packages, source_path
+    import sgrade
+    saved = sgrade.saved_program(c, game["id"])   # 出包时存下的原始程序（pack/jobs/sgrade.py）：有就不用回原件
+    if saved:
+        return saved
     if extract_valid(c, game):
         return shared_dir(c, game) / "extract/exefs"
     try:
@@ -78,7 +82,9 @@ def original_exefs(c, game, work):
     import toolchain
     out = work / "x"
     c.run(["dotnet", toolchain.reader(c), c.keys, out, "--exefs-only", "--title-id=" + game["id"], *map(str, paths)], work / "exefs.log", c.env())
-    return out / "exefs" if (out / "exefs/main").is_file() else None
+    if not (out / "exefs/main").is_file():
+        return None
+    return sgrade.save_program(c, game["id"], out / "exefs") or out / "exefs"   # 从原件解出来的存一份，下次不用回原件
 
 
 def rewrite_env(c, kit, exefs, target):
