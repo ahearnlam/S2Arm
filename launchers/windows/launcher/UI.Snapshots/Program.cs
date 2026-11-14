@@ -71,7 +71,7 @@ void SaveW(string name, Action<EnvironmentWindow> setup)
     setup(welcome);
     SetW(welcome, "page", "library");
     CallW(welcome, "Render");
-    Dispatcher.UIThread.RunJobs();
+    Settle();
     var bmp = welcome.CaptureRenderedFrame();
     if (bmp is not null) { using var s = File.OpenWrite(Path.Combine(outDir, name + ".png")); bmp.Save(s); Console.WriteLine("  saved: " + name); }
     else Console.WriteLine("  WARN no frame: " + name);
@@ -138,10 +138,18 @@ pack.Width = 1280; pack.Height = 900;
 pack.Show();
 Dispatcher.UIThread.RunJobs();
 
+// 让过渡动画（如折叠箭头 0→180° 旋转）走完再截，否则截到半转的箭头像个「厂」字
+void Settle()
+{
+    Dispatcher.UIThread.RunJobs();
+    var until = DateTime.UtcNow.AddMilliseconds(600);
+    while (DateTime.UtcNow < until) { AvaloniaHeadlessPlatform.ForceRenderTimerTick(); Dispatcher.UIThread.RunJobs(); Thread.Sleep(20); }
+}
+
 void SaveP(string name, Action setup)
 {
     setup();
-    Dispatcher.UIThread.RunJobs();
+    Settle();
     var bmp = pack.CaptureRenderedFrame();
     if (bmp is not null) { using var s = File.OpenWrite(Path.Combine(outDir, name + ".png")); bmp.Save(s); Console.WriteLine("  saved: " + name); }
     else Console.WriteLine("  WARN no frame: " + name);
